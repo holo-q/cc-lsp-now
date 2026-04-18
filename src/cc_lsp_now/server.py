@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from cc_lsp_now.lsp import LspClient, LspError, file_uri
 
+log = logging.getLogger(__name__)
+
 mcp = FastMCP("lsp-bridge")
 
-_client: LspClient | None = None
+_primary: LspClient | None = None
+_fallback: LspClient | None = None
+# Methods the primary returned -32601 for — skip straight to fallback next time
+_primary_unsupported: set[str] = set()
 
 SEVERITY_LABELS = {1: "Error", 2: "Warning", 3: "Info", 4: "Hint"}
 
@@ -23,17 +30,64 @@ SYMBOL_KIND_LABELS = {
 }
 
 
-async def _get_client() -> LspClient:
-    global _client
-    if _client is None:
+async def _get_primary() -> LspClient:
+    global _primary
+    if _primary is None:
         command = os.environ.get("LSP_COMMAND")
         if not command:
             raise RuntimeError("LSP_COMMAND environment variable is required")
         args = os.environ.get("LSP_ARGS", "").split() if os.environ.get("LSP_ARGS") else []
         root = os.environ.get("LSP_ROOT", os.getcwd())
-        _client = LspClient([command, *args], root)
-        await _client.start()
-    return _client
+        _primary = LspClient([command, *args], root)
+        await _primary.start()
+    return _primary
+
+
+async def _get_fallback() -> LspClient | None:
+    global _fallback
+    fallback_cmd = os.environ.get("LSP_FALLBACK_COMMAND")
+    if not fallback_cmd:
+        return None
+    if _fallback is None:
+        args = (
+            os.environ.get("LSP_FALLBACK_ARGS", "").split()
+            if os.environ.get("LSP_FALLBACK_ARGS") else []
+        )
+        root = os.environ.get("LSP_ROOT", os.getcwd())
+        _fallback = LspClient([fallback_cmd, *args], root)
+        await _fallback.start()
+    return _fallback
+
+
+async def _request(method: str, params: dict | None, *, uri: str | None = None) -> Any:
+    """Route a request through primary, falling back on -32601 (method not found).
+
+    Caches unsupported methods so subsequent calls skip the primary entirely.
+    """
+    if method in _primary_unsupported:
+        fallback = await _get_fallback()
+        if fallback is None:
+            raise LspError(-32601, f"{method} not supported and no fallback configured")
+        if uri:
+            await fallback.ensure_document(uri)
+        return await fallback.request(method, params)
+
+    primary = await _get_primary()
+    if uri:
+        await primary.ensure_document(uri)
+    try:
+        return await primary.request(method, params)
+    except LspError as e:
+        if e.code != -32601:
+            raise
+        _primary_unsupported.add(method)
+        log.info("Primary LSP does not support %s, routing to fallback", method)
+        fallback = await _get_fallback()
+        if fallback is None:
+            raise
+        if uri:
+            await fallback.ensure_document(uri)
+        return await fallback.request(method, params)
 
 
 def _pos(line: int, col: int) -> dict:
@@ -105,14 +159,11 @@ def _format_symbol(sym: dict) -> dict:
 async def lsp_type_definition(file_path: str, line: int, col: int) -> str:
     """Go to the type definition of a symbol."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/typeDefinition", {
+        result = await _request("textDocument/typeDefinition", {
             "textDocument": {"uri": uri},
             "position": _pos(line, col),
-        })
+        }, uri=uri)
         return json.dumps(_normalize_locations(result), indent=2)
     except LspError as e:
         return f"LSP error: {e}"
@@ -122,14 +173,11 @@ async def lsp_type_definition(file_path: str, line: int, col: int) -> str:
 async def lsp_completion(file_path: str, line: int, col: int) -> str:
     """Get completion suggestions at a position."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/completion", {
+        result = await _request("textDocument/completion", {
             "textDocument": {"uri": uri},
             "position": _pos(line, col),
-        })
+        }, uri=uri)
         if not result:
             return json.dumps([], indent=2)
 
@@ -151,14 +199,11 @@ async def lsp_completion(file_path: str, line: int, col: int) -> str:
 async def lsp_signature_help(file_path: str, line: int, col: int) -> str:
     """Get signature help at a position (function parameter info)."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/signatureHelp", {
+        result = await _request("textDocument/signatureHelp", {
             "textDocument": {"uri": uri},
             "position": _pos(line, col),
-        })
+        }, uri=uri)
         if not result or not result.get("signatures"):
             return "No signature help available."
 
@@ -193,13 +238,10 @@ async def lsp_signature_help(file_path: str, line: int, col: int) -> str:
 async def lsp_document_symbols(file_path: str) -> str:
     """Get all symbols in a document (outline)."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/documentSymbol", {
+        result = await _request("textDocument/documentSymbol", {
             "textDocument": {"uri": uri},
-        })
+        }, uri=uri)
         if not result:
             return json.dumps([], indent=2)
         return json.dumps([_format_symbol(s) for s in result], indent=2)
@@ -211,17 +253,14 @@ async def lsp_document_symbols(file_path: str) -> str:
 async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool = True) -> str:
     """Format an entire document."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/formatting", {
+        result = await _request("textDocument/formatting", {
             "textDocument": {"uri": uri},
             "options": {
                 "tabSize": tab_size,
                 "insertSpaces": insert_spaces,
             },
-        })
+        }, uri=uri)
         if not result:
             return json.dumps([], indent=2)
 
@@ -240,15 +279,12 @@ async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool 
 async def lsp_rename(file_path: str, line: int, col: int, new_name: str) -> str:
     """Rename a symbol across the workspace."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/rename", {
+        result = await _request("textDocument/rename", {
             "textDocument": {"uri": uri},
             "position": _pos(line, col),
             "newName": new_name,
-        })
+        }, uri=uri)
         if not result:
             return json.dumps({"changes": {}}, indent=2)
 
@@ -281,14 +317,11 @@ async def lsp_rename(file_path: str, line: int, col: int, new_name: str) -> str:
 async def lsp_prepare_rename(file_path: str, line: int, col: int) -> str:
     """Check if a symbol can be renamed and get its current range/name."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/prepareRename", {
+        result = await _request("textDocument/prepareRename", {
             "textDocument": {"uri": uri},
             "position": _pos(line, col),
-        })
+        }, uri=uri)
         if not result:
             return "Cannot rename at this position."
 
@@ -314,16 +347,9 @@ async def lsp_code_actions(
 ) -> str:
     """Get available code actions (quick fixes, refactorings) for a range."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        range_obj = {
-            "start": _pos(start_line, start_col),
-            "end": _pos(end_line, end_col),
-        }
-
-        stored = client.diagnostics.get(uri, [])
+        primary = await _get_primary()
+        stored = primary.diagnostics.get(uri, [])
         range_diagnostics = []
         for d in stored:
             d_range = d.get("range", {})
@@ -333,11 +359,14 @@ async def lsp_code_actions(
                     d_end.get("line", 0) <= end_line - 1):
                 range_diagnostics.append(d)
 
-        result = await client.request("textDocument/codeAction", {
+        result = await _request("textDocument/codeAction", {
             "textDocument": {"uri": uri},
-            "range": range_obj,
+            "range": {
+                "start": _pos(start_line, start_col),
+                "end": _pos(end_line, end_col),
+            },
             "context": {"diagnostics": range_diagnostics},
-        })
+        }, uri=uri)
         if not result:
             return json.dumps([], indent=2)
 
@@ -362,18 +391,15 @@ async def lsp_code_actions(
 async def lsp_call_hierarchy_incoming(file_path: str, line: int, col: int) -> str:
     """Find all callers of a function/method."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        items = await client.request("textDocument/prepareCallHierarchy", {
+        items = await _request("textDocument/prepareCallHierarchy", {
             "textDocument": {"uri": uri},
             "position": _pos(line, col),
-        })
+        }, uri=uri)
         if not items:
             return json.dumps([], indent=2)
 
-        result = await client.request("callHierarchy/incomingCalls", {"item": items[0]})
+        result = await _request("callHierarchy/incomingCalls", {"item": items[0]})
         if not result:
             return json.dumps([], indent=2)
 
@@ -398,18 +424,15 @@ async def lsp_call_hierarchy_incoming(file_path: str, line: int, col: int) -> st
 async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> str:
     """Find all functions/methods called by a function/method."""
     try:
-        client = await _get_client()
         uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        items = await client.request("textDocument/prepareCallHierarchy", {
+        items = await _request("textDocument/prepareCallHierarchy", {
             "textDocument": {"uri": uri},
             "position": _pos(line, col),
-        })
+        }, uri=uri)
         if not items:
             return json.dumps([], indent=2)
 
-        result = await client.request("callHierarchy/outgoingCalls", {"item": items[0]})
+        result = await _request("callHierarchy/outgoingCalls", {"item": items[0]})
         if not result:
             return json.dumps([], indent=2)
 
