@@ -40,20 +40,21 @@ DISABLED_BY_DEFAULT = {"formatting"}
 
 
 async def _get_primary() -> LspClient:
-    global _primary
+    global _primary, _primary_name
     if _primary is None:
         command = os.environ.get("LSP_COMMAND")
         if not command:
             raise RuntimeError("LSP_COMMAND environment variable is required")
         args = os.environ.get("LSP_ARGS", "").split() if os.environ.get("LSP_ARGS") else []
         root = os.environ.get("LSP_ROOT", os.getcwd())
+        _primary_name = command
         _primary = LspClient([command, *args], root)
         await _primary.start()
     return _primary
 
 
 async def _get_fallback() -> LspClient | None:
-    global _fallback
+    global _fallback, _fallback_name
     fallback_cmd = os.environ.get("LSP_FALLBACK_COMMAND")
     if not fallback_cmd:
         return None
@@ -63,25 +64,35 @@ async def _get_fallback() -> LspClient | None:
             if os.environ.get("LSP_FALLBACK_ARGS") else []
         )
         root = os.environ.get("LSP_ROOT", os.getcwd())
+        _fallback_name = fallback_cmd
         _fallback = LspClient([fallback_cmd, *args], root)
         await _fallback.start()
     return _fallback
 
 
+_last_server: str = ""
+_primary_name: str = ""
+_fallback_name: str = ""
+
+
 async def _request(method: str, params: dict | None, *, uri: str | None = None) -> Any:
+    global _last_server
     if method in _primary_unsupported:
         fallback = await _get_fallback()
         if fallback is None:
             raise LspError(-32601, f"{method} not supported and no fallback configured")
         if uri:
             await fallback.ensure_document(uri)
+        _last_server = f"{_fallback_name} (fallback)"
         return await fallback.request(method, params)
 
     primary = await _get_primary()
     if uri:
         await primary.ensure_document(uri)
     try:
-        return await primary.request(method, params)
+        result = await primary.request(method, params)
+        _last_server = _primary_name
+        return result
     except LspError as e:
         if e.code != -32601:
             raise
@@ -92,7 +103,12 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
             raise
         if uri:
             await fallback.ensure_document(uri)
+        _last_server = f"{_fallback_name} (fallback)"
         return await fallback.request(method, params)
+
+
+def _header(method: str) -> str:
+    return f"[{_last_server} {method}]"
 
 
 # --- Formatting helpers ---
@@ -551,23 +567,38 @@ async def lsp_workspace_symbols(query: str) -> str:
 
 # --- Tool registry ---
 
-_ALL_TOOLS: dict[str, Any] = {
-    "diagnostics": lsp_diagnostics,
-    "hover": lsp_hover,
-    "definition": lsp_definition,
-    "references": lsp_references,
-    "workspace_symbols": lsp_workspace_symbols,
-    "type_definition": lsp_type_definition,
-    "completion": lsp_completion,
-    "signature_help": lsp_signature_help,
-    "document_symbols": lsp_document_symbols,
-    "formatting": lsp_formatting,
-    "rename": lsp_rename,
-    "prepare_rename": lsp_prepare_rename,
-    "code_actions": lsp_code_actions,
-    "call_hierarchy_incoming": lsp_call_hierarchy_incoming,
-    "call_hierarchy_outgoing": lsp_call_hierarchy_outgoing,
+_ALL_TOOLS: dict[str, tuple[Any, str]] = {
+    "diagnostics": (lsp_diagnostics, "textDocument/diagnostic"),
+    "hover": (lsp_hover, "textDocument/hover"),
+    "definition": (lsp_definition, "textDocument/definition"),
+    "references": (lsp_references, "textDocument/references"),
+    "workspace_symbols": (lsp_workspace_symbols, "workspace/symbol"),
+    "type_definition": (lsp_type_definition, "textDocument/typeDefinition"),
+    "completion": (lsp_completion, "textDocument/completion"),
+    "signature_help": (lsp_signature_help, "textDocument/signatureHelp"),
+    "document_symbols": (lsp_document_symbols, "textDocument/documentSymbol"),
+    "formatting": (lsp_formatting, "textDocument/formatting"),
+    "rename": (lsp_rename, "textDocument/rename"),
+    "prepare_rename": (lsp_prepare_rename, "textDocument/prepareRename"),
+    "code_actions": (lsp_code_actions, "textDocument/codeAction"),
+    "call_hierarchy_incoming": (lsp_call_hierarchy_incoming, "callHierarchy/incomingCalls"),
+    "call_hierarchy_outgoing": (lsp_call_hierarchy_outgoing, "callHierarchy/outgoingCalls"),
 }
+
+
+def _wrap_with_header(func: Any, method: str) -> Any:
+    import functools
+
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> str:
+        global _last_server
+        _last_server = ""
+        result = await func(*args, **kwargs)
+        header = _header(method) if _last_server else f"[{method}]"
+        return f"{header}\n{result}"
+
+    return wrapper
+
 
 _tools_env = os.environ.get("LSP_TOOLS", "")
 _disabled_env = os.environ.get("LSP_DISABLED_TOOLS", "")
@@ -582,9 +613,9 @@ else:
 if _disabled_env:
     _enabled -= {t.strip() for t in _disabled_env.split(",")}
 
-for _name, _func in _ALL_TOOLS.items():
+for _name, (_func, _method) in _ALL_TOOLS.items():
     if _name in _enabled:
-        mcp.tool()(_func)
+        mcp.tool()(_wrap_with_header(_func, _method))
 
 
 def run() -> None:
