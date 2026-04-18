@@ -28,7 +28,7 @@ SYMBOL_KIND_LABELS = {
     25: "Operator", 26: "TypeParameter",
 }
 
-DISABLED_BY_DEFAULT = {"formatting"}
+DISABLED_BY_DEFAULT = {"formatting", "call_hierarchy_incoming", "call_hierarchy_outgoing"}
 
 
 async def _get_primary() -> LspClient:
