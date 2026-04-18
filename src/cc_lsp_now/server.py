@@ -15,7 +15,6 @@ mcp = FastMCP("lsp-bridge")
 
 _primary: LspClient | None = None
 _fallback: LspClient | None = None
-# Methods the primary returned -32601 for — skip straight to fallback next time
 _primary_unsupported: set[str] = set()
 
 SEVERITY_LABELS = {1: "Error", 2: "Warning", 3: "Info", 4: "Hint"}
@@ -28,6 +27,8 @@ SYMBOL_KIND_LABELS = {
     20: "Key", 21: "Null", 22: "EnumMember", 23: "Struct", 24: "Event",
     25: "Operator", 26: "TypeParameter",
 }
+
+DISABLED_BY_DEFAULT = {"formatting"}
 
 
 async def _get_primary() -> LspClient:
@@ -60,10 +61,6 @@ async def _get_fallback() -> LspClient | None:
 
 
 async def _request(method: str, params: dict | None, *, uri: str | None = None) -> Any:
-    """Route a request through primary, falling back on -32601 (method not found).
-
-    Caches unsupported methods so subsequent calls skip the primary entirely.
-    """
     if method in _primary_unsupported:
         fallback = await _get_fallback()
         if fallback is None:
@@ -155,7 +152,9 @@ def _format_symbol(sym: dict) -> dict:
     return out
 
 
-@mcp.tool()
+# --- Tool implementations (not decorated — registered conditionally below) ---
+
+
 async def lsp_type_definition(file_path: str, line: int, col: int) -> str:
     """Go to the type definition of a symbol."""
     try:
@@ -169,7 +168,6 @@ async def lsp_type_definition(file_path: str, line: int, col: int) -> str:
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_completion(file_path: str, line: int, col: int) -> str:
     """Get completion suggestions at a position."""
     try:
@@ -195,7 +193,6 @@ async def lsp_completion(file_path: str, line: int, col: int) -> str:
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_signature_help(file_path: str, line: int, col: int) -> str:
     """Get signature help at a position (function parameter info)."""
     try:
@@ -234,7 +231,6 @@ async def lsp_signature_help(file_path: str, line: int, col: int) -> str:
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_document_symbols(file_path: str) -> str:
     """Get all symbols in a document (outline)."""
     try:
@@ -249,7 +245,6 @@ async def lsp_document_symbols(file_path: str) -> str:
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool = True) -> str:
     """Format an entire document."""
     try:
@@ -275,7 +270,6 @@ async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool 
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_rename(file_path: str, line: int, col: int, new_name: str) -> str:
     """Rename a symbol across the workspace."""
     try:
@@ -313,7 +307,6 @@ async def lsp_rename(file_path: str, line: int, col: int, new_name: str) -> str:
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_prepare_rename(file_path: str, line: int, col: int) -> str:
     """Check if a symbol can be renamed and get its current range/name."""
     try:
@@ -337,7 +330,6 @@ async def lsp_prepare_rename(file_path: str, line: int, col: int) -> str:
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_code_actions(
     file_path: str,
     start_line: int,
@@ -387,7 +379,6 @@ async def lsp_code_actions(
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_call_hierarchy_incoming(file_path: str, line: int, col: int) -> str:
     """Find all callers of a function/method."""
     try:
@@ -420,7 +411,6 @@ async def lsp_call_hierarchy_incoming(file_path: str, line: int, col: int) -> st
         return f"LSP error: {e}"
 
 
-@mcp.tool()
 async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> str:
     """Find all functions/methods called by a function/method."""
     try:
@@ -451,6 +441,39 @@ async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> st
         return json.dumps(callees, indent=2)
     except LspError as e:
         return f"LSP error: {e}"
+
+
+# --- Tool registry: only enabled tools get registered with the MCP server ---
+
+_ALL_TOOLS: dict[str, Any] = {
+    "type_definition": lsp_type_definition,
+    "completion": lsp_completion,
+    "signature_help": lsp_signature_help,
+    "document_symbols": lsp_document_symbols,
+    "formatting": lsp_formatting,
+    "rename": lsp_rename,
+    "prepare_rename": lsp_prepare_rename,
+    "code_actions": lsp_code_actions,
+    "call_hierarchy_incoming": lsp_call_hierarchy_incoming,
+    "call_hierarchy_outgoing": lsp_call_hierarchy_outgoing,
+}
+
+_tools_env = os.environ.get("LSP_TOOLS", "")
+_disabled_env = os.environ.get("LSP_DISABLED_TOOLS", "")
+
+if _tools_env == "all":
+    _enabled = set(_ALL_TOOLS)
+elif _tools_env:
+    _enabled = {t.strip() for t in _tools_env.split(",")}
+else:
+    _enabled = set(_ALL_TOOLS) - DISABLED_BY_DEFAULT
+
+if _disabled_env:
+    _enabled -= {t.strip() for t in _disabled_env.split(",")}
+
+for _name, _func in _ALL_TOOLS.items():
+    if _name in _enabled:
+        mcp.tool()(_func)
 
 
 def run() -> None:
