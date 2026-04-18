@@ -28,6 +28,14 @@ SYMBOL_KIND_LABELS = {
     25: "Operator", 26: "TypeParameter",
 }
 
+COMPLETION_KIND_LABELS = {
+    1: "Text", 2: "Method", 3: "Function", 4: "Constructor", 5: "Field",
+    6: "Variable", 7: "Class", 8: "Interface", 9: "Module", 10: "Property",
+    11: "Unit", 12: "Value", 13: "Enum", 14: "Keyword", 15: "Snippet",
+    16: "Color", 17: "File", 18: "Reference", 19: "Folder", 20: "EnumMember",
+    21: "Constant", 22: "Struct", 23: "Event", 24: "Operator", 25: "TypeParameter",
+}
+
 DISABLED_BY_DEFAULT = {"formatting"}
 
 
@@ -87,28 +95,33 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         return await fallback.request(method, params)
 
 
+# --- Formatting helpers ---
+
+
 def _pos(line: int, col: int) -> dict:
     return {"line": line - 1, "character": col - 1}
 
 
-def _format_location(loc: dict) -> dict:
-    uri = loc.get("uri", "")
-    path = uri.removeprefix("file://") if uri.startswith("file://") else uri
+def _uri_to_path(uri: str) -> str:
+    return uri.removeprefix("file://") if uri.startswith("file://") else uri
+
+
+def _loc_str(loc: dict) -> str:
+    path = _uri_to_path(loc.get("uri", ""))
     start = loc.get("range", {}).get("start", {})
-    return {
-        "file_path": path,
-        "line": start.get("line", 0) + 1,
-        "col": start.get("character", 0) + 1,
-    }
+    line = start.get("line", 0) + 1
+    col = start.get("character", 0) + 1
+    return f"{path}:{line}:{col}"
 
 
-def _format_range(r: dict) -> dict:
+def _range_str(r: dict) -> str:
     s = r.get("start", {})
     e = r.get("end", {})
-    return {
-        "start": {"line": s.get("line", 0) + 1, "col": s.get("character", 0) + 1},
-        "end": {"line": e.get("line", 0) + 1, "col": e.get("character", 0) + 1},
-    }
+    sl, sc = s.get("line", 0) + 1, s.get("character", 0) + 1
+    el, ec = e.get("line", 0) + 1, e.get("character", 0) + 1
+    if sl == el:
+        return f"L{sl}:{sc}-{ec}"
+    return f"L{sl}:{sc}-L{el}:{ec}"
 
 
 def _severity_label(n: int) -> str:
@@ -119,40 +132,36 @@ def _symbol_kind_label(n: int) -> str:
     return SYMBOL_KIND_LABELS.get(n, f"Unknown({n})")
 
 
-def _format_diagnostic(d: dict) -> dict:
-    return {
-        "severity": _severity_label(d.get("severity", 0)),
-        "message": d.get("message", ""),
-        "range": _format_range(d.get("range", {})),
-        "source": d.get("source"),
-        "code": d.get("code"),
-    }
+def _completion_kind_label(n: int | None) -> str:
+    if n is None:
+        return ""
+    return COMPLETION_KIND_LABELS.get(n, "")
 
 
-def _normalize_locations(result: dict | list | None) -> list[dict]:
+def _normalize_locations(result: dict | list | None) -> list[str]:
     if result is None:
         return []
     if isinstance(result, dict):
         result = [result]
-    return [_format_location(loc) for loc in result]
+    return [_loc_str(loc) for loc in result]
 
 
-def _format_symbol(sym: dict) -> dict:
-    out: dict = {
-        "name": sym.get("name", ""),
-        "kind": _symbol_kind_label(sym.get("kind", 0)),
-    }
-    if "range" in sym:
-        out["range"] = _format_range(sym["range"])
-    elif "location" in sym:
-        out["location"] = _format_location(sym["location"])
-    children = sym.get("children")
-    if children:
-        out["children"] = [_format_symbol(c) for c in children]
-    return out
+def _format_symbol_tree(sym: dict, indent: int = 0) -> list[str]:
+    kind = _symbol_kind_label(sym.get("kind", 0))
+    name = sym.get("name", "")
+    loc = sym.get("location", sym.get("range", {}))
+    if "uri" in loc:
+        line = loc.get("range", {}).get("start", {}).get("line", 0) + 1
+    else:
+        line = loc.get("start", {}).get("line", 0) + 1
+    prefix = "  " * indent
+    lines = [f"{prefix}{kind} {name} :L{line}"]
+    for child in sym.get("children", []):
+        lines.extend(_format_symbol_tree(child, indent + 1))
+    return lines
 
 
-# --- Tool implementations (not decorated — registered conditionally below) ---
+# --- Tool implementations ---
 
 
 async def lsp_type_definition(file_path: str, line: int, col: int) -> str:
@@ -163,7 +172,10 @@ async def lsp_type_definition(file_path: str, line: int, col: int) -> str:
             "textDocument": {"uri": uri},
             "position": _pos(line, col),
         }, uri=uri)
-        return json.dumps(_normalize_locations(result), indent=2)
+        locs = _normalize_locations(result)
+        if not locs:
+            return "No type definition found."
+        return "\n".join(locs)
     except LspError as e:
         return f"LSP error: {e}"
 
@@ -177,18 +189,21 @@ async def lsp_completion(file_path: str, line: int, col: int) -> str:
             "position": _pos(line, col),
         }, uri=uri)
         if not result:
-            return json.dumps([], indent=2)
+            return "No completions."
 
         items = result if isinstance(result, list) else result.get("items", [])
-        completions = []
+        lines = []
         for item in items[:50]:
-            completions.append({
-                "label": item.get("label", ""),
-                "kind": item.get("kind"),
-                "detail": item.get("detail"),
-                "insertText": item.get("insertText") or item.get("label", ""),
-            })
-        return json.dumps(completions, indent=2)
+            label = item.get("label", "")
+            kind = _completion_kind_label(item.get("kind"))
+            detail = item.get("detail", "")
+            parts = [label]
+            if kind:
+                parts.append(f"[{kind}]")
+            if detail:
+                parts.append(f"— {detail}")
+            lines.append(" ".join(parts))
+        return "\n".join(lines) if lines else "No completions."
     except LspError as e:
         return f"LSP error: {e}"
 
@@ -239,8 +254,11 @@ async def lsp_document_symbols(file_path: str) -> str:
             "textDocument": {"uri": uri},
         }, uri=uri)
         if not result:
-            return json.dumps([], indent=2)
-        return json.dumps([_format_symbol(s) for s in result], indent=2)
+            return "No symbols found."
+        lines: list[str] = []
+        for sym in result:
+            lines.extend(_format_symbol_tree(sym))
+        return "\n".join(lines)
     except LspError as e:
         return f"LSP error: {e}"
 
@@ -257,15 +275,11 @@ async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool 
             },
         }, uri=uri)
         if not result:
-            return json.dumps([], indent=2)
-
-        edits = []
-        for edit in result:
-            edits.append({
-                "range": _format_range(edit.get("range", {})),
-                "newText": edit.get("newText", ""),
-            })
-        return json.dumps(edits, indent=2)
+            return "No formatting changes needed."
+        return json.dumps([{
+            "range": _range_str(e.get("range", {})),
+            "newText": e.get("newText", ""),
+        } for e in result], indent=2)
     except LspError as e:
         return f"LSP error: {e}"
 
@@ -280,29 +294,24 @@ async def lsp_rename(file_path: str, line: int, col: int, new_name: str) -> str:
             "newName": new_name,
         }, uri=uri)
         if not result:
-            return json.dumps({"changes": {}}, indent=2)
+            return "No rename edits returned."
 
-        changes: dict[str, list] = {}
-        raw_changes = result.get("changes", {})
-        for change_uri, edits in raw_changes.items():
-            path = change_uri.removeprefix("file://") if change_uri.startswith("file://") else change_uri
-            changes[path] = [
-                {"range": _format_range(e.get("range", {})), "newText": e.get("newText", "")}
-                for e in edits
-            ]
+        lines: list[str] = []
+        for change_uri, edits in result.get("changes", {}).items():
+            path = _uri_to_path(change_uri)
+            lines.append(f"{path}: {len(edits)} edit(s)")
+            for e in edits:
+                lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
 
-        doc_changes = result.get("documentChanges", [])
-        for doc_change in doc_changes:
-            text_doc = doc_change.get("textDocument", {})
-            change_uri = text_doc.get("uri", "")
-            path = change_uri.removeprefix("file://") if change_uri.startswith("file://") else change_uri
+        for doc_change in result.get("documentChanges", []):
+            change_uri = doc_change.get("textDocument", {}).get("uri", "")
+            path = _uri_to_path(change_uri)
             edits = doc_change.get("edits", [])
-            changes[path] = [
-                {"range": _format_range(e.get("range", {})), "newText": e.get("newText", "")}
-                for e in edits
-            ]
+            lines.append(f"{path}: {len(edits)} edit(s)")
+            for e in edits:
+                lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
 
-        return json.dumps({"changes": changes}, indent=2)
+        return "\n".join(lines) if lines else "No changes."
     except LspError as e:
         return f"LSP error: {e}"
 
@@ -319,12 +328,9 @@ async def lsp_prepare_rename(file_path: str, line: int, col: int) -> str:
             return "Cannot rename at this position."
 
         if "range" in result and "placeholder" in result:
-            return json.dumps({
-                "range": _format_range(result["range"]),
-                "placeholder": result["placeholder"],
-            }, indent=2)
+            return f"{_range_str(result['range'])} — current name: {result['placeholder']!r}"
         if "start" in result:
-            return json.dumps({"range": _format_range(result)}, indent=2)
+            return f"Renameable at {_range_str(result)}"
         return json.dumps(result, indent=2)
     except LspError as e:
         return f"LSP error: {e}"
@@ -360,21 +366,21 @@ async def lsp_code_actions(
             "context": {"diagnostics": range_diagnostics},
         }, uri=uri)
         if not result:
-            return json.dumps([], indent=2)
+            return "No code actions available."
 
-        actions = []
+        lines = []
         for action in result:
+            title = action.get("title", "")
+            kind = action.get("kind", "")
             edit = action.get("edit")
-            edit_summary = None
+            parts = [f"- {title}"]
+            if kind:
+                parts.append(f"[{kind}]")
             if edit:
-                file_count = len(edit.get("changes", {})) + len(edit.get("documentChanges", []))
-                edit_summary = f"{file_count} file(s) affected"
-            actions.append({
-                "title": action.get("title", ""),
-                "kind": action.get("kind"),
-                "edit_summary": edit_summary,
-            })
-        return json.dumps(actions, indent=2)
+                n = len(edit.get("changes", {})) + len(edit.get("documentChanges", []))
+                parts.append(f"({n} file(s))")
+            lines.append(" ".join(parts))
+        return "\n".join(lines)
     except LspError as e:
         return f"LSP error: {e}"
 
@@ -388,25 +394,22 @@ async def lsp_call_hierarchy_incoming(file_path: str, line: int, col: int) -> st
             "position": _pos(line, col),
         }, uri=uri)
         if not items:
-            return json.dumps([], indent=2)
+            return "No call hierarchy item found at this position."
 
         result = await _request("callHierarchy/incomingCalls", {"item": items[0]})
         if not result:
-            return json.dumps([], indent=2)
+            return "No incoming calls found."
 
-        callers = []
+        lines = []
         for call in result:
             from_item = call.get("from", {})
-            callers.append({
-                "name": from_item.get("name", ""),
-                "kind": _symbol_kind_label(from_item.get("kind", 0)),
-                "location": _format_location({
-                    "uri": from_item.get("uri", ""),
-                    "range": from_item.get("range", {}),
-                }),
-                "call_sites": [_format_range(r) for r in call.get("fromRanges", [])],
-            })
-        return json.dumps(callers, indent=2)
+            name = from_item.get("name", "")
+            kind = _symbol_kind_label(from_item.get("kind", 0))
+            loc = _loc_str({"uri": from_item.get("uri", ""), "range": from_item.get("range", {})})
+            n_sites = len(call.get("fromRanges", []))
+            sites_str = f" ({n_sites} call site{'s' if n_sites != 1 else ''})"
+            lines.append(f"{kind} {name} at {loc}{sites_str}")
+        return "\n".join(lines)
     except LspError as e:
         return f"LSP error: {e}"
 
@@ -420,30 +423,27 @@ async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> st
             "position": _pos(line, col),
         }, uri=uri)
         if not items:
-            return json.dumps([], indent=2)
+            return "No call hierarchy item found at this position."
 
         result = await _request("callHierarchy/outgoingCalls", {"item": items[0]})
         if not result:
-            return json.dumps([], indent=2)
+            return "No outgoing calls found."
 
-        callees = []
+        lines = []
         for call in result:
             to_item = call.get("to", {})
-            callees.append({
-                "name": to_item.get("name", ""),
-                "kind": _symbol_kind_label(to_item.get("kind", 0)),
-                "location": _format_location({
-                    "uri": to_item.get("uri", ""),
-                    "range": to_item.get("range", {}),
-                }),
-                "call_sites": [_format_range(r) for r in call.get("fromRanges", [])],
-            })
-        return json.dumps(callees, indent=2)
+            name = to_item.get("name", "")
+            kind = _symbol_kind_label(to_item.get("kind", 0))
+            loc = _loc_str({"uri": to_item.get("uri", ""), "range": to_item.get("range", {})})
+            n_sites = len(call.get("fromRanges", []))
+            sites_str = f" ({n_sites} call site{'s' if n_sites != 1 else ''})"
+            lines.append(f"{kind} {name} at {loc}{sites_str}")
+        return "\n".join(lines)
     except LspError as e:
         return f"LSP error: {e}"
 
 
-# --- Tool registry: only enabled tools get registered with the MCP server ---
+# --- Tool registry ---
 
 _ALL_TOOLS: dict[str, Any] = {
     "type_definition": lsp_type_definition,
