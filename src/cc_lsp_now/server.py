@@ -102,95 +102,6 @@ def _format_symbol(sym: dict) -> dict:
 
 
 @mcp.tool()
-async def lsp_diagnostics(file_path: str) -> str:
-    """Get diagnostics (errors, warnings) for a file."""
-    try:
-        client = await _get_client()
-        uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        diagnostics = []
-        try:
-            result = await client.request("textDocument/diagnostic", {
-                "textDocument": {"uri": uri},
-            })
-            items = result.get("items", []) if result else []
-            diagnostics = items
-        except LspError:
-            diagnostics = client.diagnostics.get(uri, [])
-
-        return json.dumps([_format_diagnostic(d) for d in diagnostics], indent=2)
-    except LspError as e:
-        return f"LSP error: {e}"
-
-
-@mcp.tool()
-async def lsp_hover(file_path: str, line: int, col: int) -> str:
-    """Get hover information (type info, docs) at a position."""
-    try:
-        client = await _get_client()
-        uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/hover", {
-            "textDocument": {"uri": uri},
-            "position": _pos(line, col),
-        })
-        if not result:
-            return "No hover information available."
-
-        contents = result.get("contents", "")
-        if isinstance(contents, dict):
-            return contents.get("value", str(contents))
-        if isinstance(contents, list):
-            parts = []
-            for item in contents:
-                if isinstance(item, dict):
-                    parts.append(item.get("value", str(item)))
-                else:
-                    parts.append(str(item))
-            return "\n\n".join(parts)
-        return str(contents)
-    except LspError as e:
-        return f"LSP error: {e}"
-
-
-@mcp.tool()
-async def lsp_definition(file_path: str, line: int, col: int) -> str:
-    """Go to the definition of a symbol."""
-    try:
-        client = await _get_client()
-        uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/definition", {
-            "textDocument": {"uri": uri},
-            "position": _pos(line, col),
-        })
-        return json.dumps(_normalize_locations(result), indent=2)
-    except LspError as e:
-        return f"LSP error: {e}"
-
-
-@mcp.tool()
-async def lsp_references(file_path: str, line: int, col: int, include_declaration: bool = True) -> str:
-    """Find all references to a symbol."""
-    try:
-        client = await _get_client()
-        uri = file_uri(file_path)
-        await client.ensure_document(uri)
-
-        result = await client.request("textDocument/references", {
-            "textDocument": {"uri": uri},
-            "position": _pos(line, col),
-            "context": {"includeDeclaration": include_declaration},
-        })
-        return json.dumps(_normalize_locations(result), indent=2)
-    except LspError as e:
-        return f"LSP error: {e}"
-
-
-@mcp.tool()
 async def lsp_type_definition(file_path: str, line: int, col: int) -> str:
     """Go to the type definition of a symbol."""
     try:
@@ -515,31 +426,6 @@ async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> st
                 "call_sites": [_format_range(r) for r in call.get("fromRanges", [])],
             })
         return json.dumps(callees, indent=2)
-    except LspError as e:
-        return f"LSP error: {e}"
-
-
-@mcp.tool()
-async def lsp_workspace_symbols(query: str) -> str:
-    """Search for symbols across the entire workspace."""
-    try:
-        client = await _get_client()
-
-        result = await client.request("workspace/symbol", {"query": query})
-        if not result:
-            return json.dumps([], indent=2)
-
-        symbols = []
-        for sym in result:
-            entry: dict = {
-                "name": sym.get("name", ""),
-                "kind": _symbol_kind_label(sym.get("kind", 0)),
-            }
-            loc = sym.get("location")
-            if loc:
-                entry["location"] = _format_location(loc)
-            symbols.append(entry)
-        return json.dumps(symbols, indent=2)
     except LspError as e:
         return f"LSP error: {e}"
 
