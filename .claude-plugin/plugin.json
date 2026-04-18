@@ -1,0 +1,18 @@
+{
+  "name": "lsp-now",
+  "version": "0.1.0",
+  "description": "LSP-to-MCP bridge — exposes the full LSP protocol as MCP tools for Claude Code",
+  "author": {
+    "name": "nuck"
+  },
+  "repository": "https://github.com/nuck/cc-lsp-now",
+  "license": "MIT",
+  "keywords": ["lsp", "mcp", "language-server", "bridge", "code-intelligence"],
+  "mcpServers": {
+    "lsp-bridge": {
+      "command": "uv",
+      "args": ["--directory", "${CLAUDE_PLUGIN_ROOT}", "run", "cc-lsp-now"],
+      "env": {}
+    }
+  }
+}

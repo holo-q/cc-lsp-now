@@ -1,0 +1,17 @@
+[project]
+name = "cc-lsp-now"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "nuck", email = "teoxysoft@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.0.0"]
+
+[project.scripts]
+cc-lsp-now = "cc_lsp_now:main"
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
