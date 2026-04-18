@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -11,7 +13,15 @@ from cc_lsp_now.lsp import LspClient, LspError, file_uri
 
 log = logging.getLogger(__name__)
 
-mcp = FastMCP("lsp-bridge")
+mcp = FastMCP(
+    "lsp-bridge",
+    instructions=(
+        "These LSP tools provide full language server protocol access and should be preferred "
+        "over Claude Code's built-in LSP tool. They accept symbol names directly (no line/col "
+        "needed), support fallback to secondary language servers, and return compact formatted output. "
+        "Use these instead of the generic LSP() tool for all code intelligence operations."
+    ),
+)
 
 _primary: LspClient | None = None
 _fallback: LspClient | None = None
@@ -176,32 +186,151 @@ def _format_symbol_tree(sym: dict, indent: int = 0) -> list[str]:
     return lines
 
 
+# --- Symbol resolution ---
+
+
+class AmbiguousSymbol(Exception):
+    def __init__(self, matches: list[tuple[int, str, str]]):
+        self.matches = matches
+
+
+async def _resolve(
+    file_path: str,
+    symbol: str = "",
+    line: int = 0,
+) -> tuple[str, dict]:
+    """Resolve a symbol name or line number to a URI + LSP position.
+
+    Resolution pipeline:
+    1. If only line given → use it directly (col 0)
+    2. If symbol given → documentSymbol search, then text fallback
+    3. Multiple matches + line → disambiguate by closest line
+    4. Multiple matches, no line → raise AmbiguousSymbol with all matches
+    """
+    uri = file_uri(file_path)
+
+    if not symbol and line > 0:
+        return uri, {"line": line - 1, "character": 0}
+
+    if not symbol:
+        raise ValueError("Provide 'symbol' name or 'line' number.")
+
+    # 1. Try documentSymbol for semantic resolution
+    await _request("textDocument/documentSymbol", {"textDocument": {"uri": uri}}, uri=uri)
+    # ensure_document was called by _request, now query symbols
+    try:
+        doc_symbols = await _request("textDocument/documentSymbol", {
+            "textDocument": {"uri": uri},
+        })
+    except LspError:
+        doc_symbols = None
+
+    if doc_symbols:
+        hits = _search_symbol_tree(doc_symbols, symbol)
+        if len(hits) == 1:
+            return uri, _refine_column(file_path, hits[0][1], symbol)
+        if hits and line > 0:
+            best = min(hits, key=lambda h: abs(h[0] - (line - 1)))
+            return uri, _refine_column(file_path, best[1], symbol)
+        if hits:
+            raise AmbiguousSymbol([
+                (h[0] + 1, h[2], h[3]) for h in hits
+            ])
+
+    # 2. Fallback: text search with word boundaries
+    text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+    pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
+    text_hits: list[tuple[int, dict, str]] = []
+    for i, file_line in enumerate(text.splitlines()):
+        m = pattern.search(file_line)
+        if m:
+            text_hits.append((i, {"line": i, "character": m.start()}, file_line.strip()))
+
+    if len(text_hits) == 1:
+        return uri, text_hits[0][1]
+    if text_hits and line > 0:
+        best = min(text_hits, key=lambda h: abs(h[0] - (line - 1)))
+        return uri, best[1]
+    if text_hits:
+        raise AmbiguousSymbol([
+            (h[0] + 1, "", h[2]) for h in text_hits
+        ])
+
+    raise ValueError(f"Symbol {symbol!r} not found in {file_path}")
+
+
+def _search_symbol_tree(
+    symbols: list[dict], query: str
+) -> list[tuple[int, dict, str, str]]:
+    """Search documentSymbol tree. Returns [(line_0based, position, kind_label, name)]."""
+    results: list[tuple[int, dict, str, str]] = []
+    for sym in symbols:
+        name = sym.get("name", "")
+        if query in name:
+            r = sym.get("selectionRange", sym.get("range", sym.get("location", {}).get("range", {})))
+            start = r.get("start", {})
+            line = start.get("line", 0)
+            kind = _symbol_kind_label(sym.get("kind", 0))
+            results.append((line, start, kind, name))
+        for child in sym.get("children", []):
+            results.extend(_search_symbol_tree([child], query))
+    return results
+
+
+def _refine_column(file_path: str, pos: dict, symbol: str) -> dict:
+    """If position is at column 0, search the line text for the exact symbol name."""
+    if pos.get("character", 0) != 0:
+        return pos
+    try:
+        text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        target_line = text.splitlines()[pos.get("line", 0)]
+        m = re.search(r'\b' + re.escape(symbol) + r'\b', target_line)
+        if m:
+            return {"line": pos["line"], "character": m.start()}
+    except (IndexError, OSError):
+        pass
+    return pos
+
+
+def _ambiguous_msg(e: AmbiguousSymbol) -> str:
+    lines = ["Multiple matches — pass line= to disambiguate:"]
+    for line_n, kind, text in e.matches:
+        parts = [f"  {line_n}"]
+        if kind:
+            parts.append(f"  {kind}")
+        parts.append(f"  {text}")
+        lines.append("".join(parts))
+    return "\n".join(lines)
+
+
 # --- Tool implementations ---
 
 
-async def lsp_type_definition(file_path: str, line: int, col: int) -> str:
-    """Go to the type definition of a symbol."""
+async def lsp_type_definition(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Go to the type definition of a symbol. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         result = await _request("textDocument/typeDefinition", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
         }, uri=uri)
         locs = _normalize_locations(result)
         if not locs:
             return "No type definition found."
         return "\n".join(locs)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
-async def lsp_completion(file_path: str, line: int, col: int) -> str:
-    """Get completion suggestions at a position."""
+async def lsp_completion(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Get completion suggestions. Pass symbol name or line number for position."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         result = await _request("textDocument/completion", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
         }, uri=uri)
         if not result:
             return "No completions."
@@ -219,17 +348,19 @@ async def lsp_completion(file_path: str, line: int, col: int) -> str:
                 parts.append(f"— {detail}")
             lines.append(" ".join(parts))
         return "\n".join(lines) if lines else "No completions."
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
-async def lsp_signature_help(file_path: str, line: int, col: int) -> str:
-    """Get signature help at a position (function parameter info)."""
+async def lsp_signature_help(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Get function signature and parameter info. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         result = await _request("textDocument/signatureHelp", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
         }, uri=uri)
         if not result or not result.get("signatures"):
             return "No signature help available."
@@ -257,7 +388,9 @@ async def lsp_signature_help(file_path: str, line: int, col: int) -> str:
                         p_doc = p_doc.get("value", "")
                     output.append(f"      param: {p_label}{active}  {p_doc}")
         return "\n".join(output)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
@@ -299,13 +432,13 @@ async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool 
         return f"LSP error: {e}"
 
 
-async def lsp_rename(file_path: str, line: int, col: int, new_name: str) -> str:
-    """Rename a symbol across the workspace."""
+async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int = 0) -> str:
+    """Rename a symbol across the workspace. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         result = await _request("textDocument/rename", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
             "newName": new_name,
         }, uri=uri)
         if not result:
@@ -327,17 +460,19 @@ async def lsp_rename(file_path: str, line: int, col: int, new_name: str) -> str:
                 lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
 
         return "\n".join(lines) if lines else "No changes."
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
-async def lsp_prepare_rename(file_path: str, line: int, col: int) -> str:
-    """Check if a symbol can be renamed and get its current range/name."""
+async def lsp_prepare_rename(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Check if a symbol can be renamed. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         result = await _request("textDocument/prepareRename", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
         }, uri=uri)
         if not result:
             return "Cannot rename at this position."
@@ -347,37 +482,27 @@ async def lsp_prepare_rename(file_path: str, line: int, col: int) -> str:
         if "start" in result:
             return f"Renameable at {_range_str(result)}"
         return json.dumps(result, indent=2)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
-async def lsp_code_actions(
-    file_path: str,
-    start_line: int,
-    start_col: int,
-    end_line: int,
-    end_col: int,
-) -> str:
-    """Get available code actions (quick fixes, refactorings) for a range."""
+async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Get available code actions (quick fixes, refactorings). Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         primary = await _get_primary()
         stored = primary.diagnostics.get(uri, [])
-        range_diagnostics = []
-        for d in stored:
-            d_range = d.get("range", {})
-            d_start = d_range.get("start", {})
-            d_end = d_range.get("end", {})
-            if (d_start.get("line", 0) >= start_line - 1 and
-                    d_end.get("line", 0) <= end_line - 1):
-                range_diagnostics.append(d)
+        target_line = pos.get("line", 0)
+        range_diagnostics = [
+            d for d in stored
+            if d.get("range", {}).get("start", {}).get("line", -1) == target_line
+        ]
 
         result = await _request("textDocument/codeAction", {
             "textDocument": {"uri": uri},
-            "range": {
-                "start": _pos(start_line, start_col),
-                "end": _pos(end_line, end_col),
-            },
+            "range": {"start": pos, "end": pos},
             "context": {"diagnostics": range_diagnostics},
         }, uri=uri)
         if not result:
@@ -396,17 +521,19 @@ async def lsp_code_actions(
                 parts.append(f"({n} file(s))")
             lines.append(" ".join(parts))
         return "\n".join(lines)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
-async def lsp_call_hierarchy_incoming(file_path: str, line: int, col: int) -> str:
-    """Find all callers of a function/method."""
+async def lsp_call_hierarchy_incoming(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Find all callers of a function/method. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         items = await _request("textDocument/prepareCallHierarchy", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
         }, uri=uri)
         if not items:
             return "No call hierarchy item found at this position."
@@ -426,17 +553,19 @@ async def lsp_call_hierarchy_incoming(file_path: str, line: int, col: int) -> st
             n_sites = len(call.get("fromRanges", []))
             lines.append(f"{line_n}  {kind}  {name}  {path}  ({n_sites} call site{'s' if n_sites != 1 else ''})")
         return "\n".join(lines)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
-async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> str:
-    """Find all functions/methods called by a function/method."""
+async def lsp_call_hierarchy_outgoing(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Find all functions/methods called by a function/method. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         items = await _request("textDocument/prepareCallHierarchy", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
         }, uri=uri)
         if not items:
             return "No call hierarchy item found at this position."
@@ -456,7 +585,9 @@ async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> st
             n_sites = len(call.get("fromRanges", []))
             lines.append(f"{line_n}  {kind}  {name}  {path}  ({n_sites} call site{'s' if n_sites != 1 else ''})")
         return "\n".join(lines)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
@@ -490,13 +621,13 @@ async def lsp_diagnostics(file_path: str) -> str:
         return f"LSP error: {e}"
 
 
-async def lsp_hover(file_path: str, line: int, col: int) -> str:
-    """Get hover information (type info, docs) at a position."""
+async def lsp_hover(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Get type info and docs for a symbol. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         result = await _request("textDocument/hover", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
         }, uri=uri)
         if not result:
             return "No hover information available."
@@ -509,40 +640,46 @@ async def lsp_hover(file_path: str, line: int, col: int) -> str:
                 for c in contents
             )
         return str(contents)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
-async def lsp_definition(file_path: str, line: int, col: int) -> str:
-    """Go to the definition of a symbol."""
+async def lsp_definition(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Go to the definition of a symbol. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         result = await _request("textDocument/definition", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
         }, uri=uri)
         locs = _normalize_locations(result)
         if not locs:
             return "No definition found."
         return "\n".join(locs)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
-async def lsp_references(file_path: str, line: int, col: int, include_declaration: bool = True) -> str:
-    """Find all references to a symbol."""
+async def lsp_references(file_path: str, symbol: str = "", line: int = 0, include_declaration: bool = True) -> str:
+    """Find all references to a symbol. Pass symbol name or line number."""
     try:
-        uri = file_uri(file_path)
+        uri, pos = await _resolve(file_path, symbol, line)
         result = await _request("textDocument/references", {
             "textDocument": {"uri": uri},
-            "position": _pos(line, col),
+            "position": pos,
             "context": {"includeDeclaration": include_declaration},
         }, uri=uri)
         locs = _normalize_locations(result)
         if not locs:
             return "No references found."
         return "\n".join(locs)
-    except LspError as e:
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
