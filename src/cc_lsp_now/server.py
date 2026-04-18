@@ -444,9 +444,119 @@ async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> st
         return f"LSP error: {e}"
 
 
+async def lsp_diagnostics(file_path: str) -> str:
+    """Get diagnostics (errors, warnings) for a file."""
+    try:
+        uri = file_uri(file_path)
+        diagnostics = []
+        try:
+            result = await _request("textDocument/diagnostic", {
+                "textDocument": {"uri": uri},
+            }, uri=uri)
+            diagnostics = result.get("items", []) if result else []
+        except LspError:
+            primary = await _get_primary()
+            diagnostics = primary.diagnostics.get(uri, [])
+        if not diagnostics:
+            return "No diagnostics."
+        lines = []
+        for d in diagnostics:
+            sev = _severity_label(d.get("severity", 0))
+            msg = d.get("message", "")
+            r = d.get("range", {})
+            sl = r.get("start", {}).get("line", 0) + 1
+            source = d.get("source", "")
+            code = d.get("code", "")
+            tag = f"[{source} {code}]" if source else ""
+            lines.append(f"{sl}  {sev}  {msg}  {tag}")
+        return "\n".join(lines)
+    except LspError as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_hover(file_path: str, line: int, col: int) -> str:
+    """Get hover information (type info, docs) at a position."""
+    try:
+        uri = file_uri(file_path)
+        result = await _request("textDocument/hover", {
+            "textDocument": {"uri": uri},
+            "position": _pos(line, col),
+        }, uri=uri)
+        if not result:
+            return "No hover information available."
+        contents = result.get("contents", "")
+        if isinstance(contents, dict):
+            return contents.get("value", str(contents))
+        if isinstance(contents, list):
+            return "\n\n".join(
+                c.get("value", str(c)) if isinstance(c, dict) else str(c)
+                for c in contents
+            )
+        return str(contents)
+    except LspError as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_definition(file_path: str, line: int, col: int) -> str:
+    """Go to the definition of a symbol."""
+    try:
+        uri = file_uri(file_path)
+        result = await _request("textDocument/definition", {
+            "textDocument": {"uri": uri},
+            "position": _pos(line, col),
+        }, uri=uri)
+        locs = _normalize_locations(result)
+        if not locs:
+            return "No definition found."
+        return "\n".join(locs)
+    except LspError as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_references(file_path: str, line: int, col: int, include_declaration: bool = True) -> str:
+    """Find all references to a symbol."""
+    try:
+        uri = file_uri(file_path)
+        result = await _request("textDocument/references", {
+            "textDocument": {"uri": uri},
+            "position": _pos(line, col),
+            "context": {"includeDeclaration": include_declaration},
+        }, uri=uri)
+        locs = _normalize_locations(result)
+        if not locs:
+            return "No references found."
+        return "\n".join(locs)
+    except LspError as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_workspace_symbols(query: str) -> str:
+    """Search for symbols across the entire workspace."""
+    try:
+        result = await _request("workspace/symbol", {"query": query})
+        if not result:
+            return "No symbols found."
+        lines = []
+        for sym in result:
+            name = sym.get("name", "")
+            kind = _symbol_kind_label(sym.get("kind", 0))
+            loc = sym.get("location", {})
+            path = _uri_to_path(loc.get("uri", ""))
+            sl = loc.get("range", {}).get("start", {}).get("line", 0) + 1
+            lines.append(f"{sl}  {kind}  {name}  {path}")
+        return "\n".join(lines)
+    except LspError as e:
+        return f"LSP error: {e}"
+
+
 # --- Tool registry ---
 
 _ALL_TOOLS: dict[str, Any] = {
+    "diagnostics": lsp_diagnostics,
+    "hover": lsp_hover,
+    "definition": lsp_definition,
+    "references": lsp_references,
+    "workspace_symbols": lsp_workspace_symbols,
     "type_definition": lsp_type_definition,
     "completion": lsp_completion,
     "signature_help": lsp_signature_help,
