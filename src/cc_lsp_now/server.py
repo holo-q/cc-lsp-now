@@ -110,8 +110,7 @@ def _loc_str(loc: dict) -> str:
     path = _uri_to_path(loc.get("uri", ""))
     start = loc.get("range", {}).get("start", {})
     line = start.get("line", 0) + 1
-    col = start.get("character", 0) + 1
-    return f"{path}:{line}:{col}"
+    return f"{line}  {path}"
 
 
 def _range_str(r: dict) -> str:
@@ -154,8 +153,8 @@ def _format_symbol_tree(sym: dict, indent: int = 0) -> list[str]:
         line = loc.get("range", {}).get("start", {}).get("line", 0) + 1
     else:
         line = loc.get("start", {}).get("line", 0) + 1
-    prefix = "  " * indent
-    lines = [f"{prefix}{kind} {name} :L{line}"]
+    pad = "  " * indent
+    lines = [f"{line}  {pad}{kind}  {name}"]
     for child in sym.get("children", []):
         lines.extend(_format_symbol_tree(child, indent + 1))
     return lines
@@ -405,10 +404,11 @@ async def lsp_call_hierarchy_incoming(file_path: str, line: int, col: int) -> st
             from_item = call.get("from", {})
             name = from_item.get("name", "")
             kind = _symbol_kind_label(from_item.get("kind", 0))
-            loc = _loc_str({"uri": from_item.get("uri", ""), "range": from_item.get("range", {})})
+            path = _uri_to_path(from_item.get("uri", ""))
+            start = from_item.get("range", {}).get("start", {})
+            line_n = start.get("line", 0) + 1
             n_sites = len(call.get("fromRanges", []))
-            sites_str = f" ({n_sites} call site{'s' if n_sites != 1 else ''})"
-            lines.append(f"{kind} {name} at {loc}{sites_str}")
+            lines.append(f"{line_n}  {kind}  {name}  {path}  ({n_sites} call site{'s' if n_sites != 1 else ''})")
         return "\n".join(lines)
     except LspError as e:
         return f"LSP error: {e}"
@@ -434,10 +434,11 @@ async def lsp_call_hierarchy_outgoing(file_path: str, line: int, col: int) -> st
             to_item = call.get("to", {})
             name = to_item.get("name", "")
             kind = _symbol_kind_label(to_item.get("kind", 0))
-            loc = _loc_str({"uri": to_item.get("uri", ""), "range": to_item.get("range", {})})
+            path = _uri_to_path(to_item.get("uri", ""))
+            start = to_item.get("range", {}).get("start", {})
+            line_n = start.get("line", 0) + 1
             n_sites = len(call.get("fromRanges", []))
-            sites_str = f" ({n_sites} call site{'s' if n_sites != 1 else ''})"
-            lines.append(f"{kind} {name} at {loc}{sites_str}")
+            lines.append(f"{line_n}  {kind}  {name}  {path}  ({n_sites} call site{'s' if n_sites != 1 else ''})")
         return "\n".join(lines)
     except LspError as e:
         return f"LSP error: {e}"
