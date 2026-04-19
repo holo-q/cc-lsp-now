@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -303,13 +305,75 @@ def _ambiguous_msg(e: AmbiguousSymbol) -> str:
     return "\n".join(lines)
 
 
+def _resolve_paths(file_path: str, pattern: str) -> list[str] | str:
+    """Resolve multi-file arguments into a list of paths.
+
+    Supports comma-separated file_path and glob patterns.
+    Returns a list of paths on success, or an error string if inputs are empty.
+    """
+    if file_path and "," in file_path:
+        return [p.strip() for p in file_path.split(",") if p.strip()]
+    if file_path:
+        return [file_path]
+    if pattern:
+        return sorted(glob.glob(pattern, recursive=True))
+    return "Provide file_path or pattern."
+
+
+# --- Multi-symbol batching ---
+
+
+async def _batch(
+    file_path: str,
+    symbol: str,
+    symbols: str,
+    line: int,
+    fn: Callable[[str, dict], Awaitable[str]],
+) -> str:
+    """Batch-resolve multiple symbols and run an LSP callback on each.
+
+    When ``symbols`` is non-empty (comma-separated), each symbol is resolved
+    independently via ``_resolve`` and passed through ``fn``. Results are labeled
+    per-symbol with ``--- {symbol} ---`` headers. Resolution or LSP errors
+    for individual symbols are captured inline without aborting the batch.
+
+    When ``symbols`` is empty, falls back to single-target mode: resolves
+    ``(file_path, symbol, line)`` once and calls ``fn`` -- no label block.
+    """
+    if not symbols:
+        # Single-target fallback -- no batching, no label header.
+        try:
+            uri, pos = await _resolve(file_path, symbol, line)
+            return await fn(uri, pos)
+        except AmbiguousSymbol as e:
+            return _ambiguous_msg(e)
+        except (LspError, ValueError) as e:
+            return f"LSP error: {e}"
+
+    parts: list[str] = []
+    for sym in (s.strip() for s in symbols.split(",")):
+        if not sym:
+            continue
+        header = f"--- {sym} ---"
+        try:
+            uri, pos = await _resolve(file_path, sym, line)
+            body = await fn(uri, pos)
+            parts.append(f"{header}\n{body}")
+        except AmbiguousSymbol as e:
+            parts.append(f"{header}\n{_ambiguous_msg(e)}")
+        except (LspError, ValueError) as e:
+            parts.append(f"{header}\nLSP error: {e}")
+    return "\n\n".join(parts)
+
+
 # --- Tool implementations ---
 
 
-async def lsp_type_definition(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Go to the type definition of a symbol. Pass symbol name or line number."""
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
+async def lsp_type_definition(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
+    """Go to the type definition of a symbol. Pass symbol name or line number.
+    Use symbols (comma-separated) to batch multiple lookups at once."""
+
+    async def _do(uri: str, pos: dict) -> str:
         result = await _request("textDocument/typeDefinition", {
             "textDocument": {"uri": uri},
             "position": pos,
@@ -318,10 +382,8 @@ async def lsp_type_definition(file_path: str, symbol: str = "", line: int = 0) -
         if not locs:
             return "No type definition found."
         return "\n".join(locs)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
+
+    return await _batch(file_path, symbol, symbols, line, _do)
 
 
 async def lsp_completion(file_path: str, symbol: str = "", line: int = 0) -> str:
@@ -394,19 +456,36 @@ async def lsp_signature_help(file_path: str, symbol: str = "", line: int = 0) ->
         return f"LSP error: {e}"
 
 
-async def lsp_document_symbols(file_path: str) -> str:
-    """Get all symbols in a document (outline)."""
+async def _document_symbols_single(file_path: str) -> str:
+    """Get symbols for a single file. Returns formatted tree or 'No symbols found.'."""
+    uri = file_uri(file_path)
+    result = await _request("textDocument/documentSymbol", {
+        "textDocument": {"uri": uri},
+    }, uri=uri)
+    if not result:
+        return "No symbols found."
+    lines: list[str] = []
+    for sym in result:
+        lines.extend(_format_symbol_tree(sym))
+    return "\n".join(lines)
+
+
+async def lsp_document_symbols(file_path: str = "", pattern: str = "") -> str:
+    """Get all symbols in one or more documents (outline).
+
+    Supports comma-separated file_path or glob pattern for multi-file symbols.
+    """
+    paths = _resolve_paths(file_path, pattern)
+    if isinstance(paths, str):
+        return paths
     try:
-        uri = file_uri(file_path)
-        result = await _request("textDocument/documentSymbol", {
-            "textDocument": {"uri": uri},
-        }, uri=uri)
-        if not result:
-            return "No symbols found."
-        lines: list[str] = []
-        for sym in result:
-            lines.extend(_format_symbol_tree(sym))
-        return "\n".join(lines)
+        if len(paths) == 1:
+            return await _document_symbols_single(paths[0])
+        sections: list[str] = []
+        for p in paths:
+            body = await _document_symbols_single(p)
+            sections.append(f"=== {p} ===\n{body}")
+        return "\n\n".join(sections)
     except LspError as e:
         return f"LSP error: {e}"
 
@@ -527,10 +606,11 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
         return f"LSP error: {e}"
 
 
-async def lsp_call_hierarchy_incoming(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Find all callers of a function/method. Pass symbol name or line number."""
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
+async def lsp_call_hierarchy_incoming(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
+    """Find all callers of a function/method. Pass symbol name or line number.
+    Use symbols (comma-separated) to batch multiple lookups at once."""
+
+    async def _do(uri: str, pos: dict) -> str:
         items = await _request("textDocument/prepareCallHierarchy", {
             "textDocument": {"uri": uri},
             "position": pos,
@@ -553,16 +633,15 @@ async def lsp_call_hierarchy_incoming(file_path: str, symbol: str = "", line: in
             n_sites = len(call.get("fromRanges", []))
             lines.append(f"{line_n}  {kind}  {name}  {path}  ({n_sites} call site{'s' if n_sites != 1 else ''})")
         return "\n".join(lines)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
+
+    return await _batch(file_path, symbol, symbols, line, _do)
 
 
-async def lsp_call_hierarchy_outgoing(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Find all functions/methods called by a function/method. Pass symbol name or line number."""
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
+async def lsp_call_hierarchy_outgoing(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
+    """Find all functions/methods called by a function/method. Pass symbol name or line number.
+    Use symbols (comma-separated) to batch multiple lookups at once."""
+
+    async def _do(uri: str, pos: dict) -> str:
         items = await _request("textDocument/prepareCallHierarchy", {
             "textDocument": {"uri": uri},
             "position": pos,
@@ -585,46 +664,65 @@ async def lsp_call_hierarchy_outgoing(file_path: str, symbol: str = "", line: in
             n_sites = len(call.get("fromRanges", []))
             lines.append(f"{line_n}  {kind}  {name}  {path}  ({n_sites} call site{'s' if n_sites != 1 else ''})")
         return "\n".join(lines)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
+
+    return await _batch(file_path, symbol, symbols, line, _do)
 
 
-async def lsp_diagnostics(file_path: str) -> str:
-    """Get diagnostics (errors, warnings) for a file."""
+async def _diagnostics_single(file_path: str) -> str:
+    """Get diagnostics for a single file. Returns formatted lines or '(clean)'."""
+    uri = file_uri(file_path)
+    diagnostics = []
     try:
-        uri = file_uri(file_path)
-        diagnostics = []
-        try:
-            result = await _request("textDocument/diagnostic", {
-                "textDocument": {"uri": uri},
-            }, uri=uri)
-            diagnostics = result.get("items", []) if result else []
-        except LspError:
-            primary = await _get_primary()
-            diagnostics = primary.diagnostics.get(uri, [])
-        if not diagnostics:
-            return "No diagnostics."
-        lines = []
-        for d in diagnostics:
-            sev = _severity_label(d.get("severity", 0))
-            msg = d.get("message", "")
-            r = d.get("range", {})
-            sl = r.get("start", {}).get("line", 0) + 1
-            source = d.get("source", "")
-            code = d.get("code", "")
-            tag = f"[{source} {code}]" if source else ""
-            lines.append(f"{sl}  {sev}  {msg}  {tag}")
-        return "\n".join(lines)
+        result = await _request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        }, uri=uri)
+        diagnostics = result.get("items", []) if result else []
+    except LspError:
+        primary = await _get_primary()
+        diagnostics = primary.diagnostics.get(uri, [])
+    if not diagnostics:
+        return "(clean)"
+    lines = []
+    for d in diagnostics:
+        sev = _severity_label(d.get("severity", 0))
+        msg = d.get("message", "")
+        r = d.get("range", {})
+        sl = r.get("start", {}).get("line", 0) + 1
+        source = d.get("source", "")
+        code = d.get("code", "")
+        tag = f"[{source} {code}]" if source else ""
+        lines.append(f"{sl}  {sev}  {msg}  {tag}")
+    return "\n".join(lines)
+
+
+async def lsp_diagnostics(file_path: str = "", pattern: str = "") -> str:
+    """Get diagnostics (errors, warnings) for one or more files.
+
+    Supports comma-separated file_path or glob pattern for multi-file diagnostics.
+    """
+    paths = _resolve_paths(file_path, pattern)
+    if isinstance(paths, str):
+        return paths
+    try:
+        if len(paths) == 1:
+            result = await _diagnostics_single(paths[0])
+            if result == "(clean)":
+                return "No diagnostics."
+            return result
+        sections: list[str] = []
+        for p in paths:
+            body = await _diagnostics_single(p)
+            sections.append(f"=== {p} ===\n{body}")
+        return "\n\n".join(sections)
     except LspError as e:
         return f"LSP error: {e}"
 
 
-async def lsp_hover(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Get type info and docs for a symbol. Pass symbol name or line number."""
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
+async def lsp_hover(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
+    """Get type info and docs for a symbol. Pass symbol name or line number.
+    Use symbols (comma-separated) to batch multiple lookups at once."""
+
+    async def _do(uri: str, pos: dict) -> str:
         result = await _request("textDocument/hover", {
             "textDocument": {"uri": uri},
             "position": pos,
@@ -640,16 +738,15 @@ async def lsp_hover(file_path: str, symbol: str = "", line: int = 0) -> str:
                 for c in contents
             )
         return str(contents)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
+
+    return await _batch(file_path, symbol, symbols, line, _do)
 
 
-async def lsp_definition(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Go to the definition of a symbol. Pass symbol name or line number."""
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
+async def lsp_definition(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
+    """Go to the definition of a symbol. Pass symbol name or line number.
+    Use symbols (comma-separated) to batch multiple lookups at once."""
+
+    async def _do(uri: str, pos: dict) -> str:
         result = await _request("textDocument/definition", {
             "textDocument": {"uri": uri},
             "position": pos,
@@ -658,16 +755,15 @@ async def lsp_definition(file_path: str, symbol: str = "", line: int = 0) -> str
         if not locs:
             return "No definition found."
         return "\n".join(locs)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
+
+    return await _batch(file_path, symbol, symbols, line, _do)
 
 
-async def lsp_references(file_path: str, symbol: str = "", line: int = 0, include_declaration: bool = True) -> str:
-    """Find all references to a symbol. Pass symbol name or line number."""
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
+async def lsp_references(file_path: str, symbol: str = "", symbols: str = "", line: int = 0, include_declaration: bool = True) -> str:
+    """Find all references to a symbol. Pass symbol name or line number.
+    Use symbols (comma-separated) to batch multiple lookups at once."""
+
+    async def _do(uri: str, pos: dict) -> str:
         result = await _request("textDocument/references", {
             "textDocument": {"uri": uri},
             "position": pos,
@@ -677,10 +773,8 @@ async def lsp_references(file_path: str, symbol: str = "", line: int = 0, includ
         if not locs:
             return "No references found."
         return "\n".join(locs)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
+
+    return await _batch(file_path, symbol, symbols, line, _do)
 
 
 async def lsp_workspace_symbols(query: str) -> str:
