@@ -116,6 +116,7 @@ Set in the `env` block of your `mcpServers` entry:
 | `LSP_REPLACE` | No | Post-filter command substitution: `old=new,old=new`. Applied to `LSP_SERVERS` entries and `LSP_PREFER` targets so a user can swap a binary without rewriting the whole config. Example: `basedpyright-langserver=pylance-language-server` replaces basedpyright everywhere the plugin mentions it. |
 | `LSP_TOOLS` | No | Which tools to register. `all` = everything. Comma list = explicit opt-in. Default = all except formatting. |
 | `LSP_EXCLUDE` | No | Comma-separated tools to exclude from the enabled set. (Legacy name: `LSP_DISABLED_TOOLS` — still accepted.) |
+| `LSP_PROJECT_MARKERS` | No | Comma-separated filenames that mark a project root (e.g. `pyproject.toml,setup.py,.git`). When a file outside the current workspace folders is accessed, the bridge walks up looking for these markers and adds the found root to the LSP's workspace via `workspace/didChangeWorkspaceFolders`. Plugins contribute their language's markers — Python plugins list `pyproject.toml`, Rust plugins list `Cargo.toml`, etc. Default: `.git`. |
 
 **Legacy format** (still accepted when `LSP_SERVERS` is unset): `LSP_COMMAND`/`LSP_ARGS` for primary, `LSP_FALLBACK_COMMAND`/`LSP_FALLBACK_ARGS` for first fallback, `LSP_FALLBACK_2_COMMAND`/`LSP_FALLBACK_2_ARGS` for subsequent fallbacks. Prefer `LSP_SERVERS` for new configs.
 

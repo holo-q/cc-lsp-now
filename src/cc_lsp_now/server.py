@@ -282,6 +282,43 @@ def _ensure_chain_configs() -> list[dict]:
     return _chain_configs
 
 
+# Project-root detection. Plugins contribute markers via LSP_PROJECT_MARKERS.
+# Default: .git alone (universal). Python plugins add pyproject.toml etc.
+def _project_markers() -> list[str]:
+    raw = os.environ.get("LSP_PROJECT_MARKERS", ".git").strip()
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+def _find_project_root(file_path: str) -> str | None:
+    """Walk up from file_path looking for a project marker. Returns absolute path or None."""
+    markers = _project_markers()
+    if not markers:
+        return None
+    path = Path(file_path).resolve()
+    for parent in [path, *path.parents]:
+        for marker in markers:
+            if (parent / marker).exists():
+                return str(parent)
+    return None
+
+
+async def _ensure_workspace_for(uri: str | None) -> None:
+    """If the file is outside all known workspace folders, find its project root and add it."""
+    if not uri:
+        return
+    file_path = _uri_to_path(uri)
+    abs_file = os.path.abspath(file_path)
+    for idx in range(len(_chain_configs)):
+        client = _chain_clients[idx]
+        if client is None:
+            continue  # will be handled on next request when lazy-spawned
+        if any(abs_file.startswith(f + os.sep) or abs_file == f for f in client.workspace_folders):
+            continue
+        root = _find_project_root(abs_file)
+        if root and root not in client.workspace_folders:
+            client.add_workspace_folder(root)
+
+
 async def _get_client(idx: int) -> LspClient:
     _ensure_chain_configs()
     if _chain_clients[idx] is None:
@@ -306,6 +343,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         if idx is None:
             raise LspError(-32601, f"{method} not supported by any server in the chain")
         client = await _get_client(idx)
+        await _ensure_workspace_for(uri)
         if uri:
             await client.ensure_document(uri)
         _last_server = _chain_configs[idx]["label"]
@@ -315,6 +353,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
     last_err: LspError | None = None
     for idx in range(len(_chain_configs)):
         client = await _get_client(idx)
+        await _ensure_workspace_for(uri)
         if uri:
             await client.ensure_document(uri)
         try:
@@ -958,6 +997,43 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
         return f"LSP error: {e}"
 
 
+async def lsp_workspaces() -> str:
+    """List the workspace folders currently registered with each LSP in the chain."""
+    _ensure_chain_configs()
+    lines: list[str] = []
+    for idx, cfg in enumerate(_chain_configs):
+        client = _chain_clients[idx]
+        if client is None:
+            lines.append(f"[{cfg['label']}] not started")
+            continue
+        lines.append(f"[{cfg['label']}]")
+        for folder in sorted(client.workspace_folders):
+            lines.append(f"  {folder}")
+    return "\n".join(lines) if lines else "No chain configured."
+
+
+async def lsp_add_workspace(path: str) -> str:
+    """Explicitly add a workspace folder to every running LSP in the chain.
+
+    Auto-detection via LSP_PROJECT_MARKERS handles most cases; use this when
+    the heuristic doesn't find the root (e.g. unusual layout, no marker files).
+    """
+    _ensure_chain_configs()
+    abs_path = os.path.abspath(path)
+    if not os.path.isdir(abs_path):
+        return f"Not a directory: {abs_path}"
+
+    results: list[str] = []
+    for idx, cfg in enumerate(_chain_configs):
+        client = _chain_clients[idx]
+        if client is None:
+            results.append(f"[{cfg['label']}] skipped (not started)")
+            continue
+        added = client.add_workspace_folder(abs_path)
+        results.append(f"[{cfg['label']}] {'added' if added else 'already present'}")
+    return "\n".join(results)
+
+
 async def lsp_confirm(index: int = 0) -> str:
     """Apply one staged candidate from the preview buffer.
 
@@ -1554,6 +1630,8 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "create_file": (lsp_create_file, "workspace/willCreateFiles"),
     "delete_file": (lsp_delete_file, "workspace/willDeleteFiles"),
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
+    "workspaces": (lsp_workspaces, "cc-lsp-now/workspaces"),
+    "add_workspace": (lsp_add_workspace, "cc-lsp-now/add_workspace"),
 }
 
 
@@ -1601,6 +1679,8 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "create_file": "workspace.fileOperations.willCreate",
     "delete_file": "workspace.fileOperations.willDelete",
     "confirm": None,
+    "workspaces": None,
+    "add_workspace": None,
 }
 
 

@@ -61,6 +61,8 @@ class LspClient:
 
         self.diagnostics: dict[str, list] = {}
         self._open_documents: dict[str, int] = {}
+        # Absolute paths of workspace folders currently registered with the server.
+        self.workspace_folders: set[str] = {self._root_path}
         self._started = False
 
     @property
@@ -174,6 +176,25 @@ class LspClient:
         if params is not None:
             msg["params"] = params
         self._send(msg)
+
+    def add_workspace_folder(self, folder_path: str) -> bool:
+        """Register an additional workspace folder with the server. Returns True if added."""
+        abs_path = os.path.abspath(folder_path)
+        if abs_path in self.workspace_folders:
+            return False
+        self.workspace_folders.add(abs_path)
+        folder_uri = file_uri(abs_path)
+        self.notify(
+            "workspace/didChangeWorkspaceFolders",
+            {
+                "event": {
+                    "added": [{"uri": folder_uri, "name": os.path.basename(abs_path)}],
+                    "removed": [],
+                }
+            },
+        )
+        log.info("Added workspace folder: %s", abs_path)
+        return True
 
     async def ensure_document(self, uri: str) -> None:
         path = uri.removeprefix("file://")
