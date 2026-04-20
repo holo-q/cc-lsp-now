@@ -22,6 +22,14 @@ A **standalone MCP server** that bridges the Language Server Protocol into Claud
 | `lsp_call_hierarchy_outgoing` | `callHierarchy/outgoingCalls` |
 | `lsp_workspace_symbols` | `workspace/symbol` |
 
+Plus `lsp_move_file`, `lsp_create_file`, `lsp_delete_file`, `lsp_implementation`, `lsp_declaration`, `lsp_type_hierarchy_supertypes`, `lsp_type_hierarchy_subtypes`, `lsp_inlay_hint`, `lsp_folding_range`, `lsp_range_formatting`, `lsp_code_lens`, `lsp_confirm` — full LSP surface. Tools are capability-gated at startup: if no server in the chain advertises the capability, the tool isn't registered, saving context tokens.
+
+## Known LSP Plugins using cc-lsp-now
+
+- **[cc-ty-plugin](https://github.com/holo-q/cc-ty-plugin)** — Python via [ty](https://github.com/astral-sh/ty) (Astral), with basedpyright fallback for call hierarchy and `willRenameFiles`.
+
+**Want to add yours?** Open a PR adding a bullet here. An LSP plugin is ~20 lines of JSON — see [cc-ty-plugin/plugin.json](https://github.com/holo-q/cc-ty-plugin/blob/main/.claude-plugin/plugin.json) for the minimal shape (lspServers + mcpServers + the redirect hook). Tested language servers we'd like to see plugins for: `rust-analyzer`, `gopls`, `tsserver`, `clangd`, `lua-language-server`, `solargraph`, `elixir-ls`, `haskell-language-server`, `zls`, `nil`, `jdtls`.
+
 ## For LSP Plugin Authors
 
 cc-lsp-now is the MCP server; your plugin bundles it. Users install one plugin (yours), get both the native `lspServers` integration (for hooks/diagnostics) *and* the full MCP tool set.
