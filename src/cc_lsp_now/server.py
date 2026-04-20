@@ -150,19 +150,43 @@ def _apply_candidate(candidate: dict) -> tuple[int, int]:
 
 
 def _parse_chain() -> list[dict]:
-    """Build the LSP chain from env vars. Index 0 = primary, 1+ = fallbacks in order."""
+    """Build the LSP chain from env vars. Index 0 = primary, 1+ = fallbacks in order.
+
+    Preferred format (single env var):
+        LSP_SERVERS="ty server;basedpyright-langserver --stdio;pyright-langserver --stdio"
+        — ';'-separated servers, each is '<command> <args...>'. First = primary.
+
+    Legacy format (still accepted if LSP_SERVERS is unset):
+        LSP_COMMAND=ty LSP_ARGS=server
+        LSP_FALLBACK_COMMAND=basedpyright-langserver LSP_FALLBACK_ARGS=--stdio
+        LSP_FALLBACK_2_COMMAND=... LSP_FALLBACK_2_ARGS=...
+    """
+    servers_env = os.environ.get("LSP_SERVERS", "").strip()
+    if servers_env:
+        chain: list[dict] = []
+        for i, entry in enumerate(s.strip() for s in servers_env.split(";")):
+            if not entry:
+                continue
+            tokens = entry.split()
+            cmd, args = tokens[0], tokens[1:]
+            label = cmd if i == 0 else f"{cmd} (fallback{f' {i}' if i > 1 else ''})"
+            chain.append({"command": cmd, "args": args, "name": cmd, "label": label})
+        if not chain:
+            raise RuntimeError("LSP_SERVERS is empty or malformed")
+        return chain
+
+    # Legacy path
     primary_cmd = os.environ.get("LSP_COMMAND")
     if not primary_cmd:
-        raise RuntimeError("LSP_COMMAND environment variable is required")
+        raise RuntimeError("LSP_SERVERS or LSP_COMMAND environment variable is required")
 
-    chain: list[dict] = [{
+    chain = [{
         "command": primary_cmd,
         "args": os.environ.get("LSP_ARGS", "").split() if os.environ.get("LSP_ARGS") else [],
         "name": primary_cmd,
         "label": primary_cmd,
     }]
 
-    # LSP_FALLBACK_COMMAND (no suffix = first fallback)
     first_fb = os.environ.get("LSP_FALLBACK_COMMAND")
     if first_fb:
         chain.append({
@@ -172,7 +196,6 @@ def _parse_chain() -> list[dict]:
             "label": f"{first_fb} (fallback)",
         })
 
-    # LSP_FALLBACK_2_COMMAND, LSP_FALLBACK_3_COMMAND, ...
     i = 2
     while True:
         cmd = os.environ.get(f"LSP_FALLBACK_{i}_COMMAND")
@@ -189,12 +212,36 @@ def _parse_chain() -> list[dict]:
     return chain
 
 
+def _parse_prefer(chain: list[dict]) -> dict[str, int]:
+    """Parse LSP_PREFER into a method→chain-index map for pre-seeding the cache.
+
+    Format: 'method1=serverCommand,method2=serverCommand'
+    Example: 'workspace/willRenameFiles=basedpyright-langserver,textDocument/callHierarchy=basedpyright-langserver'
+    If the named command isn't in the chain, the entry is ignored.
+    """
+    prefer_env = os.environ.get("LSP_PREFER", "").strip()
+    if not prefer_env:
+        return {}
+    result: dict[str, int] = {}
+    for entry in prefer_env.split(","):
+        entry = entry.strip()
+        if "=" not in entry:
+            continue
+        method, cmd = entry.split("=", 1)
+        method, cmd = method.strip(), cmd.strip()
+        for idx, cfg in enumerate(chain):
+            if cfg["command"] == cmd:
+                result[method] = idx
+                break
+    return result
+
+
 def _ensure_chain_configs() -> list[dict]:
     global _chain_configs
     if not _chain_configs:
         _chain_configs = _parse_chain()
-        # Pre-size the clients list with Nones
         _chain_clients.extend([None] * len(_chain_configs))
+        _method_handler.update(_parse_prefer(_chain_configs))
     return _chain_configs
 
 
@@ -1543,6 +1590,16 @@ def _sync_probe_chain_caps() -> list[dict]:
         chain = _parse_chain()
     except RuntimeError:
         return []
+
+    # Guard against being called inside an already-running loop (e.g. from a test
+    # harness or an async app that imports this module). Skip probing — tools stay
+    # enabled and the runtime negative cache handles unsupported methods as usual.
+    try:
+        _asyncio.get_running_loop()
+        log.info("skipping capability probe: already inside an event loop")
+        return []
+    except RuntimeError:
+        pass
 
     async def probe_one(cfg: dict) -> dict:
         root = os.environ.get("LSP_ROOT", os.getcwd())

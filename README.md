@@ -48,10 +48,7 @@ cc-lsp-now is the MCP server; your plugin bundles it. Users install one plugin (
       "command": "uvx",
       "args": ["cc-lsp-now"],
       "env": {
-        "LSP_COMMAND": "ty",
-        "LSP_ARGS": "server",
-        "LSP_FALLBACK_COMMAND": "basedpyright-langserver",
-        "LSP_FALLBACK_ARGS": "--stdio"
+        "LSP_SERVERS": "ty server;basedpyright-langserver --stdio"
       }
     }
   }
@@ -88,15 +85,15 @@ Set in the `env` block of your `mcpServers` entry:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `LSP_COMMAND` | Yes | Primary LSP server binary (e.g., `ty`, `rust-analyzer`, `gopls`) |
-| `LSP_ARGS` | No | Space-separated arguments (e.g., `server`) |
+| `LSP_SERVERS` | Yes | `;`-separated chain in priority order. Each entry is `<command> <args...>`. First = primary. Example: `ty server;basedpyright-langserver --stdio;pyright-langserver --stdio` |
 | `LSP_ROOT` | No | Workspace root path (defaults to cwd) |
-| `LSP_FALLBACK_COMMAND` | No | Fallback LSP when primary returns `-32601` (method not supported) |
-| `LSP_FALLBACK_ARGS` | No | Space-separated args for fallback |
+| `LSP_PREFER` | No | Per-method server override: `method1=command,method2=command`. Skips the cold-call probe and routes directly. Example: `workspace/willRenameFiles=basedpyright-langserver,textDocument/callHierarchy=basedpyright-langserver` |
 | `LSP_TOOLS` | No | Which tools to register. `all` = everything. Comma list = explicit opt-in. Default = all except formatting. |
 | `LSP_DISABLED_TOOLS` | No | Comma-separated tools to exclude from the enabled set |
 
-The fallback chain is per-method: when the primary returns `-32601`, that method is cached as unsupported and all future calls go straight to the fallback. No repeated round-trip tax.
+**Legacy format** (still accepted when `LSP_SERVERS` is unset): `LSP_COMMAND`/`LSP_ARGS` for primary, `LSP_FALLBACK_COMMAND`/`LSP_FALLBACK_ARGS` for first fallback, `LSP_FALLBACK_2_COMMAND`/`LSP_FALLBACK_2_ARGS` for subsequent fallbacks. Prefer `LSP_SERVERS` for new configs.
+
+**Chain behavior**: per-method. On `-32601` the next server in the chain is tried; the first success is cached for that method. All subsequent calls skip to the cached server. `LSP_PREFER` lets you pre-seed that cache to avoid the first-call cost when you already know which server handles a method best.
 
 ## How the model calls the tools
 
