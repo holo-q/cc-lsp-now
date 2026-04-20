@@ -25,9 +25,9 @@ mcp = FastMCP(
     ),
 )
 
-_primary: LspClient | None = None
-_fallback: LspClient | None = None
-_primary_unsupported: set[str] = set()
+_chain_configs: list[dict] = []  # [{command, args, name}, ...] parsed from env at first use
+_chain_clients: list[LspClient | None] = []  # lazy-spawned clients, same index as _chain_configs
+_method_handler: dict[str, int | None] = {}  # method -> chain index; None = exhausted (all -32601)
 
 SEVERITY_LABELS = {1: "Error", 2: "Warning", 3: "Info", 4: "Hint"}
 
@@ -51,72 +51,108 @@ COMPLETION_KIND_LABELS = {
 DISABLED_BY_DEFAULT = {"formatting"}
 
 
-async def _get_primary() -> LspClient:
-    global _primary, _primary_name
-    if _primary is None:
-        command = os.environ.get("LSP_COMMAND")
-        if not command:
-            raise RuntimeError("LSP_COMMAND environment variable is required")
-        args = os.environ.get("LSP_ARGS", "").split() if os.environ.get("LSP_ARGS") else []
-        root = os.environ.get("LSP_ROOT", os.getcwd())
-        _primary_name = command
-        _primary = LspClient([command, *args], root)
-        await _primary.start()
-    return _primary
-
-
-async def _get_fallback() -> LspClient | None:
-    global _fallback, _fallback_name
-    fallback_cmd = os.environ.get("LSP_FALLBACK_COMMAND")
-    if not fallback_cmd:
-        return None
-    if _fallback is None:
-        args = (
-            os.environ.get("LSP_FALLBACK_ARGS", "").split()
-            if os.environ.get("LSP_FALLBACK_ARGS") else []
-        )
-        root = os.environ.get("LSP_ROOT", os.getcwd())
-        _fallback_name = fallback_cmd
-        _fallback = LspClient([fallback_cmd, *args], root)
-        await _fallback.start()
-    return _fallback
-
-
 _last_server: str = ""
-_primary_name: str = ""
-_fallback_name: str = ""
+
+
+def _parse_chain() -> list[dict]:
+    """Build the LSP chain from env vars. Index 0 = primary, 1+ = fallbacks in order."""
+    primary_cmd = os.environ.get("LSP_COMMAND")
+    if not primary_cmd:
+        raise RuntimeError("LSP_COMMAND environment variable is required")
+
+    chain: list[dict] = [{
+        "command": primary_cmd,
+        "args": os.environ.get("LSP_ARGS", "").split() if os.environ.get("LSP_ARGS") else [],
+        "name": primary_cmd,
+        "label": primary_cmd,
+    }]
+
+    # LSP_FALLBACK_COMMAND (no suffix = first fallback)
+    first_fb = os.environ.get("LSP_FALLBACK_COMMAND")
+    if first_fb:
+        chain.append({
+            "command": first_fb,
+            "args": os.environ.get("LSP_FALLBACK_ARGS", "").split() if os.environ.get("LSP_FALLBACK_ARGS") else [],
+            "name": first_fb,
+            "label": f"{first_fb} (fallback)",
+        })
+
+    # LSP_FALLBACK_2_COMMAND, LSP_FALLBACK_3_COMMAND, ...
+    i = 2
+    while True:
+        cmd = os.environ.get(f"LSP_FALLBACK_{i}_COMMAND")
+        if not cmd:
+            break
+        chain.append({
+            "command": cmd,
+            "args": os.environ.get(f"LSP_FALLBACK_{i}_ARGS", "").split() if os.environ.get(f"LSP_FALLBACK_{i}_ARGS") else [],
+            "name": cmd,
+            "label": f"{cmd} (fallback {i})",
+        })
+        i += 1
+
+    return chain
+
+
+def _ensure_chain_configs() -> list[dict]:
+    global _chain_configs
+    if not _chain_configs:
+        _chain_configs = _parse_chain()
+        # Pre-size the clients list with Nones
+        _chain_clients.extend([None] * len(_chain_configs))
+    return _chain_configs
+
+
+async def _get_client(idx: int) -> LspClient:
+    _ensure_chain_configs()
+    if _chain_clients[idx] is None:
+        cfg = _chain_configs[idx]
+        root = os.environ.get("LSP_ROOT", os.getcwd())
+        client = LspClient([cfg["command"], *cfg["args"]], root)
+        await client.start()
+        _chain_clients[idx] = client
+    client = _chain_clients[idx]
+    assert client is not None
+    return client
 
 
 async def _request(method: str, params: dict | None, *, uri: str | None = None) -> Any:
+    """Route a request through the chain. Caches which server handles each method."""
     global _last_server
-    if method in _primary_unsupported:
-        fallback = await _get_fallback()
-        if fallback is None:
-            raise LspError(-32601, f"{method} not supported and no fallback configured")
-        if uri:
-            await fallback.ensure_document(uri)
-        _last_server = f"{_fallback_name} (fallback)"
-        return await fallback.request(method, params)
+    _ensure_chain_configs()
 
-    primary = await _get_primary()
-    if uri:
-        await primary.ensure_document(uri)
-    try:
-        result = await primary.request(method, params)
-        _last_server = _primary_name
-        return result
-    except LspError as e:
-        if e.code != -32601:
-            raise
-        _primary_unsupported.add(method)
-        log.info("Primary LSP does not support %s, routing to fallback", method)
-        fallback = await _get_fallback()
-        if fallback is None:
-            raise
+    # Fast path: method already resolved to a specific chain index
+    if method in _method_handler:
+        idx = _method_handler[method]
+        if idx is None:
+            raise LspError(-32601, f"{method} not supported by any server in the chain")
+        client = await _get_client(idx)
         if uri:
-            await fallback.ensure_document(uri)
-        _last_server = f"{_fallback_name} (fallback)"
-        return await fallback.request(method, params)
+            await client.ensure_document(uri)
+        _last_server = _chain_configs[idx]["label"]
+        return await client.request(method, params)
+
+    # Cold path: try each server in order
+    last_err: LspError | None = None
+    for idx in range(len(_chain_configs)):
+        client = await _get_client(idx)
+        if uri:
+            await client.ensure_document(uri)
+        try:
+            result = await client.request(method, params)
+            _method_handler[method] = idx
+            _last_server = _chain_configs[idx]["label"]
+            if idx > 0:
+                log.info("Routing %s to %s", method, _chain_configs[idx]["label"])
+            return result
+        except LspError as e:
+            if e.code != -32601:
+                raise
+            last_err = e
+            continue
+
+    _method_handler[method] = None
+    raise last_err or LspError(-32601, f"{method} not supported by any server in the chain")
 
 
 def _header(method: str) -> str:
@@ -684,7 +720,7 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
     """Get available code actions (quick fixes, refactorings). Pass symbol name or line number."""
     try:
         uri, pos = await _resolve(file_path, symbol, line)
-        primary = await _get_primary()
+        primary = await _get_client(0)
         stored = primary.diagnostics.get(uri, [])
         target_line = pos.get("line", 0)
         range_diagnostics = [
@@ -791,7 +827,7 @@ async def _diagnostics_single(file_path: str) -> str:
         }, uri=uri)
         diagnostics = result.get("items", []) if result else []
     except LspError:
-        primary = await _get_primary()
+        primary = await _get_client(0)
         diagnostics = primary.diagnostics.get(uri, [])
     if not diagnostics:
         return "(clean)"
