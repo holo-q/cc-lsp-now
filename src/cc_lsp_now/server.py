@@ -53,6 +53,101 @@ DISABLED_BY_DEFAULT = {"formatting"}
 
 _last_server: str = ""
 
+# --- Preview/confirm buffer --------------------------------------------------
+#
+# Several tools (code_actions, move_file, ...) now emit previews instead of
+# applying edits immediately. The preview populates a module-level buffer that
+# the agent can then commit via `lsp_confirm(index)`.
+#
+# Shape:
+#   {
+#     "kind": str,           # e.g. "code_action", "file_move"
+#     "candidates": list[dict],  # each is a WorkspaceEdit or { edit: WorkspaceEdit, ... }
+#     "description": str,    # short human-readable preview summary
+#   }
+#
+# The buffer is single-slot — any new preview displaces the previous one.
+# This matches the preview→confirm-or-replace flow the agent drives.
+_pending: dict | None = None
+
+
+def _set_pending(kind: str, candidates: list[dict], description: str) -> None:
+    """Stage a set of candidate WorkspaceEdits for later confirmation.
+
+    Overwrites any previous pending state. The agent issues `lsp_confirm(index)`
+    to pick one candidate out of ``candidates`` and apply it.
+    """
+    global _pending
+    _pending = {"kind": kind, "candidates": candidates, "description": description}
+
+
+def _apply_candidate(candidate: dict) -> tuple[int, int]:
+    """Apply a single preview candidate's WorkspaceEdit.
+
+    A candidate may either BE a WorkspaceEdit directly (has ``changes`` or
+    ``documentChanges``) or wrap one under an ``"edit"`` field (LSP CodeAction
+    shape). Special-cased: if candidate has ``"kind": "file_move"`` with
+    ``from_path`` / ``to_path``, the actual ``os.rename`` happens after edits
+    are written — this keeps the import-rewrite + file-move atomic per the
+    move_file flow.
+
+    Returns (file_count, edit_count) for the summary line.
+    """
+    # Unwrap: CodeAction-shaped candidates carry the WorkspaceEdit under "edit"
+    if "edit" in candidate and isinstance(candidate["edit"], dict):
+        edit = candidate["edit"]
+    else:
+        edit = candidate
+
+    affected: list[str] = []
+    if edit.get("changes") or edit.get("documentChanges"):
+        affected = _apply_workspace_edit(edit)
+
+    edit_count = 0
+    for _uri, edits in edit.get("changes", {}).items():
+        edit_count += len(edits)
+    for doc_change in edit.get("documentChanges", []):
+        if "textDocument" in doc_change:
+            edit_count += len(doc_change.get("edits", []))
+
+    # file_move finishes with the rename itself — after any import edits landed.
+    if candidate.get("kind") == "file_move":
+        from_path = candidate.get("from_path")
+        to_path = candidate.get("to_path")
+        if from_path and to_path:
+            to_dir = os.path.dirname(os.path.abspath(to_path))
+            if to_dir:
+                os.makedirs(to_dir, exist_ok=True)
+            os.rename(from_path, to_path)
+
+    # file_create: after any side-effect edits (new imports, __init__ entries)
+    # land in sibling modules, materialize the empty file itself. Wrapped in
+    # try/except so a filesystem-level failure doesn't crash the confirm path —
+    # the edits already wrote successfully and agent can recover manually.
+    if candidate.get("kind") == "file_create":
+        create_path = candidate.get("create_path")
+        if create_path:
+            try:
+                target = Path(create_path)
+                parent = target.parent
+                if str(parent):
+                    parent.mkdir(parents=True, exist_ok=True)
+                target.touch(exist_ok=True)
+            except OSError as e:
+                log.warning("file_create touch failed for %s: %s", create_path, e)
+
+    # file_delete: cleanup edits have fixed up imports/registrations in siblings;
+    # now unlink the file itself. missing_ok so re-confirm is idempotent.
+    if candidate.get("kind") == "file_delete":
+        delete_path = candidate.get("delete_path")
+        if delete_path:
+            try:
+                Path(delete_path).unlink(missing_ok=True)
+            except OSError as e:
+                log.warning("file_delete unlink failed for %s: %s", delete_path, e)
+
+    return len(affected), edit_count
+
 
 def _parse_chain() -> list[dict]:
     """Build the LSP chain from env vars. Index 0 = primary, 1+ = fallbacks in order."""
@@ -631,11 +726,13 @@ def _apply_workspace_edit(edit: dict) -> list[str]:
     return affected
 
 
-async def lsp_move_file(from_path: str, to_path: str, apply: bool = False) -> str:
-    """Move/rename a file and get the import-updating edits needed across the workspace.
+async def lsp_move_file(from_path: str, to_path: str) -> str:
+    """Move/rename a file and preview the import-updating edits needed across the workspace.
 
-    Uses workspace/willRenameFiles. By default returns a preview of the edits.
-    Pass apply=True to apply the edits AND move the file atomically.
+    Uses workspace/willRenameFiles. Always previews — the resulting
+    WorkspaceEdit + file-move metadata is staged under the module-level
+    ``_pending`` buffer. Call ``lsp_confirm(0)`` to commit both the edits
+    and the actual ``os.rename`` atomically.
     """
     try:
         from_uri = file_uri(from_path)
@@ -676,19 +773,24 @@ async def lsp_move_file(from_path: str, to_path: str, apply: bool = False) -> st
             for e in edits:
                 lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
 
-        if not apply:
-            lines.insert(0, f"Preview: {len(edit_files)} file(s), {total_edits} edit(s). Re-call with apply=true to commit.")
-            return "\n".join(lines) if lines else "No edits needed."
-
+        # Stage the edit + file-move metadata as a single candidate.
+        # _apply_candidate special-cases kind="file_move" to run os.rename after
+        # the WorkspaceEdit writes land, keeping import-fixup + rename atomic.
+        description = f"move {from_path} → {to_path} ({len(edit_files)} file(s), {total_edits} edit(s))"
+        candidate: dict = {
+            "kind": "file_move",
+            "from_path": from_path,
+            "to_path": to_path,
+            "title": description,
+        }
         if result:
-            _apply_workspace_edit(result)
+            candidate["edit"] = result
+        _set_pending("file_move", [candidate], description)
 
-        to_dir = os.path.dirname(os.path.abspath(to_path))
-        if to_dir:
-            os.makedirs(to_dir, exist_ok=True)
-        os.rename(from_path, to_path)
-
-        lines.insert(0, f"Applied: moved {from_path} → {to_path}, updated {len(edit_files)} file(s), {total_edits} edit(s).")
+        lines.insert(
+            0,
+            f"Preview: {len(edit_files)} file(s), {total_edits} edit(s). Call lsp_confirm(0) to commit the move.",
+        )
         return "\n".join(lines)
     except (LspError, ValueError, OSError) as e:
         return f"LSP error: {e}"
@@ -717,7 +819,12 @@ async def lsp_prepare_rename(file_path: str, symbol: str = "", line: int = 0) ->
 
 
 async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Get available code actions (quick fixes, refactorings). Pass symbol name or line number."""
+    """Get available code actions (quick fixes, refactorings). Pass symbol name or line number.
+
+    Also stages all returned actions into the module-level ``_pending`` buffer
+    so the agent can pick one by index via ``lsp_confirm(N)``. Each line in the
+    output is prefixed with ``[N]`` — that N is the index to pass to confirm.
+    """
     try:
         uri, pos = await _resolve(file_path, symbol, line)
         primary = await _get_client(0)
@@ -737,22 +844,63 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
             return "No code actions available."
 
         lines = []
-        for action in result:
+        for idx, action in enumerate(result):
             title = action.get("title", "")
             kind = action.get("kind", "")
             edit = action.get("edit")
-            parts = [f"- {title}"]
+            parts = [f"[{idx}] {title}"]
             if kind:
                 parts.append(f"[{kind}]")
             if edit:
                 n = len(edit.get("changes", {})) + len(edit.get("documentChanges", []))
                 parts.append(f"({n} file(s))")
             lines.append(" ".join(parts))
+
+        # Stage the raw action objects so lsp_confirm can unwrap their .edit
+        # field via _apply_candidate. Some actions have no edit (command-only)
+        # — those apply as 0 file(s)/0 edit(s) and are effectively a noop here.
+        _set_pending(
+            "code_action",
+            list(result),
+            f"{len(result)} code action(s) at {_uri_to_path(uri)}:{target_line + 1}",
+        )
+
+        lines.append("")
+        lines.append(f"Staged {len(result)} action(s). Call lsp_confirm(N) to apply.")
         return "\n".join(lines)
     except AmbiguousSymbol as e:
         return _ambiguous_msg(e)
     except (LspError, ValueError) as e:
         return f"LSP error: {e}"
+
+
+async def lsp_confirm(index: int = 0) -> str:
+    """Apply one staged candidate from the preview buffer.
+
+    Companion to tools that stage previews (currently ``lsp_code_actions``
+    and ``lsp_move_file``). Index into the ``candidates`` list shown by the
+    most recent preview. Clears ``_pending`` on success so the buffer is
+    single-shot — a stale preview can't be re-committed after context drifts.
+    """
+    global _pending
+    if _pending is None:
+        return "Nothing to confirm."
+
+    candidates = _pending.get("candidates", [])
+    kind = _pending.get("kind", "")
+
+    if index >= len(candidates):
+        return f"Invalid index {index}, only {len(candidates)} candidates available."
+
+    candidate = candidates[index]
+    try:
+        file_count, edit_count = _apply_candidate(candidate)
+    except (OSError, ValueError, KeyError) as e:
+        return f"Apply failed: {e}"
+
+    title = candidate.get("title", "")
+    _pending = None
+    return f"Applied [{kind} #{index}]: {title}. {file_count} file(s), {edit_count} edit(s)."
 
 
 async def lsp_call_hierarchy_incoming(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
@@ -926,6 +1074,171 @@ async def lsp_references(file_path: str, symbol: str = "", symbols: str = "", li
     return await _batch(file_path, symbol, symbols, line, _do)
 
 
+async def lsp_implementation(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Go to the implementation of a symbol (interfaces, abstract methods).
+
+    Unlike lsp_definition, which jumps to where a symbol is declared, this jumps
+    to concrete implementations — e.g. the classes implementing an interface, or
+    subclass overrides of an abstract method. Pass symbol name or line number.
+    """
+    try:
+        uri, pos = await _resolve(file_path, symbol, line)
+        result = await _request("textDocument/implementation", {
+            "textDocument": {"uri": uri},
+            "position": pos,
+        }, uri=uri)
+        locs = _normalize_locations(result)
+        if not locs:
+            return "No implementations found."
+        return "\n".join(locs)
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_declaration(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Go to the declaration of a symbol. Pass symbol name or line number.
+
+    Distinct from lsp_definition: some languages (C/C++) separate declaration
+    (header) from definition (impl). For languages without that split, this
+    typically mirrors lsp_definition.
+    """
+    try:
+        uri, pos = await _resolve(file_path, symbol, line)
+        result = await _request("textDocument/declaration", {
+            "textDocument": {"uri": uri},
+            "position": pos,
+        }, uri=uri)
+        locs = _normalize_locations(result)
+        if not locs:
+            return "No declaration found."
+        return "\n".join(locs)
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
+def _format_type_hierarchy_item(item: dict) -> str:
+    """Format a TypeHierarchyItem to match the workspace_symbols line shape."""
+    name = item.get("name", "")
+    kind = _symbol_kind_label(item.get("kind", 0))
+    path = _uri_to_path(item.get("uri", ""))
+    start = item.get("range", {}).get("start", {})
+    line_n = start.get("line", 0) + 1
+    return f"{line_n}  {kind}  {name}  {path}"
+
+
+async def lsp_type_hierarchy_supertypes(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Find the supertypes (parents) of a type. Pass symbol name or line number.
+
+    Two-step LSP flow: textDocument/prepareTypeHierarchy then typeHierarchy/supertypes
+    on the first resolved item. Useful for climbing a class/interface chain.
+    """
+    try:
+        uri, pos = await _resolve(file_path, symbol, line)
+        items = await _request("textDocument/prepareTypeHierarchy", {
+            "textDocument": {"uri": uri},
+            "position": pos,
+        }, uri=uri)
+        if not items:
+            return "No type hierarchy item at this position."
+
+        result = await _request("typeHierarchy/supertypes", {"item": items[0]})
+        if not result:
+            return "No supertypes found."
+
+        return "\n".join(_format_type_hierarchy_item(item) for item in result)
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_type_hierarchy_subtypes(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Find the subtypes (children) of a type. Pass symbol name or line number.
+
+    Two-step LSP flow: textDocument/prepareTypeHierarchy then typeHierarchy/subtypes
+    on the first resolved item. Useful for discovering implementors/derivatives.
+    """
+    try:
+        uri, pos = await _resolve(file_path, symbol, line)
+        items = await _request("textDocument/prepareTypeHierarchy", {
+            "textDocument": {"uri": uri},
+            "position": pos,
+        }, uri=uri)
+        if not items:
+            return "No type hierarchy item at this position."
+
+        result = await _request("typeHierarchy/subtypes", {"item": items[0]})
+        if not result:
+            return "No subtypes found."
+
+        return "\n".join(_format_type_hierarchy_item(item) for item in result)
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_inlay_hint(file_path: str, symbol: str = "", line: int = 0) -> str:
+    """Get inlay hints (inferred types, parameter names) for a region.
+
+    Without symbol/line → whole-file hints (range [0..99999]). With a symbol or
+    line → a 50-line window starting at the resolved position — enough context
+    to surface type annotations and param labels around the target without
+    flooding output.
+
+    Output: `{line}:{col}  {label}  [{kind}]` per hint, where kind is
+    Type (1) or Parameter (2).
+    """
+    try:
+        uri = file_uri(file_path)
+        # Whole-file path: no symbol/line given — skip _resolve and scan everything.
+        if not symbol and line == 0:
+            hint_range = {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 99999, "character": 0},
+            }
+        else:
+            uri, pos = await _resolve(file_path, symbol, line)
+            start_line = pos.get("line", 0)
+            hint_range = {
+                "start": {"line": start_line, "character": 0},
+                "end": {"line": start_line + 50, "character": 0},
+            }
+
+        result = await _request("textDocument/inlayHint", {
+            "textDocument": {"uri": uri},
+            "range": hint_range,
+        }, uri=uri)
+        if not result:
+            return "No inlay hints."
+
+        kind_labels = {1: "Type", 2: "Parameter"}
+        lines: list[str] = []
+        for hint in result:
+            pos_field = hint.get("position", {})
+            hline = pos_field.get("line", 0) + 1
+            hcol = pos_field.get("character", 0) + 1
+            label = hint.get("label", "")
+            # Spec allows label as string or list of InlayHintLabelPart.
+            if isinstance(label, list):
+                label = "".join(
+                    part.get("value", "") if isinstance(part, dict) else str(part)
+                    for part in label
+                )
+            kind = kind_labels.get(hint.get("kind"), "")
+            kind_str = f"  [{kind}]" if kind else ""
+            lines.append(f"{hline}:{hcol}  {label}{kind_str}")
+        return "\n".join(lines) if lines else "No inlay hints."
+    except AmbiguousSymbol as e:
+        return _ambiguous_msg(e)
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
 async def lsp_workspace_symbols(query: str) -> str:
     """Search for symbols across the entire workspace."""
     try:
@@ -942,6 +1255,188 @@ async def lsp_workspace_symbols(query: str) -> str:
             lines.append(f"{sl}  {kind}  {name}  {path}")
         return "\n".join(lines)
     except LspError as e:
+        return f"LSP error: {e}"
+
+
+async def _folding_range_single(file_path: str) -> str:
+    """Folding regions for a single file. Each region reports its 1-based line
+    span and its classifying kind (``comment`` / ``imports`` / ``region``).
+    """
+    uri = file_uri(file_path)
+    result = await _request("textDocument/foldingRange", {
+        "textDocument": {"uri": uri},
+    }, uri=uri)
+    if not result:
+        return "No folding ranges."
+    lines: list[str] = []
+    for region in result:
+        start_line = region.get("startLine", 0) + 1
+        end_line = region.get("endLine", 0) + 1
+        kind = region.get("kind") or "region"
+        lines.append(f"L{start_line}-L{end_line}  {kind}")
+    return "\n".join(lines) if lines else "No folding ranges."
+
+
+async def lsp_folding_range(file_path: str = "", pattern: str = "") -> str:
+    """Get folding regions (imports, comments, blocks) for one or more files.
+
+    Supports comma-separated file_path or glob pattern for multi-file requests.
+    Mirrors the batching shape of ``lsp_diagnostics`` / ``lsp_document_symbols``.
+    """
+    paths = _resolve_paths(file_path, pattern)
+    if isinstance(paths, str):
+        return paths
+    try:
+        if len(paths) == 1:
+            return await _folding_range_single(paths[0])
+        sections: list[str] = []
+        for p in paths:
+            body = await _folding_range_single(p)
+            sections.append(f"=== {p} ===\n{body}")
+        return "\n\n".join(sections)
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_range_formatting(
+    file_path: str,
+    start_line: int,
+    end_line: int,
+    tab_size: int = 4,
+    insert_spaces: bool = True,
+) -> str:
+    """Format a specific line range within a document.
+
+    Line numbers are 1-based (user-facing convention). The end position uses
+    character=99999 to reliably span to end-of-line without needing to measure
+    — the server clamps it to the actual line length.
+    """
+    try:
+        uri = file_uri(file_path)
+        result = await _request("textDocument/rangeFormatting", {
+            "textDocument": {"uri": uri},
+            "range": {
+                "start": {"line": start_line - 1, "character": 0},
+                "end": {"line": end_line - 1, "character": 99999},
+            },
+            "options": {
+                "tabSize": tab_size,
+                "insertSpaces": insert_spaces,
+            },
+        }, uri=uri)
+        if not result:
+            return "No formatting changes needed."
+        return json.dumps([{
+            "range": _range_str(e.get("range", {})),
+            "newText": e.get("newText", ""),
+        } for e in result], indent=2)
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_code_lens(file_path: str) -> str:
+    """List code lenses (inline actionable hints: run/debug/references/etc) for a file."""
+    try:
+        uri = file_uri(file_path)
+        result = await _request("textDocument/codeLens", {
+            "textDocument": {"uri": uri},
+        }, uri=uri)
+        if not result:
+            return "No code lenses."
+
+        lines: list[str] = []
+        for lens in result:
+            start = lens.get("range", {}).get("start", {})
+            line_n = start.get("line", 0) + 1
+            cmd = lens.get("command") or {}
+            title = cmd.get("title", "")
+            command = cmd.get("command", "")
+            lines.append(f"L{line_n}  {title} [{command}]")
+        return "\n".join(lines) if lines else "No code lenses."
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_create_file(file_path: str) -> str:
+    """Preview side effects of creating a file (new imports, __init__ entries, ...).
+
+    Sends ``workspace/willCreateFiles`` to surface sibling edits the server
+    would like to perform when this file is introduced. Stages a ``file_create``
+    candidate under ``_pending`` — the actual empty-file write happens in
+    ``_apply_candidate`` after ``lsp_confirm()`` commits the edits.
+    """
+    try:
+        uri = file_uri(file_path)
+        result = await _request(
+            "workspace/willCreateFiles",
+            {"files": [{"uri": uri}]},
+        )
+        if not result:
+            result = {}
+
+        edit_count = 0
+        for _u, edits in result.get("changes", {}).items():
+            edit_count += len(edits)
+        for doc_change in result.get("documentChanges", []):
+            if "textDocument" in doc_change:
+                edit_count += len(doc_change.get("edits", []))
+
+        description = f"Create {file_path}"
+        candidate: dict = {
+            "kind": "file_create",
+            "create_path": file_path,
+            "title": description,
+        }
+        if result:
+            candidate["edit"] = result
+        _set_pending("create_file", [candidate], description)
+
+        return (
+            f"Preview: create {file_path} with {edit_count} side-effect edit(s). "
+            f"Re-call lsp_confirm() to commit."
+        )
+    except (LspError, ValueError) as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_delete_file(file_path: str) -> str:
+    """Preview cleanup edits for deleting a file (remove imports, registrations, ...).
+
+    Sends ``workspace/willDeleteFiles``. Stages a ``file_delete`` candidate;
+    ``_apply_candidate`` performs ``unlink(missing_ok=True)`` after cleanup
+    edits land so re-confirming is idempotent.
+    """
+    try:
+        uri = file_uri(file_path)
+        result = await _request(
+            "workspace/willDeleteFiles",
+            {"files": [{"uri": uri}]},
+        )
+        if not result:
+            result = {}
+
+        edit_count = 0
+        for _u, edits in result.get("changes", {}).items():
+            edit_count += len(edits)
+        for doc_change in result.get("documentChanges", []):
+            if "textDocument" in doc_change:
+                edit_count += len(doc_change.get("edits", []))
+
+        description = f"Delete {file_path}"
+        candidate: dict = {
+            "kind": "file_delete",
+            "delete_path": file_path,
+            "title": description,
+        }
+        if result:
+            candidate["edit"] = result
+        _set_pending("delete_file", [candidate], description)
+
+        return (
+            f"Preview: delete {file_path} with {edit_count} cleanup edit(s). "
+            f"Re-call lsp_confirm() to commit."
+        )
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
@@ -964,6 +1459,17 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "code_actions": (lsp_code_actions, "textDocument/codeAction"),
     "call_hierarchy_incoming": (lsp_call_hierarchy_incoming, "callHierarchy/incomingCalls"),
     "call_hierarchy_outgoing": (lsp_call_hierarchy_outgoing, "callHierarchy/outgoingCalls"),
+    "implementation": (lsp_implementation, "textDocument/implementation"),
+    "declaration": (lsp_declaration, "textDocument/declaration"),
+    "type_hierarchy_supertypes": (lsp_type_hierarchy_supertypes, "typeHierarchy/supertypes"),
+    "type_hierarchy_subtypes": (lsp_type_hierarchy_subtypes, "typeHierarchy/subtypes"),
+    "inlay_hint": (lsp_inlay_hint, "textDocument/inlayHint"),
+    "folding_range": (lsp_folding_range, "textDocument/foldingRange"),
+    "range_formatting": (lsp_range_formatting, "textDocument/rangeFormatting"),
+    "code_lens": (lsp_code_lens, "textDocument/codeLens"),
+    "create_file": (lsp_create_file, "workspace/willCreateFiles"),
+    "delete_file": (lsp_delete_file, "workspace/willDeleteFiles"),
+    "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
 }
 
 
