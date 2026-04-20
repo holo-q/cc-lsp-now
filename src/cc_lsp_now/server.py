@@ -1487,6 +1487,104 @@ def _wrap_with_header(func: Any, method: str) -> Any:
     return wrapper
 
 
+# Tool → LSP capability path (dotted for nested keys in the initialize response).
+# None means the tool is always enabled (e.g. lsp_confirm is client-side).
+TOOL_CAPABILITIES: dict[str, str | None] = {
+    "diagnostics": "diagnosticProvider",
+    "hover": "hoverProvider",
+    "definition": "definitionProvider",
+    "references": "referencesProvider",
+    "workspace_symbols": "workspaceSymbolProvider",
+    "type_definition": "typeDefinitionProvider",
+    "completion": "completionProvider",
+    "signature_help": "signatureHelpProvider",
+    "document_symbols": "documentSymbolProvider",
+    "formatting": "documentFormattingProvider",
+    "rename": "renameProvider",
+    "prepare_rename": "renameProvider",
+    "code_actions": "codeActionProvider",
+    "call_hierarchy_incoming": "callHierarchyProvider",
+    "call_hierarchy_outgoing": "callHierarchyProvider",
+    "move_file": "workspace.fileOperations.willRename",
+    "implementation": "implementationProvider",
+    "declaration": "declarationProvider",
+    "type_hierarchy_supertypes": "typeHierarchyProvider",
+    "type_hierarchy_subtypes": "typeHierarchyProvider",
+    "inlay_hint": "inlayHintProvider",
+    "folding_range": "foldingRangeProvider",
+    "range_formatting": "documentRangeFormattingProvider",
+    "code_lens": "codeLensProvider",
+    "create_file": "workspace.fileOperations.willCreate",
+    "delete_file": "workspace.fileOperations.willDelete",
+    "confirm": None,
+}
+
+
+def _has_capability(caps: dict, path: str | None) -> bool:
+    if path is None:
+        return True
+    cur: Any = caps
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    return cur is not None and cur is not False
+
+
+def _sync_probe_chain_caps() -> list[dict]:
+    """Spawn each server briefly, read its advertised capabilities, then shut it down.
+
+    Runs at module load. Failure is non-fatal — a server that refuses to probe
+    is treated as supporting everything (no gating applied against it).
+    """
+    import asyncio as _asyncio
+
+    try:
+        chain = _parse_chain()
+    except RuntimeError:
+        return []
+
+    async def probe_one(cfg: dict) -> dict:
+        root = os.environ.get("LSP_ROOT", os.getcwd())
+        client = LspClient([cfg["command"], *cfg["args"]], root)
+        try:
+            await _asyncio.wait_for(client.start(), timeout=15.0)
+            caps = dict(client.capabilities)
+        finally:
+            try:
+                await _asyncio.wait_for(client.stop(), timeout=5.0)
+            except Exception:
+                pass
+        return caps
+
+    async def probe_all() -> list[dict]:
+        results: list[dict] = []
+        for cfg in chain:
+            try:
+                results.append(await probe_one(cfg))
+            except Exception as e:
+                log.warning("capability probe failed for %s: %s", cfg.get("name"), e)
+                results.append({})  # empty caps = this server contributes nothing to the union
+        return results
+
+    try:
+        return _asyncio.run(probe_all())
+    except Exception as e:
+        log.warning("capability probe chain failed: %s", e)
+        return []
+
+
+def _union_supports(chain_caps: list[dict], tool_name: str) -> bool:
+    if not chain_caps:
+        return True  # no probe data → don't gate
+    path = TOOL_CAPABILITIES.get(tool_name)
+    if path is None:
+        return True
+    return any(_has_capability(c, path) for c in chain_caps)
+
+
+_probed_caps = _sync_probe_chain_caps()
+
 _tools_env = os.environ.get("LSP_TOOLS", "")
 _disabled_env = os.environ.get("LSP_DISABLED_TOOLS", "")
 
@@ -1499,6 +1597,12 @@ else:
 
 if _disabled_env:
     _enabled -= {t.strip() for t in _disabled_env.split(",")}
+
+# Capability gating: drop tools no server in the chain supports. Saves context tokens.
+_unsupported = {n for n in _enabled if not _union_supports(_probed_caps, n)}
+if _unsupported:
+    log.info("capability-gated (no server supports): %s", sorted(_unsupported))
+    _enabled -= _unsupported
 
 for _name, (_func, _method) in _ALL_TOOLS.items():
     if _name in _enabled:
