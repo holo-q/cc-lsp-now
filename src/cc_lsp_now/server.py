@@ -52,6 +52,9 @@ DISABLED_BY_DEFAULT = {"formatting"}
 
 
 _last_server: str = ""
+# Workspace folders added by auto-detection during the current tool call.
+# The header wrapper surfaces these so the model sees when a new project was pulled in.
+_added_workspaces_this_call: list[str] = []
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
@@ -317,6 +320,8 @@ async def _ensure_workspace_for(uri: str | None) -> None:
         root = _find_project_root(abs_file)
         if root and root not in client.workspace_folders:
             client.add_workspace_folder(root)
+            if root not in _added_workspaces_this_call:
+                _added_workspaces_this_call.append(root)
 
 
 async def _get_client(idx: int) -> LspClient:
@@ -1642,8 +1647,14 @@ def _wrap_with_header(func: Any, method: str) -> Any:
     async def wrapper(*args: Any, **kwargs: Any) -> str:
         global _last_server
         _last_server = ""
+        _added_workspaces_this_call.clear()
         result = await func(*args, **kwargs)
         header = _header(method) if _last_server else f"[{method}]"
+        if _added_workspaces_this_call:
+            workspace_notes = "\n".join(
+                f"[+workspace] {p}" for p in _added_workspaces_this_call
+            )
+            return f"{header}\n{workspace_notes}\n{result}"
         return f"{header}\n{result}"
 
     return wrapper
