@@ -1680,7 +1680,7 @@ def _union_supports(chain_caps: list[dict], tool_name: str) -> bool:
 _probed_caps = _sync_probe_chain_caps()
 
 _tools_env = os.environ.get("LSP_TOOLS", "")
-_disabled_env = os.environ.get("LSP_DISABLED_TOOLS", "")
+_disabled_env = os.environ.get("LSP_EXCLUDE", "") or os.environ.get("LSP_DISABLED_TOOLS", "")
 
 if _tools_env == "all":
     _enabled = set(_ALL_TOOLS)
