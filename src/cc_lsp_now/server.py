@@ -545,6 +545,119 @@ async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int 
         return f"LSP error: {e}"
 
 
+def _apply_text_edits(text: str, edits: list[dict]) -> str:
+    """Apply LSP TextEdits to a string. Edits are applied end-to-start to keep offsets valid."""
+    # Precompute line start byte offsets
+    line_starts = [0]
+    for i, ch in enumerate(text):
+        if ch == "\n":
+            line_starts.append(i + 1)
+
+    sorted_edits = sorted(
+        edits,
+        key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]),
+        reverse=True,
+    )
+
+    result = text
+    for edit in sorted_edits:
+        start = edit["range"]["start"]
+        end = edit["range"]["end"]
+        s_line = start["line"]
+        e_line = end["line"]
+        if s_line >= len(line_starts) or e_line >= len(line_starts):
+            continue
+        start_offset = line_starts[s_line] + start["character"]
+        end_offset = line_starts[e_line] + end["character"]
+        result = result[:start_offset] + edit["newText"] + result[end_offset:]
+    return result
+
+
+def _apply_workspace_edit(edit: dict) -> list[str]:
+    """Apply a WorkspaceEdit to the filesystem. Returns list of affected paths."""
+    affected: list[str] = []
+
+    for change_uri, edits in edit.get("changes", {}).items():
+        path = _uri_to_path(change_uri)
+        text = Path(path).read_text(encoding="utf-8")
+        Path(path).write_text(_apply_text_edits(text, edits), encoding="utf-8")
+        affected.append(path)
+
+    for doc_change in edit.get("documentChanges", []):
+        if "textDocument" in doc_change:
+            change_uri = doc_change["textDocument"]["uri"]
+            path = _uri_to_path(change_uri)
+            edits = doc_change.get("edits", [])
+            text = Path(path).read_text(encoding="utf-8")
+            Path(path).write_text(_apply_text_edits(text, edits), encoding="utf-8")
+            affected.append(path)
+
+    return affected
+
+
+async def lsp_move_file(from_path: str, to_path: str, apply: bool = False) -> str:
+    """Move/rename a file and get the import-updating edits needed across the workspace.
+
+    Uses workspace/willRenameFiles. By default returns a preview of the edits.
+    Pass apply=True to apply the edits AND move the file atomically.
+    """
+    try:
+        from_uri = file_uri(from_path)
+        to_uri = file_uri(to_path)
+
+        # Make sure the source document is open so the server has context
+        await _request(
+            "workspace/willRenameFiles",
+            {"files": [{"oldUri": from_uri, "newUri": to_uri}]},
+            uri=from_uri,
+        )
+        result = await _request(
+            "workspace/willRenameFiles",
+            {"files": [{"oldUri": from_uri, "newUri": to_uri}]},
+        )
+
+        if not result:
+            result = {}
+
+        # Only files with actual edits (some servers list every workspace file with 0 edits)
+        edit_files: list[tuple[str, list[dict]]] = []
+
+        for change_uri, edits in result.get("changes", {}).items():
+            if edits:
+                edit_files.append((_uri_to_path(change_uri), edits))
+
+        for doc_change in result.get("documentChanges", []):
+            if "textDocument" in doc_change:
+                edits = doc_change.get("edits", [])
+                if edits:
+                    edit_files.append((_uri_to_path(doc_change["textDocument"]["uri"]), edits))
+
+        total_edits = sum(len(e) for _, e in edit_files)
+        lines: list[str] = []
+
+        for path, edits in edit_files:
+            lines.append(f"{path}: {len(edits)} edit(s)")
+            for e in edits:
+                lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
+
+        if not apply:
+            lines.insert(0, f"Preview: {len(edit_files)} file(s), {total_edits} edit(s). Re-call with apply=true to commit.")
+            return "\n".join(lines) if lines else "No edits needed."
+
+        if result:
+            _apply_workspace_edit(result)
+
+        to_dir = os.path.dirname(os.path.abspath(to_path))
+        if to_dir:
+            os.makedirs(to_dir, exist_ok=True)
+        os.rename(from_path, to_path)
+
+        lines.insert(0, f"Applied: moved {from_path} → {to_path}, updated {len(edit_files)} file(s), {total_edits} edit(s).")
+        return "\n".join(lines)
+    except (LspError, ValueError, OSError) as e:
+        return f"LSP error: {e}"
+
+
 async def lsp_prepare_rename(file_path: str, symbol: str = "", line: int = 0) -> str:
     """Check if a symbol can be renamed. Pass symbol name or line number."""
     try:
@@ -811,6 +924,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "formatting": (lsp_formatting, "textDocument/formatting"),
     "rename": (lsp_rename, "textDocument/rename"),
     "prepare_rename": (lsp_prepare_rename, "textDocument/prepareRename"),
+    "move_file": (lsp_move_file, "workspace/willRenameFiles"),
     "code_actions": (lsp_code_actions, "textDocument/codeAction"),
     "call_hierarchy_incoming": (lsp_call_hierarchy_incoming, "callHierarchy/incomingCalls"),
     "call_hierarchy_outgoing": (lsp_call_hierarchy_outgoing, "callHierarchy/outgoingCalls"),
