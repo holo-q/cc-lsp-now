@@ -30,6 +30,31 @@ Plus `lsp_move_file`, `lsp_create_file`, `lsp_delete_file`, `lsp_implementation`
 
 **Want to add yours?** Open a PR adding a bullet here. An LSP plugin is ~20 lines of JSON — see [cc-ty-plugin/plugin.json](https://github.com/holo-q/cc-ty-plugin/blob/main/.claude-plugin/plugin.json) for the minimal shape (lspServers + mcpServers + the redirect hook). Tested language servers we'd like to see plugins for: `rust-analyzer`, `gopls`, `tsserver`, `clangd`, `lua-language-server`, `solargraph`, `elixir-ls`, `haskell-language-server`, `zls`, `nil`, `jdtls`.
 
+## How the model calls the tools
+
+**Symbol names, not line/col.** The bridge resolves names via `documentSymbol` with a text-search fallback:
+
+```
+lsp_hover(file_path="src/app.py", symbol="OmfiApp")
+lsp_definition(file_path="src/app.py", symbol="workflow", line=476)   # disambiguate
+```
+
+**Batching.** Multiple symbols in one file, multiple files in one call:
+
+```
+lsp_hover(file_path="src/app.py", symbols="Foo,Bar,Baz")
+lsp_diagnostics(file_path="a.py,b.py,c.py")
+lsp_diagnostics(pattern="src/**/*.py")
+```
+
+**Output format.** Line-number-anchored text, no JSON envelopes. Each response is prefixed with `[server method]` so the model sees which LSP handled the request:
+
+```
+[ty textDocument/hover]
+<class 'OmfiApp'>
+Standalone ComfyUI frontend built on AppKit.
+```
+
 ## For LSP Plugin Authors
 
 cc-lsp-now is the MCP server; your plugin bundles it. Users install one plugin (yours), get both the native `lspServers` integration (for hooks/diagnostics) *and* the full MCP tool set.
@@ -95,31 +120,6 @@ Set in the `env` block of your `mcpServers` entry:
 **Legacy format** (still accepted when `LSP_SERVERS` is unset): `LSP_COMMAND`/`LSP_ARGS` for primary, `LSP_FALLBACK_COMMAND`/`LSP_FALLBACK_ARGS` for first fallback, `LSP_FALLBACK_2_COMMAND`/`LSP_FALLBACK_2_ARGS` for subsequent fallbacks. Prefer `LSP_SERVERS` for new configs.
 
 **Chain behavior**: per-method. On `-32601` the next server in the chain is tried; the first success is cached for that method. All subsequent calls skip to the cached server. `LSP_PREFER` lets you pre-seed that cache to avoid the first-call cost when you already know which server handles a method best.
-
-## How the model calls the tools
-
-**Symbol names, not line/col.** The bridge resolves names via `documentSymbol` with a text-search fallback:
-
-```
-lsp_hover(file_path="src/app.py", symbol="OmfiApp")
-lsp_definition(file_path="src/app.py", symbol="workflow", line=476)   # disambiguate
-```
-
-**Batching.** Multiple symbols in one file, multiple files in one call:
-
-```
-lsp_hover(file_path="src/app.py", symbols="Foo,Bar,Baz")
-lsp_diagnostics(file_path="a.py,b.py,c.py")
-lsp_diagnostics(pattern="src/**/*.py")
-```
-
-**Output format.** Line-number-anchored text, no JSON envelopes. Each response is prefixed with `[server method]` so the model sees which LSP handled the request:
-
-```
-[ty textDocument/hover]
-<class 'OmfiApp'>
-Standalone ComfyUI frontend built on AppKit.
-```
 
 ## Standalone / CLI Usage
 
