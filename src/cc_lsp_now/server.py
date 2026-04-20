@@ -55,6 +55,10 @@ _last_server: str = ""
 # Workspace folders added by auto-detection during the current tool call.
 # The header wrapper surfaces these so the model sees when a new project was pulled in.
 _added_workspaces_this_call: list[str] = []
+# Workspace folders queued before any client was spawned. Flushed on first client start.
+_pending_workspace_adds: list[str] = []
+# Per-folder files warmed up via didOpen (so we don't re-warm the same folder).
+_warmed_folders: set[tuple[int, str]] = set()  # (chain_idx, folder)
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
@@ -122,6 +126,21 @@ def _apply_candidate(candidate: dict) -> tuple[int, int]:
             if to_dir:
                 os.makedirs(to_dir, exist_ok=True)
             os.rename(from_path, to_path)
+
+    # file_move_batch: replay the list of renames after the single WorkspaceEdit
+    # covers all import fixups. Order doesn't matter since edits are in other
+    # files, and the destinations are unique per call.
+    if candidate.get("kind") == "file_move_batch":
+        for move in candidate.get("moves", []):
+            fp, tp = move.get("from_path"), move.get("to_path")
+            if fp and tp:
+                to_dir = os.path.dirname(os.path.abspath(tp))
+                if to_dir:
+                    os.makedirs(to_dir, exist_ok=True)
+                try:
+                    os.rename(fp, tp)
+                except OSError as e:
+                    log.warning("file_move_batch rename failed %s → %s: %s", fp, tp, e)
 
     # file_create: after any side-effect edits (new imports, __init__ entries)
     # land in sibling modules, materialize the empty file itself. Wrapped in
@@ -305,6 +324,66 @@ def _find_project_root(file_path: str) -> str | None:
     return None
 
 
+def _parse_warmup_patterns() -> list[str]:
+    raw = os.environ.get("LSP_WARMUP_PATTERNS", "").strip()
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _warmup_max_files() -> int:
+    try:
+        return max(0, int(os.environ.get("LSP_WARMUP_MAX_FILES", "500")))
+    except ValueError:
+        return 500
+
+
+async def _warmup_folder(client: LspClient, folder: str) -> int:
+    """Bulk-didOpen files matching LSP_WARMUP_PATTERNS under folder. Returns files warmed."""
+    patterns = _parse_warmup_patterns()
+    if not patterns:
+        return 0
+    limit = _warmup_max_files()
+    if limit <= 0:
+        return 0
+    count = 0
+    root = Path(folder)
+    if not root.is_dir():
+        return 0
+    seen: set[str] = set()
+    for pattern in patterns:
+        try:
+            matches = list(root.rglob(pattern))
+        except OSError:
+            continue
+        for fp in matches:
+            if count >= limit:
+                return count
+            try:
+                resolved = str(fp.resolve())
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                await client.ensure_document(file_uri(resolved))
+                count += 1
+            except Exception:
+                pass
+    return count
+
+
+async def _maybe_warmup(client: LspClient, chain_idx: int, folder: str) -> int:
+    """Warm up a folder only if not already warmed. Silent on failure."""
+    key = (chain_idx, folder)
+    if key in _warmed_folders:
+        return 0
+    _warmed_folders.add(key)
+    n = await _warmup_folder(client, folder)
+    if n > 0:
+        log.info("Warmed %d files in %s for %s", n, folder, _chain_configs[chain_idx]["label"])
+    return n
+
+
 async def _ensure_workspace_for(uri: str | None) -> None:
     """If the file is outside all known workspace folders, find its project root and add it."""
     if not uri:
@@ -322,6 +401,7 @@ async def _ensure_workspace_for(uri: str | None) -> None:
             client.add_workspace_folder(root)
             if root not in _added_workspaces_this_call:
                 _added_workspaces_this_call.append(root)
+            await _maybe_warmup(client, idx, root)
 
 
 async def _get_client(idx: int) -> LspClient:
@@ -332,6 +412,12 @@ async def _get_client(idx: int) -> LspClient:
         client = LspClient([cfg["command"], *cfg["args"]], root)
         await client.start()
         _chain_clients[idx] = client
+        # Flush any pending workspace adds that were queued before this client existed
+        for pending in list(_pending_workspace_adds):
+            if client.add_workspace_folder(pending):
+                await _maybe_warmup(client, idx, pending)
+        # Warm up the primary root too
+        await _maybe_warmup(client, idx, client._root_path)
     client = _chain_clients[idx]
     assert client is not None
     return client
@@ -854,6 +940,142 @@ def _apply_workspace_edit(edit: dict) -> list[str]:
     return affected
 
 
+def _collect_edit_files(result: dict) -> list[tuple[str, list[dict]]]:
+    """Flatten a WorkspaceEdit into [(path, edits), ...], dropping 0-edit entries."""
+    edit_files: list[tuple[str, list[dict]]] = []
+    for change_uri, edits in result.get("changes", {}).items():
+        if edits:
+            edit_files.append((_uri_to_path(change_uri), edits))
+    for doc_change in result.get("documentChanges", []):
+        if "textDocument" in doc_change:
+            edits = doc_change.get("edits", [])
+            if edits:
+                edit_files.append((_uri_to_path(doc_change["textDocument"]["uri"]), edits))
+    return edit_files
+
+
+def _check_move_discrepancy(from_paths: list[str]) -> str | None:
+    """Heuristic: if move_file returned 0 edits, scan for files that mention any
+    moved file's module name (basename sans extension). Catches the 'cold index' failure
+    mode where the LSP returns 0 edits but regex shows actual importers exist.
+    """
+    if not from_paths:
+        return None
+    patterns = _parse_warmup_patterns() or ["*.py"]
+    basenames = [Path(p).stem for p in from_paths if Path(p).stem and len(Path(p).stem) >= 3]
+    if not basenames:
+        return None
+
+    folders: set[str] = set()
+    for client in _chain_clients:
+        if client is not None:
+            folders.update(client.workspace_folders)
+    if not folders:
+        return None
+
+    hits: list[str] = []
+    MAX_HITS = 10
+    MAX_SCAN = 2000
+    scanned = 0
+    source_paths = {os.path.abspath(p) for p in from_paths}
+    for folder in folders:
+        for pattern in patterns:
+            try:
+                candidates = list(Path(folder).rglob(pattern))
+            except OSError:
+                continue
+            for fp in candidates:
+                if scanned >= MAX_SCAN:
+                    break
+                try:
+                    abs_p = str(fp.resolve())
+                except OSError:
+                    continue
+                if abs_p in source_paths:
+                    continue
+                scanned += 1
+                try:
+                    text = fp.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for name in basenames:
+                    if name in text:
+                        hits.append(abs_p)
+                        break
+                if len(hits) >= MAX_HITS:
+                    return (
+                        f"⚠ 0 edits returned but {len(hits)}+ files mention the module name(s). "
+                        f"LSP index may be cold. First hits:\n  " + "\n  ".join(hits[:MAX_HITS])
+                    )
+    if hits:
+        return (
+            f"⚠ 0 edits returned but {len(hits)} file(s) mention the module name(s). "
+            f"LSP index may be cold:\n  " + "\n  ".join(hits)
+        )
+    return None
+
+
+async def _do_move(files: list[tuple[str, str]]) -> str:
+    """Core willRenameFiles + preview staging for one or more file moves."""
+    files_param = [{"oldUri": file_uri(f), "newUri": file_uri(t)} for f, t in files]
+
+    # Prime source docs so the server has context
+    for f, _ in files:
+        await _request(
+            "workspace/willRenameFiles",
+            {"files": files_param},
+            uri=file_uri(f),
+        )
+        break  # _request for any one file is enough to ensure workspace + warmup
+
+    result = await _request("workspace/willRenameFiles", {"files": files_param})
+    if not result:
+        result = {}
+
+    edit_files = _collect_edit_files(result)
+    total_edits = sum(len(e) for _, e in edit_files)
+
+    lines: list[str] = []
+    for path, edits in edit_files:
+        lines.append(f"{path}: {len(edits)} edit(s)")
+        for e in edits:
+            lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
+
+    # Stage candidate: single WorkspaceEdit covering all renames, plus a list of
+    # per-file move operations so _apply_candidate runs the mv after edits land.
+    move_desc = (
+        f"move {files[0][0]} → {files[0][1]}" if len(files) == 1
+        else f"batch move {len(files)} file(s)"
+    )
+    description = f"{move_desc} ({len(edit_files)} file(s), {total_edits} edit(s))"
+    candidate: dict = {
+        "kind": "file_move" if len(files) == 1 else "file_move_batch",
+        "title": description,
+    }
+    if len(files) == 1:
+        candidate["from_path"] = files[0][0]
+        candidate["to_path"] = files[0][1]
+    else:
+        candidate["moves"] = [{"from_path": f, "to_path": t} for f, t in files]
+    if result:
+        candidate["edit"] = result
+    _set_pending(candidate["kind"], [candidate], description)
+
+    lines.insert(
+        0,
+        f"Preview: {len(edit_files)} file(s), {total_edits} edit(s). Call lsp_confirm(0) to commit the move.",
+    )
+
+    if total_edits == 0 and len(edit_files) == 0:
+        warning = _check_move_discrepancy([f for f, _ in files])
+        if warning:
+            lines.append("")
+            lines.append(warning)
+            lines.append("Options: (1) pre-warm importer files via lsp_hover, (2) lsp_add_workspace on the project, (3) fall back to regex rewrite if LSP is unreliable here.")
+
+    return "\n".join(lines)
+
+
 async def lsp_move_file(from_path: str, to_path: str) -> str:
     """Move/rename a file and preview the import-updating edits needed across the workspace.
 
@@ -861,65 +1083,31 @@ async def lsp_move_file(from_path: str, to_path: str) -> str:
     WorkspaceEdit + file-move metadata is staged under the module-level
     ``_pending`` buffer. Call ``lsp_confirm(0)`` to commit both the edits
     and the actual ``os.rename`` atomically.
+
+    For bulk reorgs, prefer ``lsp_move_files`` which batches many moves
+    into a single willRenameFiles request.
     """
     try:
-        from_uri = file_uri(from_path)
-        to_uri = file_uri(to_path)
+        return await _do_move([(from_path, to_path)])
+    except (LspError, ValueError, OSError) as e:
+        return f"LSP error: {e}"
 
-        # Make sure the source document is open so the server has context
-        await _request(
-            "workspace/willRenameFiles",
-            {"files": [{"oldUri": from_uri, "newUri": to_uri}]},
-            uri=from_uri,
-        )
-        result = await _request(
-            "workspace/willRenameFiles",
-            {"files": [{"oldUri": from_uri, "newUri": to_uri}]},
-        )
 
-        if not result:
-            result = {}
+async def lsp_move_files(from_paths: str, to_paths: str) -> str:
+    """Batch-move multiple files in one willRenameFiles call.
 
-        # Only files with actual edits (some servers list every workspace file with 0 edits)
-        edit_files: list[tuple[str, list[dict]]] = []
-
-        for change_uri, edits in result.get("changes", {}).items():
-            if edits:
-                edit_files.append((_uri_to_path(change_uri), edits))
-
-        for doc_change in result.get("documentChanges", []):
-            if "textDocument" in doc_change:
-                edits = doc_change.get("edits", [])
-                if edits:
-                    edit_files.append((_uri_to_path(doc_change["textDocument"]["uri"]), edits))
-
-        total_edits = sum(len(e) for _, e in edit_files)
-        lines: list[str] = []
-
-        for path, edits in edit_files:
-            lines.append(f"{path}: {len(edits)} edit(s)")
-            for e in edits:
-                lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
-
-        # Stage the edit + file-move metadata as a single candidate.
-        # _apply_candidate special-cases kind="file_move" to run os.rename after
-        # the WorkspaceEdit writes land, keeping import-fixup + rename atomic.
-        description = f"move {from_path} → {to_path} ({len(edit_files)} file(s), {total_edits} edit(s))"
-        candidate: dict = {
-            "kind": "file_move",
-            "from_path": from_path,
-            "to_path": to_path,
-            "title": description,
-        }
-        if result:
-            candidate["edit"] = result
-        _set_pending("file_move", [candidate], description)
-
-        lines.insert(
-            0,
-            f"Preview: {len(edit_files)} file(s), {total_edits} edit(s). Call lsp_confirm(0) to commit the move.",
-        )
-        return "\n".join(lines)
+    Pass comma-separated lists; the i-th from-path moves to the i-th to-path.
+    Single preview covers all renames; single lsp_confirm(0) commits them
+    atomically. Much faster than N individual move_file calls for reorgs.
+    """
+    try:
+        froms = [p.strip() for p in from_paths.split(",") if p.strip()]
+        tos = [p.strip() for p in to_paths.split(",") if p.strip()]
+        if len(froms) != len(tos):
+            return f"Mismatch: {len(froms)} from-paths vs {len(tos)} to-paths"
+        if not froms:
+            return "No files specified."
+        return await _do_move(list(zip(froms, tos)))
     except (LspError, ValueError, OSError) as e:
         return f"LSP error: {e}"
 
@@ -1018,10 +1206,11 @@ async def lsp_workspaces() -> str:
 
 
 async def lsp_add_workspace(path: str) -> str:
-    """Explicitly add a workspace folder to every running LSP in the chain.
+    """Explicitly add a workspace folder. Applies to every LSP in the chain.
 
     Auto-detection via LSP_PROJECT_MARKERS handles most cases; use this when
-    the heuristic doesn't find the root (e.g. unusual layout, no marker files).
+    the heuristic doesn't find the root (unusual layout, no marker files) or
+    you want to pre-index a folder before making a batch refactor call.
     """
     _ensure_chain_configs()
     abs_path = os.path.abspath(path)
@@ -1032,10 +1221,17 @@ async def lsp_add_workspace(path: str) -> str:
     for idx, cfg in enumerate(_chain_configs):
         client = _chain_clients[idx]
         if client is None:
-            results.append(f"[{cfg['label']}] skipped (not started)")
+            if abs_path not in _pending_workspace_adds:
+                _pending_workspace_adds.append(abs_path)
+            results.append(f"[{cfg['label']}] queued (applied on spawn)")
             continue
         added = client.add_workspace_folder(abs_path)
-        results.append(f"[{cfg['label']}] {'added' if added else 'already present'}")
+        if added:
+            warmed = await _maybe_warmup(client, idx, abs_path)
+            suffix = f" — warmed {warmed} files" if warmed else ""
+            results.append(f"[{cfg['label']}] added{suffix}")
+        else:
+            results.append(f"[{cfg['label']}] already present")
     return "\n".join(results)
 
 
@@ -1637,6 +1833,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
     "workspaces": (lsp_workspaces, "cc-lsp-now/workspaces"),
     "add_workspace": (lsp_add_workspace, "cc-lsp-now/add_workspace"),
+    "move_files": (lsp_move_files, "workspace/willRenameFiles"),
 }
 
 
@@ -1692,6 +1889,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "confirm": None,
     "workspaces": None,
     "add_workspace": None,
+    "move_files": "workspace.fileOperations.willRename",
 }
 
 
