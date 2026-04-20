@@ -149,6 +149,31 @@ def _apply_candidate(candidate: dict) -> tuple[int, int]:
     return len(affected), edit_count
 
 
+def _parse_replace() -> dict[str, str]:
+    """Parse LSP_REPLACE into a command→command substitution map.
+
+    Format: 'old=new,old=new'
+    Example: 'basedpyright-langserver=pylance-language-server'
+
+    Applied as a post-filter on LSP_SERVERS entries and LSP_PREFER targets —
+    lets a downstream user swap a binary without rewriting the plugin's full
+    config sheet.
+    """
+    env = os.environ.get("LSP_REPLACE", "").strip()
+    if not env:
+        return {}
+    result: dict[str, str] = {}
+    for entry in env.split(","):
+        entry = entry.strip()
+        if "=" not in entry:
+            continue
+        old, new = entry.split("=", 1)
+        old, new = old.strip(), new.strip()
+        if old and new:
+            result[old] = new
+    return result
+
+
 def _parse_chain() -> list[dict]:
     """Build the LSP chain from env vars. Index 0 = primary, 1+ = fallbacks in order.
 
@@ -160,7 +185,14 @@ def _parse_chain() -> list[dict]:
         LSP_COMMAND=ty LSP_ARGS=server
         LSP_FALLBACK_COMMAND=basedpyright-langserver LSP_FALLBACK_ARGS=--stdio
         LSP_FALLBACK_2_COMMAND=... LSP_FALLBACK_2_ARGS=...
+
+    LSP_REPLACE (optional): applies after parsing. 'basedpyright-langserver=pylance-language-server'
+    swaps the command everywhere it appears in the chain and in LSP_PREFER.
     """
+    replace = _parse_replace()
+
+    def _sub(cmd: str) -> str:
+        return replace.get(cmd, cmd)
     servers_env = os.environ.get("LSP_SERVERS", "").strip()
     if servers_env:
         chain: list[dict] = []
@@ -168,7 +200,7 @@ def _parse_chain() -> list[dict]:
             if not entry:
                 continue
             tokens = entry.split()
-            cmd, args = tokens[0], tokens[1:]
+            cmd, args = _sub(tokens[0]), tokens[1:]
             label = cmd if i == 0 else f"{cmd} (fallback{f' {i}' if i > 1 else ''})"
             chain.append({"command": cmd, "args": args, "name": cmd, "label": label})
         if not chain:
@@ -179,6 +211,7 @@ def _parse_chain() -> list[dict]:
     primary_cmd = os.environ.get("LSP_COMMAND")
     if not primary_cmd:
         raise RuntimeError("LSP_SERVERS or LSP_COMMAND environment variable is required")
+    primary_cmd = _sub(primary_cmd)
 
     chain = [{
         "command": primary_cmd,
@@ -189,6 +222,7 @@ def _parse_chain() -> list[dict]:
 
     first_fb = os.environ.get("LSP_FALLBACK_COMMAND")
     if first_fb:
+        first_fb = _sub(first_fb)
         chain.append({
             "command": first_fb,
             "args": os.environ.get("LSP_FALLBACK_ARGS", "").split() if os.environ.get("LSP_FALLBACK_ARGS") else [],
@@ -201,6 +235,7 @@ def _parse_chain() -> list[dict]:
         cmd = os.environ.get(f"LSP_FALLBACK_{i}_COMMAND")
         if not cmd:
             break
+        cmd = _sub(cmd)
         chain.append({
             "command": cmd,
             "args": os.environ.get(f"LSP_FALLBACK_{i}_ARGS", "").split() if os.environ.get(f"LSP_FALLBACK_{i}_ARGS") else [],
@@ -222,6 +257,7 @@ def _parse_prefer(chain: list[dict]) -> dict[str, int]:
     prefer_env = os.environ.get("LSP_PREFER", "").strip()
     if not prefer_env:
         return {}
+    replace = _parse_replace()
     result: dict[str, int] = {}
     for entry in prefer_env.split(","):
         entry = entry.strip()
@@ -229,6 +265,7 @@ def _parse_prefer(chain: list[dict]) -> dict[str, int]:
             continue
         method, cmd = entry.split("=", 1)
         method, cmd = method.strip(), cmd.strip()
+        cmd = replace.get(cmd, cmd)
         for idx, cfg in enumerate(chain):
             if cfg["command"] == cmd:
                 result[method] = idx
