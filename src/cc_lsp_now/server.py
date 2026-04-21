@@ -450,11 +450,18 @@ async def _get_client(idx: int) -> LspClient:
     return client
 
 
+_SLOW_METHODS: set[str] = {
+    "workspace/willRenameFiles",
+}
+_SLOW_TIMEOUT = 90.0
+
 async def _request(method: str, params: dict | None, *, uri: str | None = None) -> Any:
     """Route a request through the chain. Caches which server handles each method."""
     global _last_server
     _ensure_chain_configs()
     empty_fallback = _parse_empty_fallback_methods()
+
+    timeout = _SLOW_TIMEOUT if method in _SLOW_METHODS else 30.0
 
     # Fast path: method already resolved to a specific chain index
     if method in _method_handler:
@@ -467,7 +474,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
             await client.ensure_document(uri)
         _last_server = _chain_configs[idx].label
         try:
-            return await client.request(method, params)
+            return await client.request(method, params, timeout=timeout)
         except asyncio.TimeoutError:
             agent_log(f"{_chain_configs[idx].label} timed out on {method} (cached), invalidating")
             del _method_handler[method]
@@ -484,10 +491,9 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         if uri:
             await client.ensure_document(uri)
         try:
-            result = await client.request(method, params)
+            result = await client.request(method, params, timeout=timeout)
         except asyncio.TimeoutError:
-            agent_log(f"{_chain_configs[idx].label} timed out on {method}, trying next")
-            last_err = LspError(-32601, f"{method} timed out")
+            agent_log(f"{_chain_configs[idx].label} timed out on {method} after {timeout}s, trying next")
             continue
         except LspError as e:
             if e.code != -32601:
@@ -521,8 +527,10 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         _last_server = _chain_configs[last_empty_idx].label
         return last_empty
 
-    _method_handler[method] = None
-    raise last_err or LspError(-32601, f"{method} not supported by any server in the chain")
+    # Only cache as unsupported if we got actual -32601 errors, not just timeouts
+    if last_err is not None:
+        _method_handler[method] = None
+    raise last_err or LspError(-32601, f"{method} timed out on all servers in the chain")
 
 
 def _header(method: str) -> str:

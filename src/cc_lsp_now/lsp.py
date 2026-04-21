@@ -355,11 +355,10 @@ class LspClient:
             params = msg.get("params", {}) or {}
 
             if method == "workspace/configuration":
-                # Return empty config objects — servers use these to fetch
-                # user settings (python.analysis.*, etc.). Empty means "use
-                # your defaults", which is what a bare headless client wants.
                 items = params.get("items", [])
                 result = [{} for _ in items]
+                sections = [it.get("section", "?") for it in items]
+                agent_log(f"[{self._command[0]} ← {method}] sections={sections}")
                 self._send({"jsonrpc": "2.0", "id": req_id, "result": result})
             elif method in (
                 "client/registerCapability",
@@ -367,14 +366,10 @@ class LspClient:
                 "window/workDoneProgress/create",
                 "window/showMessageRequest",
             ):
-                # Acknowledge — we don't actually do dynamic capability
-                # registration or progress UI, but the server just wants to
-                # know we saw it.
+                agent_log(f"[{self._command[0]} ← {method}] ack")
                 self._send({"jsonrpc": "2.0", "id": req_id, "result": None})
             else:
-                # Unknown method — return -32601 so the server falls back
-                # gracefully. Safe for most requests; only the "critical"
-                # ones above need explicit handling.
+                agent_log(f"[{self._command[0]} ← {method}] unknown, returning -32601")
                 self._send(
                     {
                         "jsonrpc": "2.0",
