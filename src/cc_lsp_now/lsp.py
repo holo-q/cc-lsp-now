@@ -107,20 +107,23 @@ class LspClient:
                     },
                     "workspace": {
                         "workspaceFolders": True,
-                        # NOTE: we intentionally do NOT declare
-                        # workspace.fileOperations client support even though
-                        # pylance's willRenameFiles gate requires it. Declaring
-                        # it makes pylance disconnect silently on the next
-                        # request (confirmed via bisection on a 4-file test).
-                        # Without the declaration, pylance skips rename handling
-                        # entirely but stays alive — and since willRenameFiles
-                        # returns 0 edits anyway without the full VSCode-style
-                        # client setup (diagnosticMode, trusted workspace,
-                        # clientVerification handshake, etc.), there's no loss.
-                        # LSP_LANGUAGE=python activates the bridge's regex
-                        # rewriter which handles imports reliably across all
-                        # LSPs in the chain regardless of whether they
-                        # implement willRenameFiles.
+                        "configuration": True,
+                        "fileOperations": {
+                            "dynamicRegistration": False,
+                            "willRename": True,
+                            "didRename": True,
+                            "willCreate": True,
+                            "didCreate": True,
+                            "willDelete": True,
+                            "didDelete": True,
+                        },
+                        "workspaceEdit": {
+                            "documentChanges": True,
+                            "resourceOperations": ["create", "rename", "delete"],
+                            "failureHandling": "textOnlyTransactional",
+                            "normalizesLineEndings": True,
+                            "changeAnnotationSupport": {"groupsOnLabel": True},
+                        },
                     },
                 },
                 "workspaceFolders": [
@@ -335,14 +338,41 @@ class LspClient:
             self._handle_notification(msg["method"], msg.get("params", {}))
 
         elif "method" in msg and "id" in msg:
-            # Server-to-client request — respond with method-not-found
-            self._send(
-                {
-                    "jsonrpc": "2.0",
-                    "id": msg["id"],
-                    "error": {"code": -32601, "message": "Method not found"},
-                }
-            )
+            # Server-to-client request. Some servers (notably pylance) blow up
+            # if we blanket-reject these — they're waiting on responses to
+            # advance their state machine. Handle the common ones sanely.
+            method = msg["method"]
+            req_id = msg["id"]
+            params = msg.get("params", {}) or {}
+
+            if method == "workspace/configuration":
+                # Return empty config objects — servers use these to fetch
+                # user settings (python.analysis.*, etc.). Empty means "use
+                # your defaults", which is what a bare headless client wants.
+                items = params.get("items", [])
+                result = [{} for _ in items]
+                self._send({"jsonrpc": "2.0", "id": req_id, "result": result})
+            elif method in (
+                "client/registerCapability",
+                "client/unregisterCapability",
+                "window/workDoneProgress/create",
+                "window/showMessageRequest",
+            ):
+                # Acknowledge — we don't actually do dynamic capability
+                # registration or progress UI, but the server just wants to
+                # know we saw it.
+                self._send({"jsonrpc": "2.0", "id": req_id, "result": None})
+            else:
+                # Unknown method — return -32601 so the server falls back
+                # gracefully. Safe for most requests; only the "critical"
+                # ones above need explicit handling.
+                self._send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32601, "message": "Method not found"},
+                    }
+                )
 
     def _handle_notification(self, method: str, params: dict[str, Any]) -> None:
         if method == "textDocument/publishDiagnostics":
