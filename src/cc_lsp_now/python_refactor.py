@@ -116,6 +116,30 @@ def python_import_rewrite(
          rf"\1{new_module}\2\3"),
     ]
 
+    # Module-attribute import: `from parent_pkg import module_name [as alias]`
+    # Only safe to rewrite when the leaf is the SOLE import on the line —
+    # multi-import lines like `from foo import helper, Config` would lose Config.
+    if "." in old_module and "." in new_module:
+        old_parent, old_leaf = old_module.rsplit(".", 1)
+        new_parent, new_leaf = new_module.rsplit(".", 1)
+        if old_leaf == new_leaf:
+            leaf_esc = re.escape(old_leaf)
+            old_parent_esc = re.escape(old_parent)
+            # `from old_parent import leaf` (end of line or trailing comment)
+            patterns.append((
+                re.compile(
+                    rf"(^\s*from\s+){old_parent_esc}(\s+import\s+){leaf_esc}(\s*(?:#.*)?)$"
+                ),
+                rf"\1{new_parent}\2{new_leaf}\3",
+            ))
+            # `from old_parent import leaf as alias`
+            patterns.append((
+                re.compile(
+                    rf"(^\s*from\s+){old_parent_esc}(\s+import\s+){leaf_esc}(\s+as\s+[A-Za-z_]\w*\s*(?:#.*)?)$"
+                ),
+                rf"\1{new_parent}\2{new_leaf}\3",
+            ))
+
     patterns_glob = source_patterns or ["*.py"]
     from_abs = os.path.abspath(from_path)
 

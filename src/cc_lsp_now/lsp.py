@@ -80,6 +80,7 @@ class LspClient:
             stderr=asyncio.subprocess.PIPE,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
+        self._stderr_task = asyncio.create_task(self._stderr_loop())
         self._started = True
 
         result = await self.request(
@@ -143,12 +144,13 @@ class LspClient:
         except (ConnectionError, BrokenPipeError):
             pass
 
-        if self._reader_task is not None:
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._reader_task, getattr(self, "_stderr_task", None)):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         try:
             self._process.terminate()
@@ -260,10 +262,38 @@ class LspClient:
         except Exception:
             log.exception("LSP read loop error")
         finally:
+            self._last_stderr_tail = getattr(self, "_last_stderr_tail", [])
+            tail = "\n".join(self._last_stderr_tail[-20:]) if self._last_stderr_tail else ""
             for future in self._pending.values():
                 if not future.done():
-                    future.set_exception(ConnectionError("LSP server disconnected"))
+                    msg = "LSP server disconnected"
+                    if tail:
+                        msg += f". Last stderr:\n{tail}"
+                    future.set_exception(ConnectionError(msg))
             self._pending.clear()
+
+    async def _stderr_loop(self) -> None:
+        """Drain the server's stderr into log.warning. Keeps a tail of the last
+        N lines so we can include them in the disconnect message."""
+        assert self._process is not None and self._process.stderr is not None
+        reader = self._process.stderr
+        self._last_stderr_tail: list[str] = []
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                if not decoded:
+                    continue
+                log.warning("LSP stderr (%s): %s", self._command[0], decoded)
+                self._last_stderr_tail.append(decoded)
+                if len(self._last_stderr_tail) > 40:
+                    self._last_stderr_tail = self._last_stderr_tail[-40:]
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("LSP stderr loop error")
 
     @staticmethod
     async def _read_headers(reader: asyncio.StreamReader) -> int | None:

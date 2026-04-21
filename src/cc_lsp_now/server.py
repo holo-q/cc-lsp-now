@@ -1079,18 +1079,51 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
     """Core willRenameFiles + preview staging for one or more file moves."""
     files_param = [{"oldUri": file_uri(f), "newUri": file_uri(t)} for f, t in files]
 
-    # Prime source docs so the server has context
+    # Open all source docs on whichever client handles the request (done by
+    # _request's uri= path). Just trigger workspace auto-add for each file
+    # BEFORE the request, so basedpyright/pylance see the right roots.
+    # Don't pre-ensure_document across all clients — that sends redundant
+    # didOpen/didChange to servers that will never process the method and
+    # can confuse strict ones (pylance got unhappy with didOpen+didChange+
+    # willRename in rapid succession).
+    first_uri = file_uri(files[0][0])
     for f, _ in files:
-        await _request(
+        await _ensure_workspace_for(file_uri(f))
+
+    try:
+        result = await _request(
             "workspace/willRenameFiles",
             {"files": files_param},
-            uri=file_uri(f),
+            uri=first_uri,
         )
-        break  # _request for any one file is enough to ensure workspace + warmup
-
-    result = await _request("workspace/willRenameFiles", {"files": files_param})
+    except (LspError, ConnectionError) as e:
+        log.warning("willRenameFiles failed (%s), falling through to rewriter", e)
+        result = {}
     if not result:
         result = {}
+
+    # Language-specific import rewriter fallback. If the LSP returned 0 edits
+    # (or crashed) but imports exist, let a language-aware rewriter inside the
+    # bridge fill in. Gated by LSP_LANGUAGE so we don't Python-stuff other
+    # languages' moves.
+    lsp_edits = _collect_edit_files(result)
+    if not lsp_edits and os.environ.get("LSP_LANGUAGE", "").strip().lower() == "python":
+        workspace_folders: set[str] = set()
+        for client in _chain_clients:
+            if client is not None:
+                workspace_folders.update(client.workspace_folders)
+        if not workspace_folders:
+            workspace_folders.add(os.environ.get("LSP_ROOT", os.getcwd()))
+
+        rewriter_changes: dict = {"changes": {}}
+        for f, t in files:
+            edit, scanned = python_import_rewrite(f, t, sorted(workspace_folders))
+            log.info("python rewriter: %s → %s scanned %d files, %d edit groups",
+                     f, t, scanned, len(edit.get("changes", {})))
+            rewriter_changes = merge_workspace_edits(rewriter_changes, edit)
+
+        if rewriter_changes.get("changes"):
+            result = merge_workspace_edits(result, rewriter_changes)
 
     edit_files = _collect_edit_files(result)
     total_edits = sum(len(e) for _, e in edit_files)
