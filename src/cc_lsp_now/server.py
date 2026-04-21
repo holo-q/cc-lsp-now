@@ -359,6 +359,23 @@ def _warmup_max_files() -> int:
         return 500
 
 
+_WARMUP_ALWAYS_EXCLUDE = {".venv", "venv", "__pycache__", "node_modules", ".git", ".claude"}
+
+
+def _parse_warmup_exclude() -> set[str]:
+    raw = os.environ.get("LSP_WARMUP_EXCLUDE", "").strip()
+    custom = {p.strip() for p in raw.split(",") if p.strip()}
+    return _WARMUP_ALWAYS_EXCLUDE | custom
+
+
+def _is_excluded(path: Path, root: Path, exclude_names: set[str]) -> bool:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    return any(part in exclude_names for part in rel.parts)
+
+
 async def _warmup_folder(client: LspClient, folder: str) -> int:
     """Bulk-didOpen files matching LSP_WARMUP_PATTERNS under folder. Returns files warmed."""
     patterns = _parse_warmup_patterns()
@@ -367,6 +384,7 @@ async def _warmup_folder(client: LspClient, folder: str) -> int:
     limit = _warmup_max_files()
     if limit <= 0:
         return 0
+    exclude_names = _parse_warmup_exclude()
     count = 0
     root = Path(folder)
     if not root.is_dir():
@@ -380,6 +398,8 @@ async def _warmup_folder(client: LspClient, folder: str) -> int:
         for fp in matches:
             if count >= limit:
                 return count
+            if _is_excluded(fp, root, exclude_names):
+                continue
             try:
                 resolved = str(fp.resolve())
             except OSError:
@@ -453,7 +473,7 @@ async def _get_client(idx: int) -> LspClient:
 _SLOW_METHODS: set[str] = {
     "workspace/willRenameFiles",
 }
-_SLOW_TIMEOUT = 90.0
+_SLOW_TIMEOUT = 300.0
 
 async def _request(method: str, params: dict | None, *, uri: str | None = None) -> Any:
     """Route a request through the chain. Caches which server handles each method."""
