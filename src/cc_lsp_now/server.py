@@ -15,6 +15,12 @@ from mcp.server.fastmcp import FastMCP
 from cc_lsp_now.agent_log import agent_log, drain_agent_messages
 from cc_lsp_now.lsp import LspClient, LspError, file_uri
 from cc_lsp_now.python_refactor import merge_workspace_edits, python_import_rewrite
+from cc_lsp_now.candidate import Candidate
+from cc_lsp_now.candidate_kind import CandidateKind
+from cc_lsp_now.chain_server import ChainServer
+from cc_lsp_now.file_move import FileMove
+from cc_lsp_now.pending_buffer import PendingBuffer
+from cc_lsp_now.warmup_stats import WarmupStats
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +34,7 @@ mcp = FastMCP(
     ),
 )
 
-_chain_configs: list[dict] = []  # [{command, args, name}, ...] parsed from env at first use
+_chain_configs: list[ChainServer] = []  # parsed from env at first use
 _chain_clients: list[LspClient | None] = []  # lazy-spawned clients, same index as _chain_configs
 _method_handler: dict[str, int | None] = {}  # method -> chain index; None = exhausted (all -32601)
 
@@ -65,8 +71,8 @@ _pending_workspace_adds: list[str] = []
 _just_started_this_call: list[str] = []
 # Per-folder files warmed up via didOpen (so we don't re-warm the same folder).
 _warmed_folders: set[tuple[int, str]] = set()  # (chain_idx, folder)
-# Warmup metadata for status reporting: (chain_idx, folder) -> {count, timestamp}
-_folder_warmup_stats: dict[tuple[int, str], dict] = {}
+# Warmup metadata for status reporting: (chain_idx, folder) -> WarmupStats
+_folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
@@ -74,45 +80,32 @@ _folder_warmup_stats: dict[tuple[int, str], dict] = {}
 # applying edits immediately. The preview populates a module-level buffer that
 # the agent can then commit via `lsp_confirm(index)`.
 #
-# Shape:
-#   {
-#     "kind": str,           # e.g. "code_action", "file_move"
-#     "candidates": list[dict],  # each is a WorkspaceEdit or { edit: WorkspaceEdit, ... }
-#     "description": str,    # short human-readable preview summary
-#   }
-#
 # The buffer is single-slot — any new preview displaces the previous one.
 # This matches the preview→confirm-or-replace flow the agent drives.
-_pending: dict | None = None
+_pending: PendingBuffer | None = None
 
 
-def _set_pending(kind: str, candidates: list[dict], description: str) -> None:
+def _set_pending(kind: str, candidates: list[Candidate], description: str) -> None:
     """Stage a set of candidate WorkspaceEdits for later confirmation.
 
     Overwrites any previous pending state. The agent issues `lsp_confirm(index)`
     to pick one candidate out of ``candidates`` and apply it.
     """
     global _pending
-    _pending = {"kind": kind, "candidates": candidates, "description": description}
+    _pending = PendingBuffer(kind=kind, candidates=candidates, description=description)
 
 
-def _apply_candidate(candidate: dict) -> tuple[int, int]:
+def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
     """Apply a single preview candidate's WorkspaceEdit.
 
-    A candidate may either BE a WorkspaceEdit directly (has ``changes`` or
-    ``documentChanges``) or wrap one under an ``"edit"`` field (LSP CodeAction
-    shape). Special-cased: if candidate has ``"kind": "file_move"`` with
-    ``from_path`` / ``to_path``, the actual ``os.rename`` happens after edits
-    are written — this keeps the import-rewrite + file-move atomic per the
-    move_file flow.
+    The candidate's ``edit`` dict holds the WorkspaceEdit. Special-cased:
+    if candidate kind is ``FILE_MOVE`` with ``from_path`` / ``to_path``, the
+    actual ``os.rename`` happens after edits are written — this keeps the
+    import-rewrite + file-move atomic per the move_file flow.
 
     Returns (file_count, edit_count) for the summary line.
     """
-    # Unwrap: CodeAction-shaped candidates carry the WorkspaceEdit under "edit"
-    if "edit" in candidate and isinstance(candidate["edit"], dict):
-        edit = candidate["edit"]
-    else:
-        edit = candidate
+    edit = candidate.edit
 
     affected: list[str] = []
     if edit.get("changes") or edit.get("documentChanges"):
@@ -126,55 +119,50 @@ def _apply_candidate(candidate: dict) -> tuple[int, int]:
             edit_count += len(doc_change.get("edits", []))
 
     # file_move finishes with the rename itself — after any import edits landed.
-    if candidate.get("kind") == "file_move":
-        from_path = candidate.get("from_path")
-        to_path = candidate.get("to_path")
-        if from_path and to_path:
-            to_dir = os.path.dirname(os.path.abspath(to_path))
+    if candidate.kind == CandidateKind.FILE_MOVE:
+        if candidate.from_path and candidate.to_path:
+            to_dir = os.path.dirname(os.path.abspath(candidate.to_path))
             if to_dir:
                 os.makedirs(to_dir, exist_ok=True)
-            os.rename(from_path, to_path)
+            os.rename(candidate.from_path, candidate.to_path)
 
     # file_move_batch: replay the list of renames after the single WorkspaceEdit
     # covers all import fixups. Order doesn't matter since edits are in other
     # files, and the destinations are unique per call.
-    if candidate.get("kind") == "file_move_batch":
-        for move in candidate.get("moves", []):
-            fp, tp = move.get("from_path"), move.get("to_path")
-            if fp and tp:
-                to_dir = os.path.dirname(os.path.abspath(tp))
+    if candidate.kind == CandidateKind.FILE_MOVE_BATCH:
+        for move in candidate.moves:
+            if move.from_path and move.to_path:
+                to_dir = os.path.dirname(os.path.abspath(move.to_path))
                 if to_dir:
                     os.makedirs(to_dir, exist_ok=True)
                 try:
-                    os.rename(fp, tp)
+                    os.rename(move.from_path, move.to_path)
                 except OSError as e:
-                    agent_log(f"file_move_batch rename failed {fp} → {tp}: {e}")
+                    agent_log(f"file_move_batch rename failed {move.from_path} → {move.to_path}: {e}")
 
     # file_create: after any side-effect edits (new imports, __init__ entries)
     # land in sibling modules, materialize the empty file itself. Wrapped in
     # try/except so a filesystem-level failure doesn't crash the confirm path —
     # the edits already wrote successfully and agent can recover manually.
-    if candidate.get("kind") == "file_create":
-        create_path = candidate.get("create_path")
-        if create_path:
+    if candidate.kind == CandidateKind.FILE_CREATE:
+        if candidate.from_path:
             try:
-                target = Path(create_path)
+                target = Path(candidate.from_path)
                 parent = target.parent
                 if str(parent):
                     parent.mkdir(parents=True, exist_ok=True)
                 target.touch(exist_ok=True)
             except OSError as e:
-                agent_log(f"file_create touch failed for {create_path}: {e}")
+                agent_log(f"file_create touch failed for {candidate.from_path}: {e}")
 
     # file_delete: cleanup edits have fixed up imports/registrations in siblings;
     # now unlink the file itself. missing_ok so re-confirm is idempotent.
-    if candidate.get("kind") == "file_delete":
-        delete_path = candidate.get("delete_path")
-        if delete_path:
+    if candidate.kind == CandidateKind.FILE_DELETE:
+        if candidate.from_path:
             try:
-                Path(delete_path).unlink(missing_ok=True)
+                Path(candidate.from_path).unlink(missing_ok=True)
             except OSError as e:
-                agent_log(f"file_delete unlink failed for {delete_path}: {e}")
+                agent_log(f"file_delete unlink failed for {candidate.from_path}: {e}")
 
     return len(affected), edit_count
 
@@ -204,7 +192,7 @@ def _parse_replace() -> dict[str, str]:
     return result
 
 
-def _parse_chain() -> list[dict]:
+def _parse_chain() -> list[ChainServer]:
     """Build the LSP chain from env vars. Index 0 = primary, 1+ = fallbacks in order.
 
     Preferred format (single env var):
@@ -225,14 +213,14 @@ def _parse_chain() -> list[dict]:
         return replace.get(cmd, cmd)
     servers_env = os.environ.get("LSP_SERVERS", "").strip()
     if servers_env:
-        chain: list[dict] = []
+        chain: list[ChainServer] = []
         for i, entry in enumerate(s.strip() for s in servers_env.split(";")):
             if not entry:
                 continue
             tokens = entry.split()
             cmd, args = _sub(tokens[0]), tokens[1:]
             label = cmd if i == 0 else f"{cmd} (fallback{f' {i}' if i > 1 else ''})"
-            chain.append({"command": cmd, "args": args, "name": cmd, "label": label})
+            chain.append(ChainServer(command=cmd, args=args, name=cmd, label=label))
         if not chain:
             raise RuntimeError("LSP_SERVERS is empty or malformed")
         return chain
@@ -243,22 +231,22 @@ def _parse_chain() -> list[dict]:
         raise RuntimeError("LSP_SERVERS or LSP_COMMAND environment variable is required")
     primary_cmd = _sub(primary_cmd)
 
-    chain = [{
-        "command": primary_cmd,
-        "args": os.environ.get("LSP_ARGS", "").split() if os.environ.get("LSP_ARGS") else [],
-        "name": primary_cmd,
-        "label": primary_cmd,
-    }]
+    chain: list[ChainServer] = [ChainServer(
+        command=primary_cmd,
+        args=os.environ.get("LSP_ARGS", "").split() if os.environ.get("LSP_ARGS") else [],
+        name=primary_cmd,
+        label=primary_cmd,
+    )]
 
     first_fb = os.environ.get("LSP_FALLBACK_COMMAND")
     if first_fb:
         first_fb = _sub(first_fb)
-        chain.append({
-            "command": first_fb,
-            "args": os.environ.get("LSP_FALLBACK_ARGS", "").split() if os.environ.get("LSP_FALLBACK_ARGS") else [],
-            "name": first_fb,
-            "label": f"{first_fb} (fallback)",
-        })
+        chain.append(ChainServer(
+            command=first_fb,
+            args=os.environ.get("LSP_FALLBACK_ARGS", "").split() if os.environ.get("LSP_FALLBACK_ARGS") else [],
+            name=first_fb,
+            label=f"{first_fb} (fallback)",
+        ))
 
     i = 2
     while True:
@@ -266,18 +254,18 @@ def _parse_chain() -> list[dict]:
         if not cmd:
             break
         cmd = _sub(cmd)
-        chain.append({
-            "command": cmd,
-            "args": os.environ.get(f"LSP_FALLBACK_{i}_ARGS", "").split() if os.environ.get(f"LSP_FALLBACK_{i}_ARGS") else [],
-            "name": cmd,
-            "label": f"{cmd} (fallback {i})",
-        })
+        chain.append(ChainServer(
+            command=cmd,
+            args=os.environ.get(f"LSP_FALLBACK_{i}_ARGS", "").split() if os.environ.get(f"LSP_FALLBACK_{i}_ARGS") else [],
+            name=cmd,
+            label=f"{cmd} (fallback {i})",
+        ))
         i += 1
 
     return chain
 
 
-def _parse_prefer(chain: list[dict]) -> dict[str, int]:
+def _parse_prefer(chain: list[ChainServer]) -> dict[str, int]:
     """Parse LSP_PREFER into a method→chain-index map for pre-seeding the cache.
 
     Format: 'method1=serverCommand,method2=serverCommand'
@@ -297,13 +285,13 @@ def _parse_prefer(chain: list[dict]) -> dict[str, int]:
         method, cmd = method.strip(), cmd.strip()
         cmd = replace.get(cmd, cmd)
         for idx, cfg in enumerate(chain):
-            if cfg["command"] == cmd:
+            if cfg.command == cmd:
                 result[method] = idx
                 break
     return result
 
 
-def _ensure_chain_configs() -> list[dict]:
+def _ensure_chain_configs() -> list[ChainServer]:
     global _chain_configs
     if not _chain_configs:
         _chain_configs = _parse_chain()
@@ -413,9 +401,9 @@ async def _maybe_warmup(client: LspClient, chain_idx: int, folder: str) -> int:
         return 0
     _warmed_folders.add(key)
     n = await _warmup_folder(client, folder)
-    _folder_warmup_stats[key] = {"count": n, "timestamp": time.time()}
+    _folder_warmup_stats[key] = WarmupStats(count=n, timestamp=time.time())
     if n > 0:
-        label = _chain_configs[chain_idx]["label"]
+        label = _chain_configs[chain_idx].label
         agent_log(f"Warmed {n} files in {folder} for {label}")
     return n
 
@@ -445,11 +433,11 @@ async def _get_client(idx: int) -> LspClient:
     if _chain_clients[idx] is None:
         cfg = _chain_configs[idx]
         root = os.environ.get("LSP_ROOT", os.getcwd())
-        client = LspClient([cfg["command"], *cfg["args"]], root)
+        client = LspClient([cfg.command, *cfg.args], root)
         await client.start()
         _chain_clients[idx] = client
-        if cfg["label"] not in _just_started_this_call:
-            _just_started_this_call.append(cfg["label"])
+        if cfg.label not in _just_started_this_call:
+            _just_started_this_call.append(cfg.label)
         # Flush any pending workspace adds that were queued before this client existed
         for pending in list(_pending_workspace_adds):
             if client.add_workspace_folder(pending):
@@ -476,7 +464,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         await _ensure_workspace_for(uri)
         if uri:
             await client.ensure_document(uri)
-        _last_server = _chain_configs[idx]["label"]
+        _last_server = _chain_configs[idx].label
         return await client.request(method, params)
 
     # Cold path: try each server in order
@@ -504,14 +492,14 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
             last_empty_idx = idx
             log.info(
                 "%s returned empty on %s, trying next server",
-                _chain_configs[idx]["label"], method,
+                _chain_configs[idx].label, method,
             )
             continue
 
         _method_handler[method] = idx
-        _last_server = _chain_configs[idx]["label"]
+        _last_server = _chain_configs[idx].label
         if idx > 0:
-            label = _chain_configs[idx]["label"]
+            label = _chain_configs[idx].label
             agent_log(f"Routing {method} to {label}")
         return result
 
@@ -520,7 +508,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
     # it as "no results".
     if last_empty_idx is not None:
         _method_handler[method] = last_empty_idx
-        _last_server = _chain_configs[last_empty_idx]["label"]
+        _last_server = _chain_configs[last_empty_idx].label
         return last_empty
 
     _method_handler[method] = None
@@ -1144,18 +1132,22 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
         else f"batch move {len(files)} file(s)"
     )
     description = f"{move_desc} ({len(edit_files)} file(s), {total_edits} edit(s))"
-    candidate: dict = {
-        "kind": "file_move" if len(files) == 1 else "file_move_batch",
-        "title": description,
-    }
     if len(files) == 1:
-        candidate["from_path"] = files[0][0]
-        candidate["to_path"] = files[0][1]
+        candidate = Candidate(
+            kind=CandidateKind.FILE_MOVE,
+            title=description,
+            edit=result or {},
+            from_path=files[0][0],
+            to_path=files[0][1],
+        )
     else:
-        candidate["moves"] = [{"from_path": f, "to_path": t} for f, t in files]
-    if result:
-        candidate["edit"] = result
-    _set_pending(candidate["kind"], [candidate], description)
+        candidate = Candidate(
+            kind=CandidateKind.FILE_MOVE_BATCH,
+            title=description,
+            edit=result or {},
+            moves=[FileMove(from_path=f, to_path=t) for f, t in files],
+        )
+    _set_pending(candidate.kind.value, [candidate], description)
 
     lines.insert(
         0,
@@ -1301,12 +1293,20 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
                 parts.append(f"({n} file(s))")
             lines.append(" ".join(parts))
 
-        # Stage the raw action objects so lsp_confirm can unwrap their .edit
-        # field via _apply_candidate. Some actions have no edit (command-only)
-        # — those apply as 0 file(s)/0 edit(s) and are effectively a noop here.
+        # Wrap raw LSP action objects into Candidate dataclasses so lsp_confirm
+        # can access their .edit field via _apply_candidate. Some actions have
+        # no edit (command-only) — those apply as 0 file(s)/0 edit(s), effectively noop.
+        action_candidates = [
+            Candidate(
+                kind=CandidateKind.CODE_ACTION,
+                title=action.get("title", ""),
+                edit=action.get("edit", {}),
+            )
+            for action in result
+        ]
         _set_pending(
             "code_action",
-            list(result),
+            action_candidates,
             f"{len(result)} code action(s) at {_uri_to_path(uri)}:{target_line + 1}",
         )
 
@@ -1359,17 +1359,17 @@ async def lsp_info() -> str:
     info_lines.append("")
     info_lines.append("Chain:")
     for cfg in _chain_configs:
-        info_lines.append(f"  {cfg['label']}: {cfg['command']} {' '.join(cfg['args'])}")
+        info_lines.append(f"  {cfg.label}: {cfg.command} {' '.join(cfg.args)}")
 
     if _probed_caps:
         info_lines.append("")
         info_lines.append("Probed capabilities (at module load):")
         for cfg, caps in zip(_chain_configs, _probed_caps):
             if not caps:
-                info_lines.append(f"  [{cfg['label']}] (probe failed or no caps reported)")
+                info_lines.append(f"  [{cfg.label}] (probe failed or no caps reported)")
                 continue
             key_caps = [k for k in caps.keys() if k.endswith("Provider") or k == "workspace"]
-            info_lines.append(f"  [{cfg['label']}] {len(caps)} caps; providers: {', '.join(sorted(key_caps))}")
+            info_lines.append(f"  [{cfg.label}] {len(caps)} caps; providers: {', '.join(sorted(key_caps))}")
             ws_caps = caps.get("workspace", {})
             file_ops = ws_caps.get("fileOperations", {}) if isinstance(ws_caps, dict) else {}
             if file_ops:
@@ -1398,12 +1398,12 @@ async def lsp_workspaces() -> str:
     for idx, cfg in enumerate(_chain_configs):
         client = _chain_clients[idx]
         assert client is not None
-        lines.append(f"[{cfg['label']}]")
+        lines.append(f"[{cfg.label}]")
         for folder in sorted(client.workspace_folders):
             stats = _folder_warmup_stats.get((idx, folder))
             if stats:
-                age = int(now - stats["timestamp"])
-                lines.append(f"  {folder}  (warmed {stats['count']} files, {age}s ago)")
+                age = int(now - stats.timestamp)
+                lines.append(f"  {folder}  (warmed {stats.count} files, {age}s ago)")
             else:
                 lines.append(f"  {folder}  (not warmed)")
     return "\n".join(lines) if lines else "No chain configured."
@@ -1435,9 +1435,9 @@ async def lsp_add_workspace(path: str) -> str:
         if added:
             warmed = await _maybe_warmup(client, idx, abs_path)
             suffix = f" — warmed {warmed} files" if warmed else ""
-            results.append(f"[{cfg['label']}] added{suffix}")
+            results.append(f"[{cfg.label}] added{suffix}")
         else:
-            results.append(f"[{cfg['label']}] already present")
+            results.append(f"[{cfg.label}] already present")
     return "\n".join(results)
 
 
@@ -1453,8 +1453,8 @@ async def lsp_confirm(index: int = 0) -> str:
     if _pending is None:
         return "Nothing to confirm."
 
-    candidates = _pending.get("candidates", [])
-    kind = _pending.get("kind", "")
+    candidates = _pending.candidates
+    kind = _pending.kind
 
     if index >= len(candidates):
         return f"Invalid index {index}, only {len(candidates)} candidates available."
@@ -1465,9 +1465,8 @@ async def lsp_confirm(index: int = 0) -> str:
     except (OSError, ValueError, KeyError) as e:
         return f"Apply failed: {e}"
 
-    title = candidate.get("title", "")
     _pending = None
-    return f"Applied [{kind} #{index}]: {title}. {file_count} file(s), {edit_count} edit(s)."
+    return f"Applied [{kind} #{index}]: {candidate.title}. {file_count} file(s), {edit_count} edit(s)."
 
 
 async def lsp_call_hierarchy_incoming(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
@@ -1949,13 +1948,12 @@ async def lsp_create_file(file_path: str) -> str:
                 edit_count += len(doc_change.get("edits", []))
 
         description = f"Create {file_path}"
-        candidate: dict = {
-            "kind": "file_create",
-            "create_path": file_path,
-            "title": description,
-        }
-        if result:
-            candidate["edit"] = result
+        candidate = Candidate(
+            kind=CandidateKind.FILE_CREATE,
+            title=description,
+            edit=result or {},
+            from_path=file_path,
+        )
         _set_pending("create_file", [candidate], description)
 
         return (
@@ -1990,13 +1988,12 @@ async def lsp_delete_file(file_path: str) -> str:
                 edit_count += len(doc_change.get("edits", []))
 
         description = f"Delete {file_path}"
-        candidate: dict = {
-            "kind": "file_delete",
-            "delete_path": file_path,
-            "title": description,
-        }
-        if result:
-            candidate["edit"] = result
+        candidate = Candidate(
+            kind=CandidateKind.FILE_DELETE,
+            title=description,
+            edit=result or {},
+            from_path=file_path,
+        )
         _set_pending("delete_file", [candidate], description)
 
         return (
@@ -2140,9 +2137,9 @@ def _sync_probe_chain_caps() -> list[dict]:
     except RuntimeError:
         pass
 
-    async def probe_one(cfg: dict) -> dict:
+    async def probe_one(cfg: ChainServer) -> dict:
         root = os.environ.get("LSP_ROOT", os.getcwd())
-        client = LspClient([cfg["command"], *cfg["args"]], root)
+        client = LspClient([cfg.command, *cfg.args], root)
         try:
             await _asyncio.wait_for(client.start(), timeout=15.0)
             caps = dict(client.capabilities)
@@ -2159,7 +2156,7 @@ def _sync_probe_chain_caps() -> list[dict]:
             try:
                 results.append(await probe_one(cfg))
             except Exception as e:
-                log.warning("capability probe failed for %s: %s", cfg.get("name"), e)
+                log.warning("capability probe failed for %s: %s", cfg.name, e)
                 results.append({})  # empty caps = this server contributes nothing to the union
         return results
 
