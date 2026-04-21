@@ -41,6 +41,42 @@ def _language_id(uri: str) -> str:
     return EXTENSION_LANGUAGE_MAP.get(ext, "plaintext")
 
 
+_VENV_CANDIDATES = (".venv", "venv", ".env")
+
+
+def _detect_venv_python(scope_uri: str | None) -> str | None:
+    """Find a venv python interpreter under the scope URI.
+
+    VS Code's Python extension injects pythonPath into the `python` config so
+    pylance can auto-exclude site-packages. We do the same by checking standard
+    venv locations under the workspace scope.
+    """
+    if not scope_uri or not scope_uri.startswith("file://"):
+        return None
+    scope_path = scope_uri.removeprefix("file://")
+    scope = Path(scope_path)
+    for name in _VENV_CANDIDATES:
+        for exe in ("python", "python3"):
+            candidate = scope / name / "bin" / exe
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def _config_for(item: dict) -> dict:
+    """Build the config response for one workspace/configuration item.
+
+    Only `python` section gets a `pythonPath` — rest stay empty (server uses
+    defaults). This mirrors what VS Code's Python extension does.
+    """
+    section = item.get("section", "")
+    if section == "python":
+        venv_python = _detect_venv_python(item.get("scopeUri"))
+        if venv_python:
+            return {"pythonPath": venv_python, "defaultInterpreterPath": venv_python}
+    return {}
+
+
 class LspError(Exception):
     def __init__(self, code: int, message: str, data: Any = None):
         self.code = code
@@ -356,7 +392,7 @@ class LspClient:
 
             if method == "workspace/configuration":
                 items = params.get("items", [])
-                result = [{} for _ in items]
+                result = [_config_for(it) for it in items]
                 sections = [it.get("section", "?") for it in items]
                 agent_log(f"[{self._command[0]} ← {method}] sections={sections}")
                 self._send({"jsonrpc": "2.0", "id": req_id, "result": result})
