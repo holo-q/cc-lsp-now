@@ -360,6 +360,13 @@ class LspClient:
                 sections = [it.get("section", "?") for it in items]
                 agent_log(f"[{self._command[0]} ← {method}] sections={sections}")
                 self._send({"jsonrpc": "2.0", "id": req_id, "result": result})
+            elif method == "workspace/workspaceFolders":
+                folders = [
+                    {"uri": file_uri(f), "name": os.path.basename(f)}
+                    for f in sorted(self.workspace_folders)
+                ]
+                agent_log(f"[{self._command[0]} ← {method}] returning {len(folders)} folders")
+                self._send({"jsonrpc": "2.0", "id": req_id, "result": folders})
             elif method in (
                 "client/registerCapability",
                 "client/unregisterCapability",
