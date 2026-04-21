@@ -1283,6 +1283,68 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
         return f"LSP error: {e}"
 
 
+async def lsp_info() -> str:
+    """Report the running cc-lsp-now build and the probed capabilities of each chain server.
+
+    Useful when tool behavior is confusing — compare the displayed git SHA
+    against cc-lsp-now's current HEAD to confirm the MCP process isn't stale
+    from a prior Claude Code session. Stale MCPs are the #1 reason new features
+    appear to not work after a plugin update: Claude Code reuses the subprocess
+    across /reload-plugins; only a full Claude Code restart spawns a fresh one.
+    """
+    import importlib.metadata as _imd
+    import subprocess as _subp
+
+    module_file = Path(__file__).resolve()
+    info_lines: list[str] = []
+
+    # Try to detect install path + git commit
+    try:
+        pkg_root = module_file.parent.parent.parent  # .../src/cc_lsp_now/server.py → .../
+        git_dir = pkg_root / ".git"
+        if git_dir.exists():
+            sha = _subp.run(
+                ["git", "-C", str(pkg_root), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=3,
+            ).stdout.strip()
+            info_lines.append(f"cc-lsp-now: {pkg_root} @ {sha or 'unknown'}")
+        else:
+            info_lines.append(f"cc-lsp-now install: {pkg_root} (no .git — probably installed package)")
+    except Exception as e:
+        info_lines.append(f"cc-lsp-now introspection failed: {e}")
+
+    try:
+        version = _imd.version("cc-lsp-now")
+        info_lines.append(f"version: {version}")
+    except Exception:
+        pass
+
+    _ensure_chain_configs()
+    info_lines.append("")
+    info_lines.append("Chain:")
+    for cfg in _chain_configs:
+        info_lines.append(f"  {cfg['label']}: {cfg['command']} {' '.join(cfg['args'])}")
+
+    if _probed_caps:
+        info_lines.append("")
+        info_lines.append("Probed capabilities (at module load):")
+        for cfg, caps in zip(_chain_configs, _probed_caps):
+            if not caps:
+                info_lines.append(f"  [{cfg['label']}] (probe failed or no caps reported)")
+                continue
+            key_caps = [k for k in caps.keys() if k.endswith("Provider") or k == "workspace"]
+            info_lines.append(f"  [{cfg['label']}] {len(caps)} caps; providers: {', '.join(sorted(key_caps))}")
+            ws_caps = caps.get("workspace", {})
+            file_ops = ws_caps.get("fileOperations", {}) if isinstance(ws_caps, dict) else {}
+            if file_ops:
+                info_lines.append(f"    fileOperations: {list(file_ops.keys())}")
+    else:
+        info_lines.append("")
+        info_lines.append("Capabilities probe was skipped (empty chain caps).")
+
+    return "\n".join(info_lines)
+
+
 async def lsp_workspaces() -> str:
     """List workspace folders registered with each LSP, plus warmup stats.
 
@@ -1939,6 +2001,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "create_file": (lsp_create_file, "workspace/willCreateFiles"),
     "delete_file": (lsp_delete_file, "workspace/willDeleteFiles"),
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
+    "info": (lsp_info, "cc-lsp-now/info"),
     "workspaces": (lsp_workspaces, "cc-lsp-now/workspaces"),
     "add_workspace": (lsp_add_workspace, "cc-lsp-now/add_workspace"),
     "move_files": (lsp_move_files, "workspace/willRenameFiles"),
@@ -1997,6 +2060,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "create_file": "workspace.fileOperations.willCreate",
     "delete_file": "workspace.fileOperations.willDelete",
     "confirm": None,
+    "info": None,
     "workspaces": None,
     "add_workspace": None,
     "move_files": "workspace.fileOperations.willRename",
