@@ -170,7 +170,9 @@ class LspClient:
         self._pending.clear()
         log.info("LSP server stopped")
 
-    async def request(self, method: str, params: dict | None) -> Any:
+    async def request(
+        self, method: str, params: dict | None, *, timeout: float = 30.0
+    ) -> Any:
         self._request_id += 1
         msg_id = self._request_id
 
@@ -187,7 +189,12 @@ class LspClient:
         self._pending[msg_id] = future
 
         self._send(msg)
-        return await future
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(msg_id, None)
+            agent_log(f"{self._command[0]} timed out on {method} after {timeout}s")
+            raise
 
     def notify(self, method: str, params: dict | None) -> None:
         msg: dict[str, Any] = {

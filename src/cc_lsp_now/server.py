@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import glob
 import json
 import logging
@@ -465,7 +466,12 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         if uri:
             await client.ensure_document(uri)
         _last_server = _chain_configs[idx].label
-        return await client.request(method, params)
+        try:
+            return await client.request(method, params)
+        except asyncio.TimeoutError:
+            agent_log(f"{_chain_configs[idx].label} timed out on {method} (cached), invalidating")
+            del _method_handler[method]
+            # Fall through to cold path
 
     # Cold path: try each server in order
     last_err: LspError | None = None
@@ -479,6 +485,10 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
             await client.ensure_document(uri)
         try:
             result = await client.request(method, params)
+        except asyncio.TimeoutError:
+            agent_log(f"{_chain_configs[idx].label} timed out on {method}, trying next")
+            last_err = LspError(-32601, f"{method} timed out")
+            continue
         except LspError as e:
             if e.code != -32601:
                 raise
@@ -1087,7 +1097,7 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
             {"files": files_param},
             uri=first_uri,
         )
-    except (LspError, ConnectionError) as e:
+    except (LspError, ConnectionError, asyncio.TimeoutError) as e:
         agent_log(f"willRenameFiles failed ({e}), falling through to rewriter")
         result = {}
     if not result:
