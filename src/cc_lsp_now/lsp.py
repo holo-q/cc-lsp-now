@@ -393,6 +393,6 @@ class LspClient:
             message = params.get("message", "")
             level = {1: logging.ERROR, 2: logging.WARNING, 3: logging.INFO}.get(msg_type, logging.DEBUG)
             log.log(level, "LSP [%s]: %s", self._command[0], message)
-            if msg_type <= 2:
-                label = {1: "error", 2: "warning"}.get(msg_type, "log")
+            if msg_type <= 3:
+                label = {1: "error", 2: "warning", 3: "info"}.get(msg_type, "log")
                 agent_log(f"[{self._command[0]} {label}] {message}")
