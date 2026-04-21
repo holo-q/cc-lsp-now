@@ -1337,7 +1337,7 @@ async def lsp_info() -> str:
             ws_caps = caps.get("workspace", {})
             file_ops = ws_caps.get("fileOperations", {}) if isinstance(ws_caps, dict) else {}
             if file_ops:
-                info_lines.append(f"    fileOperations: {list(file_ops.keys())}")
+                info_lines.append(f"    fileOperations: {', '.join(sorted(file_ops.keys()))}")
     else:
         info_lines.append("")
         info_lines.append("Capabilities probe was skipped (empty chain caps).")
