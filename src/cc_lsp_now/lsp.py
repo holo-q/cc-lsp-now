@@ -379,3 +379,9 @@ class LspClient:
             uri = params.get("uri", "")
             self.diagnostics[uri] = params.get("diagnostics", [])
             log.debug("Diagnostics updated for %s: %d items", uri, len(self.diagnostics[uri]))
+        elif method == "window/logMessage":
+            # MessageType: 1=Error, 2=Warning, 3=Info, 4=Log
+            msg_type = params.get("type", 4)
+            message = params.get("message", "")
+            level = {1: logging.ERROR, 2: logging.WARNING, 3: logging.INFO}.get(msg_type, logging.DEBUG)
+            log.log(level, "LSP [%s]: %s", self._command[0], message)
