@@ -63,6 +63,9 @@ class LspClient:
         self._open_documents: dict[str, int] = {}
         # Absolute paths of workspace folders currently registered with the server.
         self.workspace_folders: set[str] = {self._root_path}
+        # Server log messages (window/logMessage) at error/warning level.
+        # Drained by the tool wrapper each call so they surface in the output.
+        self.server_messages: list[str] = []
         self._started = False
 
     @property
@@ -380,8 +383,10 @@ class LspClient:
             self.diagnostics[uri] = params.get("diagnostics", [])
             log.debug("Diagnostics updated for %s: %d items", uri, len(self.diagnostics[uri]))
         elif method == "window/logMessage":
-            # MessageType: 1=Error, 2=Warning, 3=Info, 4=Log
             msg_type = params.get("type", 4)
             message = params.get("message", "")
             level = {1: logging.ERROR, 2: logging.WARNING, 3: logging.INFO}.get(msg_type, logging.DEBUG)
             log.log(level, "LSP [%s]: %s", self._command[0], message)
+            if msg_type <= 2:
+                label = {1: "error", 2: "warning"}.get(msg_type, "log")
+                self.server_messages.append(f"[{self._command[0]} {label}] {message}")

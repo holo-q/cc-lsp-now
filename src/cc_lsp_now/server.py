@@ -2050,6 +2050,11 @@ def _wrap_with_header(func: Any, method: str) -> Any:
         _last_server = ""
         _added_workspaces_this_call.clear()
         _just_started_this_call.clear()
+        # Drain any leftover server messages from prior calls
+        for client in _chain_clients:
+            if client is not None:
+                client.server_messages.clear()
+
         result = await func(*args, **kwargs)
         header = _header(method) if _last_server else f"[{method}]"
         prefix_lines: list[str] = [header]
@@ -2057,6 +2062,11 @@ def _wrap_with_header(func: Any, method: str) -> Any:
             prefix_lines.append(f"[+started] {label}")
         for p in _added_workspaces_this_call:
             prefix_lines.append(f"[+workspace] {p}")
+        # Surface error/warning messages from any server in the chain
+        for client in _chain_clients:
+            if client is not None and client.server_messages:
+                prefix_lines.extend(client.server_messages)
+                client.server_messages.clear()
         prefix = "\n".join(prefix_lines)
         return f"{prefix}\n{result}"
 
