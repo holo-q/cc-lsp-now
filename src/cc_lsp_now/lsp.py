@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from cc_lsp_now.agent_log import agent_log
+
 log = logging.getLogger(__name__)
 
 EXTENSION_LANGUAGE_MAP: dict[str, str] = {
@@ -63,9 +65,6 @@ class LspClient:
         self._open_documents: dict[str, int] = {}
         # Absolute paths of workspace folders currently registered with the server.
         self.workspace_folders: set[str] = {self._root_path}
-        # Server log messages (window/logMessage) at error/warning level.
-        # Drained by the tool wrapper each call so they surface in the output.
-        self.server_messages: list[str] = []
         self._started = False
 
     @property
@@ -389,4 +388,4 @@ class LspClient:
             log.log(level, "LSP [%s]: %s", self._command[0], message)
             if msg_type <= 2:
                 label = {1: "error", 2: "warning"}.get(msg_type, "log")
-                self.server_messages.append(f"[{self._command[0]} {label}] {message}")
+                agent_log(f"[{self._command[0]} {label}] {message}")

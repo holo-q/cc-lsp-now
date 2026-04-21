@@ -12,6 +12,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from cc_lsp_now.agent_log import agent_log, drain_agent_messages
 from cc_lsp_now.lsp import LspClient, LspError, file_uri
 from cc_lsp_now.python_refactor import merge_workspace_edits, python_import_rewrite
 
@@ -147,7 +148,7 @@ def _apply_candidate(candidate: dict) -> tuple[int, int]:
                 try:
                     os.rename(fp, tp)
                 except OSError as e:
-                    log.warning("file_move_batch rename failed %s → %s: %s", fp, tp, e)
+                    agent_log(f"file_move_batch rename failed {fp} → {tp}: {e}")
 
     # file_create: after any side-effect edits (new imports, __init__ entries)
     # land in sibling modules, materialize the empty file itself. Wrapped in
@@ -163,7 +164,7 @@ def _apply_candidate(candidate: dict) -> tuple[int, int]:
                     parent.mkdir(parents=True, exist_ok=True)
                 target.touch(exist_ok=True)
             except OSError as e:
-                log.warning("file_create touch failed for %s: %s", create_path, e)
+                agent_log(f"file_create touch failed for {create_path}: {e}")
 
     # file_delete: cleanup edits have fixed up imports/registrations in siblings;
     # now unlink the file itself. missing_ok so re-confirm is idempotent.
@@ -173,7 +174,7 @@ def _apply_candidate(candidate: dict) -> tuple[int, int]:
             try:
                 Path(delete_path).unlink(missing_ok=True)
             except OSError as e:
-                log.warning("file_delete unlink failed for %s: %s", delete_path, e)
+                agent_log(f"file_delete unlink failed for {delete_path}: {e}")
 
     return len(affected), edit_count
 
@@ -414,7 +415,8 @@ async def _maybe_warmup(client: LspClient, chain_idx: int, folder: str) -> int:
     n = await _warmup_folder(client, folder)
     _folder_warmup_stats[key] = {"count": n, "timestamp": time.time()}
     if n > 0:
-        log.info("Warmed %d files in %s for %s", n, folder, _chain_configs[chain_idx]["label"])
+        label = _chain_configs[chain_idx]["label"]
+        agent_log(f"Warmed {n} files in {folder} for {label}")
     return n
 
 
@@ -509,7 +511,8 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         _method_handler[method] = idx
         _last_server = _chain_configs[idx]["label"]
         if idx > 0:
-            log.info("Routing %s to %s", method, _chain_configs[idx]["label"])
+            label = _chain_configs[idx]["label"]
+            agent_log(f"Routing {method} to {label}")
         return result
 
     # All servers tried. If one returned an empty result (and no server had an actual
@@ -1097,7 +1100,7 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
             uri=first_uri,
         )
     except (LspError, ConnectionError) as e:
-        log.warning("willRenameFiles failed (%s), falling through to rewriter", e)
+        agent_log(f"willRenameFiles failed ({e}), falling through to rewriter")
         result = {}
     if not result:
         result = {}
@@ -1118,8 +1121,8 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
         rewriter_changes: dict = {"changes": {}}
         for f, t in files:
             edit, scanned = python_import_rewrite(f, t, sorted(workspace_folders))
-            log.info("python rewriter: %s → %s scanned %d files, %d edit groups",
-                     f, t, scanned, len(edit.get("changes", {})))
+            n_groups = len(edit.get("changes", {}))
+            agent_log(f"python rewriter: {f} → {t} scanned {scanned} files, {n_groups} edit groups")
             rewriter_changes = merge_workspace_edits(rewriter_changes, edit)
 
         if rewriter_changes.get("changes"):
@@ -2050,10 +2053,7 @@ def _wrap_with_header(func: Any, method: str) -> Any:
         _last_server = ""
         _added_workspaces_this_call.clear()
         _just_started_this_call.clear()
-        # Drain any leftover server messages from prior calls
-        for client in _chain_clients:
-            if client is not None:
-                client.server_messages.clear()
+        drain_agent_messages()  # clear leftovers from prior calls
 
         result = await func(*args, **kwargs)
         header = _header(method) if _last_server else f"[{method}]"
@@ -2062,11 +2062,7 @@ def _wrap_with_header(func: Any, method: str) -> Any:
             prefix_lines.append(f"[+started] {label}")
         for p in _added_workspaces_this_call:
             prefix_lines.append(f"[+workspace] {p}")
-        # Surface error/warning messages from any server in the chain
-        for client in _chain_clients:
-            if client is not None and client.server_messages:
-                prefix_lines.extend(client.server_messages)
-                client.server_messages.clear()
+        prefix_lines.extend(drain_agent_messages())
         prefix = "\n".join(prefix_lines)
         return f"{prefix}\n{result}"
 
