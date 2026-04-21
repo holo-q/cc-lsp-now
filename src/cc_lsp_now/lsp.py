@@ -106,6 +106,18 @@ class LspClient:
                     },
                     "workspace": {
                         "workspaceFolders": True,
+                        # Must declare client support explicitly — strict servers
+                        # (e.g. pylance) only advertise their matching server
+                        # capabilities if the client declares support here.
+                        "fileOperations": {
+                            "dynamicRegistration": False,
+                            "willRename": True,
+                            "didRename": True,
+                            "willCreate": True,
+                            "didCreate": True,
+                            "willDelete": True,
+                            "didDelete": True,
+                        },
                     },
                 },
                 "workspaceFolders": [
