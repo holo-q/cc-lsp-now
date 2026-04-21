@@ -119,6 +119,10 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
         if "textDocument" in doc_change:
             edit_count += len(doc_change.get("edits", []))
 
+    renamed: list[tuple[str, str]] = []
+    created: list[str] = []
+    deleted: list[str] = []
+
     # file_move finishes with the rename itself — after any import edits landed.
     if candidate.kind == CandidateKind.FILE_MOVE:
         if candidate.from_path and candidate.to_path:
@@ -126,6 +130,7 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
             if to_dir:
                 os.makedirs(to_dir, exist_ok=True)
             os.rename(candidate.from_path, candidate.to_path)
+            renamed.append((candidate.from_path, candidate.to_path))
 
     # file_move_batch: replay the list of renames after the single WorkspaceEdit
     # covers all import fixups. Order doesn't matter since edits are in other
@@ -138,6 +143,7 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
                     os.makedirs(to_dir, exist_ok=True)
                 try:
                     os.rename(move.from_path, move.to_path)
+                    renamed.append((move.from_path, move.to_path))
                 except OSError as e:
                     agent_log(f"file_move_batch rename failed {move.from_path} → {move.to_path}: {e}")
 
@@ -153,6 +159,7 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
                 if str(parent):
                     parent.mkdir(parents=True, exist_ok=True)
                 target.touch(exist_ok=True)
+                created.append(candidate.from_path)
             except OSError as e:
                 agent_log(f"file_create touch failed for {candidate.from_path}: {e}")
 
@@ -162,8 +169,18 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
         if candidate.from_path:
             try:
                 Path(candidate.from_path).unlink(missing_ok=True)
+                deleted.append(candidate.from_path)
             except OSError as e:
                 agent_log(f"file_delete unlink failed for {candidate.from_path}: {e}")
+
+    # Notify every live server in the chain about the filesystem changes so
+    # their in-memory view matches disk. Safe no-op if lists are empty.
+    for client in _chain_clients:
+        if client is None:
+            continue
+        client.notify_files_renamed(renamed)
+        client.notify_files_created(created)
+        client.notify_files_deleted(deleted)
 
     return len(affected), edit_count
 
@@ -489,6 +506,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         if idx is None:
             raise LspError(-32601, f"{method} not supported by any server in the chain")
         client = await _get_client(idx)
+        await client.refresh_stale_documents()
         await _ensure_workspace_for(uri)
         if uri:
             await client.ensure_document(uri)
@@ -507,6 +525,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
 
     for idx in range(len(_chain_configs)):
         client = await _get_client(idx)
+        await client.refresh_stale_documents()
         await _ensure_workspace_for(uri)
         if uri:
             await client.ensure_document(uri)

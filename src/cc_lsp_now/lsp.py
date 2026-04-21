@@ -99,6 +99,9 @@ class LspClient:
 
         self.diagnostics: dict[str, list] = {}
         self._open_documents: dict[str, int] = {}
+        # mtime snapshot for open documents — used by refresh_stale_documents() to
+        # detect external edits (Claude's Edit tool, git ops) and push didChange.
+        self._doc_mtime: dict[str, float] = {}
         # Absolute paths of workspace folders currently registered with the server.
         self.workspace_folders: set[str] = {self._root_path}
         self._started = False
@@ -263,6 +266,10 @@ class LspClient:
     async def ensure_document(self, uri: str) -> None:
         path = uri.removeprefix("file://")
         text = Path(path).read_text(encoding="utf-8", errors="replace")
+        try:
+            self._doc_mtime[uri] = os.path.getmtime(path)
+        except OSError:
+            pass
 
         if uri not in self._open_documents:
             self._open_documents[uri] = 0
@@ -287,6 +294,75 @@ class LspClient:
                     "contentChanges": [{"text": text}],
                 },
             )
+
+    async def refresh_stale_documents(self) -> int:
+        """Re-sync any open documents whose on-disk mtime moved.
+
+        Catches external edits (Claude's Edit tool, git branch switches, other
+        tools) without requiring a filesystem watcher. O(N) stat calls per sweep,
+        where N is the number of open documents — cheap.
+
+        Returns the number of documents refreshed.
+        """
+        refreshed = 0
+        for uri in list(self._open_documents.keys()):
+            path = uri.removeprefix("file://")
+            try:
+                current_mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if current_mtime == self._doc_mtime.get(uri):
+                continue
+            try:
+                text = Path(path).read_text(encoding="utf-8", errors="replace")
+            except (OSError, UnicodeDecodeError):
+                continue
+            version = self._open_documents[uri] + 1
+            self._open_documents[uri] = version
+            self._doc_mtime[uri] = current_mtime
+            self.notify(
+                "textDocument/didChange",
+                {
+                    "textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": text}],
+                },
+            )
+            refreshed += 1
+        return refreshed
+
+    def notify_files_renamed(self, renames: list[tuple[str, str]]) -> None:
+        """Tell the server that files moved on disk. Also drops stale open-document state."""
+        if not renames:
+            return
+        files = [
+            {"oldUri": file_uri(old), "newUri": file_uri(new)}
+            for old, new in renames
+        ]
+        self.notify("workspace/didRenameFiles", {"files": files})
+        for old, _new in renames:
+            old_uri = file_uri(old)
+            self._open_documents.pop(old_uri, None)
+            self._doc_mtime.pop(old_uri, None)
+
+    def notify_files_created(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        self.notify(
+            "workspace/didCreateFiles",
+            {"files": [{"uri": file_uri(p)} for p in paths]},
+        )
+
+    def notify_files_deleted(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        self.notify(
+            "workspace/didDeleteFiles",
+            {"files": [{"uri": file_uri(p)} for p in paths]},
+        )
+        for p in paths:
+            uri = file_uri(p)
+            self._open_documents.pop(uri, None)
+            self._doc_mtime.pop(uri, None)
 
     def _send(self, msg: dict[str, Any]) -> None:
         assert self._process is not None and self._process.stdin is not None
