@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from cc_lsp_now.agent_log import agent_log
+from cc_lsp_now.file_watcher import FileWatcher
 
 log = logging.getLogger(__name__)
 
@@ -99,12 +100,13 @@ class LspClient:
 
         self.diagnostics: dict[str, list] = {}
         self._open_documents: dict[str, int] = {}
-        # mtime snapshot for open documents — used by refresh_stale_documents() to
-        # detect external edits (Claude's Edit tool, git ops) and push didChange.
+        # mtime snapshot for open documents — resync_open_documents uses it to
+        # detect divergence between in-memory and on-disk content and push didChange.
         self._doc_mtime: dict[str, float] = {}
         # Absolute paths of workspace folders currently registered with the server.
         self.workspace_folders: set[str] = {self._root_path}
         self._started = False
+        self._file_watcher: FileWatcher | None = None
 
     @property
     def capabilities(self) -> dict:
@@ -176,9 +178,18 @@ class LspClient:
         self.notify("initialized", {})
         log.info("LSP server initialized: %s", self._command)
 
+        # Start filesystem watching on the root workspace. Further folders added
+        # via add_workspace_folder() also get attached to the observer.
+        self._file_watcher = FileWatcher(self)
+        self._file_watcher.start([self._root_path])
+
     async def stop(self) -> None:
         if not self._started or self._process is None:
             return
+
+        if self._file_watcher is not None:
+            self._file_watcher.stop()
+            self._file_watcher = None
 
         try:
             await self.request("shutdown", None)
@@ -261,6 +272,8 @@ class LspClient:
             },
         )
         log.info("Added workspace folder: %s", abs_path)
+        if self._file_watcher is not None:
+            self._file_watcher.add_folder(abs_path)
         return True
 
     async def ensure_document(self, uri: str) -> None:
@@ -295,14 +308,18 @@ class LspClient:
                 },
             )
 
-    async def refresh_stale_documents(self) -> int:
-        """Re-sync any open documents whose on-disk mtime moved.
+    async def resync_open_documents(self) -> int:
+        """Re-sync any open documents whose in-memory content diverged from disk.
 
-        Catches external edits (Claude's Edit tool, git branch switches, other
-        tools) without requiring a filesystem watcher. O(N) stat calls per sweep,
-        where N is the number of open documents — cheap.
+        For each didOpen'd URI we hold, compare the snapshot mtime against the
+        current file mtime. If they differ, the disk was written to outside our
+        bridge (Claude's Edit tool, git, another editor), so re-send a didChange
+        with the on-disk contents.
 
-        Returns the number of documents refreshed.
+        Runs before every LSP request as a guard against out-of-sync state when
+        no filesystem watcher is active. O(N) stat calls per sweep.
+
+        Returns the number of documents re-synced.
         """
         refreshed = 0
         for uri in list(self._open_documents.keys()):

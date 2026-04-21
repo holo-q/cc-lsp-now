@@ -506,7 +506,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         if idx is None:
             raise LspError(-32601, f"{method} not supported by any server in the chain")
         client = await _get_client(idx)
-        await client.refresh_stale_documents()
+        await client.resync_open_documents()
         await _ensure_workspace_for(uri)
         if uri:
             await client.ensure_document(uri)
@@ -525,7 +525,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
 
     for idx in range(len(_chain_configs)):
         client = await _get_client(idx)
-        await client.refresh_stale_documents()
+        await client.resync_open_documents()
         await _ensure_workspace_for(uri)
         if uri:
             await client.ensure_document(uri)

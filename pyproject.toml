@@ -7,7 +7,7 @@ authors = [
     { name = "nuck", email = "teoxysoft@gmail.com" }
 ]
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.0.0"]
+dependencies = ["mcp>=1.0.0", "watchdog>=3.0.0"]
 
 [project.scripts]
 cc-lsp-now = "cc_lsp_now:main"
