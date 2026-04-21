@@ -107,34 +107,20 @@ class LspClient:
                     },
                     "workspace": {
                         "workspaceFolders": True,
-                        # Must declare client support explicitly — strict servers
-                        # (e.g. pylance) only advertise their matching server
-                        # capabilities if the client declares support here.
-                        "fileOperations": {
-                            "dynamicRegistration": False,
-                            "willRename": True,
-                            "didRename": True,
-                            "willCreate": True,
-                            "didCreate": True,
-                            "willDelete": True,
-                            "didDelete": True,
-                        },
-                        # Pylance gates willRenameFiles behind "supportAdvancedEdits",
-                        # which requires both documentChanges+resourceOperations AND
-                        # changeAnnotationSupport on the client side. Without these,
-                        # pylance returns edits:null for every rename. Confirmed by
-                        # reading the minified server bundle: the getter is
-                        #   get supportAdvancedEdits() {
-                        #     return hasDocumentChangeCapability
-                        #         && hasDocumentAnnotationCapability;
-                        #   }
-                        "workspaceEdit": {
-                            "documentChanges": True,
-                            "resourceOperations": ["create", "rename", "delete"],
-                            "failureHandling": "textOnlyTransactional",
-                            "normalizesLineEndings": True,
-                            "changeAnnotationSupport": {"groupsOnLabel": True},
-                        },
+                        # NOTE: we intentionally do NOT declare
+                        # workspace.fileOperations client support even though
+                        # pylance's willRenameFiles gate requires it. Declaring
+                        # it makes pylance disconnect silently on the next
+                        # request (confirmed via bisection on a 4-file test).
+                        # Without the declaration, pylance skips rename handling
+                        # entirely but stays alive — and since willRenameFiles
+                        # returns 0 edits anyway without the full VSCode-style
+                        # client setup (diagnosticMode, trusted workspace,
+                        # clientVerification handshake, etc.), there's no loss.
+                        # LSP_LANGUAGE=python activates the bridge's regex
+                        # rewriter which handles imports reliably across all
+                        # LSPs in the chain regardless of whether they
+                        # implement willRenameFiles.
                     },
                 },
                 "workspaceFolders": [
