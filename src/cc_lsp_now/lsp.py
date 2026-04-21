@@ -119,6 +119,22 @@ class LspClient:
                             "willDelete": True,
                             "didDelete": True,
                         },
+                        # Pylance gates willRenameFiles behind "supportAdvancedEdits",
+                        # which requires both documentChanges+resourceOperations AND
+                        # changeAnnotationSupport on the client side. Without these,
+                        # pylance returns edits:null for every rename. Confirmed by
+                        # reading the minified server bundle: the getter is
+                        #   get supportAdvancedEdits() {
+                        #     return hasDocumentChangeCapability
+                        #         && hasDocumentAnnotationCapability;
+                        #   }
+                        "workspaceEdit": {
+                            "documentChanges": True,
+                            "resourceOperations": ["create", "rename", "delete"],
+                            "failureHandling": "textOnlyTransactional",
+                            "normalizesLineEndings": True,
+                            "changeAnnotationSupport": {"groupsOnLabel": True},
+                        },
                     },
                 },
                 "workspaceFolders": [
