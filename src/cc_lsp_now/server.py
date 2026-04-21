@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,8 @@ _added_workspaces_this_call: list[str] = []
 _pending_workspace_adds: list[str] = []
 # Per-folder files warmed up via didOpen (so we don't re-warm the same folder).
 _warmed_folders: set[tuple[int, str]] = set()  # (chain_idx, folder)
+# Warmup metadata for status reporting: (chain_idx, folder) -> {count, timestamp}
+_folder_warmup_stats: dict[tuple[int, str], dict] = {}
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
@@ -324,6 +327,32 @@ def _find_project_root(file_path: str) -> str | None:
     return None
 
 
+def _parse_empty_fallback_methods() -> set[str]:
+    """Methods where an empty result from one server should route to the next.
+
+    Some methods (references, workspace symbols) ask about 'everywhere this
+    appears' — an empty result usually means 'I didn't see it' rather than
+    'it truly isn't there'. These methods benefit from falling through to
+    the next server when the current one returns empty.
+
+    Methods like definition/hover legitimately return empty (e.g. at a
+    whitespace position), so they're NOT in the default set.
+    """
+    default = "textDocument/references,workspace/symbol"
+    raw = os.environ.get("LSP_EMPTY_FALLBACK", default).strip()
+    if not raw:
+        return set()
+    return {m.strip() for m in raw.split(",") if m.strip()}
+
+
+def _is_empty_result(result: Any) -> bool:
+    if result is None:
+        return True
+    if isinstance(result, (list, dict, str)) and len(result) == 0:
+        return True
+    return False
+
+
 def _parse_warmup_patterns() -> list[str]:
     raw = os.environ.get("LSP_WARMUP_PATTERNS", "").strip()
     return [p.strip() for p in raw.split(",") if p.strip()]
@@ -379,6 +408,7 @@ async def _maybe_warmup(client: LspClient, chain_idx: int, folder: str) -> int:
         return 0
     _warmed_folders.add(key)
     n = await _warmup_folder(client, folder)
+    _folder_warmup_stats[key] = {"count": n, "timestamp": time.time()}
     if n > 0:
         log.info("Warmed %d files in %s for %s", n, folder, _chain_configs[chain_idx]["label"])
     return n
@@ -427,6 +457,7 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
     """Route a request through the chain. Caches which server handles each method."""
     global _last_server
     _ensure_chain_configs()
+    empty_fallback = _parse_empty_fallback_methods()
 
     # Fast path: method already resolved to a specific chain index
     if method in _method_handler:
@@ -442,6 +473,9 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
 
     # Cold path: try each server in order
     last_err: LspError | None = None
+    last_empty: Any = None
+    last_empty_idx: int | None = None
+
     for idx in range(len(_chain_configs)):
         client = await _get_client(idx)
         await _ensure_workspace_for(uri)
@@ -449,16 +483,36 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
             await client.ensure_document(uri)
         try:
             result = await client.request(method, params)
-            _method_handler[method] = idx
-            _last_server = _chain_configs[idx]["label"]
-            if idx > 0:
-                log.info("Routing %s to %s", method, _chain_configs[idx]["label"])
-            return result
         except LspError as e:
             if e.code != -32601:
                 raise
             last_err = e
             continue
+
+        # Empty-fallback: method opted in + result is empty + more servers available
+        is_last = idx == len(_chain_configs) - 1
+        if (method in empty_fallback and _is_empty_result(result) and not is_last):
+            last_empty = result
+            last_empty_idx = idx
+            log.info(
+                "%s returned empty on %s, trying next server",
+                _chain_configs[idx]["label"], method,
+            )
+            continue
+
+        _method_handler[method] = idx
+        _last_server = _chain_configs[idx]["label"]
+        if idx > 0:
+            log.info("Routing %s to %s", method, _chain_configs[idx]["label"])
+        return result
+
+    # All servers tried. If one returned an empty result (and no server had an actual
+    # match), return the empty result rather than raising — downstream tool formats
+    # it as "no results".
+    if last_empty_idx is not None:
+        _method_handler[method] = last_empty_idx
+        _last_server = _chain_configs[last_empty_idx]["label"]
+        return last_empty
 
     _method_handler[method] = None
     raise last_err or LspError(-32601, f"{method} not supported by any server in the chain")
@@ -1076,18 +1130,51 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-async def lsp_move_file(from_path: str, to_path: str) -> str:
-    """Move/rename a file and preview the import-updating edits needed across the workspace.
+async def _resolve_symbol_to_file(symbol: str) -> str | None:
+    """Find the file containing a top-level symbol via workspace/symbol.
 
-    Uses workspace/willRenameFiles. Always previews — the resulting
-    WorkspaceEdit + file-move metadata is staged under the module-level
-    ``_pending`` buffer. Call ``lsp_confirm(0)`` to commit both the edits
-    and the actual ``os.rename`` atomically.
-
-    For bulk reorgs, prefer ``lsp_move_files`` which batches many moves
-    into a single willRenameFiles request.
+    Prefers exact name matches; falls back to the first hit. Returns an
+    absolute path or None if no match.
     """
     try:
+        result = await _request("workspace/symbol", {"query": symbol})
+    except LspError:
+        return None
+    if not result:
+        return None
+    exact = [s for s in result if s.get("name") == symbol]
+    candidates = exact or result
+    loc = candidates[0].get("location", {})
+    uri = loc.get("uri", "")
+    if not uri:
+        return None
+    path = _uri_to_path(uri)
+    return os.path.abspath(path) if path else None
+
+
+async def lsp_move_file(from_path: str = "", to_path: str = "", symbol: str = "") -> str:
+    """Move/rename a file and preview the import-updating edits.
+
+    Pass either ``from_path`` directly, or ``symbol=<name>`` to have the
+    bridge resolve the source file via workspace/symbol (useful when you
+    know the class/function but not the file).
+
+    Always previews — the resulting WorkspaceEdit + file-move metadata is
+    staged under ``_pending``. Call ``lsp_confirm(0)`` to commit both the
+    edits and the ``os.rename`` atomically.
+
+    For bulk reorgs, prefer ``lsp_move_files``.
+    """
+    try:
+        if symbol and not from_path:
+            resolved = await _resolve_symbol_to_file(symbol)
+            if not resolved:
+                return f"Could not resolve symbol {symbol!r} to a file via workspace/symbol."
+            from_path = resolved
+        if not from_path:
+            return "Provide from_path or symbol."
+        if not to_path:
+            return "to_path is required."
         return await _do_move([(from_path, to_path)])
     except (LspError, ValueError, OSError) as e:
         return f"LSP error: {e}"
@@ -1191,17 +1278,30 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
 
 
 async def lsp_workspaces() -> str:
-    """List the workspace folders currently registered with each LSP in the chain."""
+    """List workspace folders registered with each LSP, plus warmup stats.
+
+    Each folder line shows files warmed and seconds since warmup. A cold
+    folder (no warmed count) means didOpen hasn't been bulk-fired there —
+    operations touching files in that folder may hit an unindexed LSP.
+    """
     _ensure_chain_configs()
+    now = time.time()
     lines: list[str] = []
     for idx, cfg in enumerate(_chain_configs):
         client = _chain_clients[idx]
         if client is None:
-            lines.append(f"[{cfg['label']}] not started")
+            pending = [p for p in _pending_workspace_adds]
+            suffix = f" ({len(pending)} queued)" if pending else ""
+            lines.append(f"[{cfg['label']}] not started{suffix}")
             continue
         lines.append(f"[{cfg['label']}]")
         for folder in sorted(client.workspace_folders):
-            lines.append(f"  {folder}")
+            stats = _folder_warmup_stats.get((idx, folder))
+            if stats:
+                age = int(now - stats["timestamp"])
+                lines.append(f"  {folder}  (warmed {stats['count']} files, {age}s ago)")
+            else:
+                lines.append(f"  {folder}  (not warmed)")
     return "\n".join(lines) if lines else "No chain configured."
 
 
