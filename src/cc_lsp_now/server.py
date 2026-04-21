@@ -13,6 +13,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from cc_lsp_now.lsp import LspClient, LspError, file_uri
+from cc_lsp_now.python_refactor import merge_workspace_edits, python_import_rewrite
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ _last_server: str = ""
 _added_workspaces_this_call: list[str] = []
 # Workspace folders queued before any client was spawned. Flushed on first client start.
 _pending_workspace_adds: list[str] = []
+# Server labels that were just freshly spawned during the current tool call.
+# Surfaced by the header wrapper so the model sees boot events inline.
+_just_started_this_call: list[str] = []
 # Per-folder files warmed up via didOpen (so we don't re-warm the same folder).
 _warmed_folders: set[tuple[int, str]] = set()  # (chain_idx, folder)
 # Warmup metadata for status reporting: (chain_idx, folder) -> {count, timestamp}
@@ -442,6 +446,8 @@ async def _get_client(idx: int) -> LspClient:
         client = LspClient([cfg["command"], *cfg["args"]], root)
         await client.start()
         _chain_clients[idx] = client
+        if cfg["label"] not in _just_started_this_call:
+            _just_started_this_call.append(cfg["label"])
         # Flush any pending workspace adds that were queued before this client existed
         for pending in list(_pending_workspace_adds):
             if client.add_workspace_folder(pending):
@@ -1280,20 +1286,20 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
 async def lsp_workspaces() -> str:
     """List workspace folders registered with each LSP, plus warmup stats.
 
-    Each folder line shows files warmed and seconds since warmup. A cold
-    folder (no warmed count) means didOpen hasn't been bulk-fired there —
-    operations touching files in that folder may hit an unindexed LSP.
+    Proactively spawns every server in the chain (reporting dead state isn't
+    useful). Each folder line shows files warmed and seconds since warmup —
+    a folder with no warmup count means didOpen hasn't been bulk-fired there,
+    so operations touching files in that folder may hit an unindexed LSP.
     """
     _ensure_chain_configs()
+    for idx in range(len(_chain_configs)):
+        await _get_client(idx)
+
     now = time.time()
     lines: list[str] = []
     for idx, cfg in enumerate(_chain_configs):
         client = _chain_clients[idx]
-        if client is None:
-            pending = [p for p in _pending_workspace_adds]
-            suffix = f" ({len(pending)} queued)" if pending else ""
-            lines.append(f"[{cfg['label']}] not started{suffix}")
-            continue
+        assert client is not None
         lines.append(f"[{cfg['label']}]")
         for folder in sorted(client.workspace_folders):
             stats = _folder_warmup_stats.get((idx, folder))
@@ -1308,23 +1314,25 @@ async def lsp_workspaces() -> str:
 async def lsp_add_workspace(path: str) -> str:
     """Explicitly add a workspace folder. Applies to every LSP in the chain.
 
-    Auto-detection via LSP_PROJECT_MARKERS handles most cases; use this when
-    the heuristic doesn't find the root (unusual layout, no marker files) or
-    you want to pre-index a folder before making a batch refactor call.
+    Proactively spawns every chain server (if any aren't already) and then
+    registers the folder + runs warmup on each. Use this when auto-detection
+    via LSP_PROJECT_MARKERS doesn't find the root (unusual layout, no marker
+    files) or you want to pre-index before a batch refactor.
     """
     _ensure_chain_configs()
     abs_path = os.path.abspath(path)
     if not os.path.isdir(abs_path):
         return f"Not a directory: {abs_path}"
 
+    # Spawn every chain client — "queued (applied on spawn)" is a terrible UX
+    # when the operation the caller invoked is specifically about workspaces.
+    for idx in range(len(_chain_configs)):
+        await _get_client(idx)
+
     results: list[str] = []
     for idx, cfg in enumerate(_chain_configs):
         client = _chain_clients[idx]
-        if client is None:
-            if abs_path not in _pending_workspace_adds:
-                _pending_workspace_adds.append(abs_path)
-            results.append(f"[{cfg['label']}] queued (applied on spawn)")
-            continue
+        assert client is not None
         added = client.add_workspace_folder(abs_path)
         if added:
             warmed = await _maybe_warmup(client, idx, abs_path)
@@ -1945,14 +1953,16 @@ def _wrap_with_header(func: Any, method: str) -> Any:
         global _last_server
         _last_server = ""
         _added_workspaces_this_call.clear()
+        _just_started_this_call.clear()
         result = await func(*args, **kwargs)
         header = _header(method) if _last_server else f"[{method}]"
-        if _added_workspaces_this_call:
-            workspace_notes = "\n".join(
-                f"[+workspace] {p}" for p in _added_workspaces_this_call
-            )
-            return f"{header}\n{workspace_notes}\n{result}"
-        return f"{header}\n{result}"
+        prefix_lines: list[str] = [header]
+        for label in _just_started_this_call:
+            prefix_lines.append(f"[+started] {label}")
+        for p in _added_workspaces_this_call:
+            prefix_lines.append(f"[+workspace] {p}")
+        prefix = "\n".join(prefix_lines)
+        return f"{prefix}\n{result}"
 
     return wrapper
 
