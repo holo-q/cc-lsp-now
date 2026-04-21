@@ -999,12 +999,31 @@ async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int 
 
 
 def _apply_text_edits(text: str, edits: list[dict]) -> str:
-    """Apply LSP TextEdits to a string. Edits are applied end-to-start to keep offsets valid."""
-    # Precompute line start byte offsets
+    """Apply LSP TextEdits to a string. Edits are applied end-to-start to keep offsets valid.
+
+    LSP allows a position with line == total_lines (one past the last line) to
+    mean "end of file" — this is how pylance encodes full-document replacements
+    for rename-driven edits. Previously we rejected such edits as out-of-range,
+    silently dropping every import-rewrite in a move. Now we treat lines past
+    the array as EOF.
+    """
+    # Precompute line start offsets. Append a sentinel at len(text) so positions
+    # with line == len(line_starts) resolve to EOF (standard LSP semantics).
     line_starts = [0]
     for i, ch in enumerate(text):
         if ch == "\n":
             line_starts.append(i + 1)
+    line_starts.append(len(text))  # EOF sentinel
+
+    def _offset(pos: dict) -> int | None:
+        line = pos["line"]
+        char = pos["character"]
+        if line < 0 or line >= len(line_starts):
+            return None
+        start = line_starts[line]
+        # Clamp character to end of this line (or len(text) for the sentinel).
+        next_start = line_starts[line + 1] if line + 1 < len(line_starts) else len(text)
+        return min(start + char, next_start)
 
     sorted_edits = sorted(
         edits,
@@ -1014,14 +1033,10 @@ def _apply_text_edits(text: str, edits: list[dict]) -> str:
 
     result = text
     for edit in sorted_edits:
-        start = edit["range"]["start"]
-        end = edit["range"]["end"]
-        s_line = start["line"]
-        e_line = end["line"]
-        if s_line >= len(line_starts) or e_line >= len(line_starts):
+        start_offset = _offset(edit["range"]["start"])
+        end_offset = _offset(edit["range"]["end"])
+        if start_offset is None or end_offset is None:
             continue
-        start_offset = line_starts[s_line] + start["character"]
-        end_offset = line_starts[e_line] + end["character"]
         result = result[:start_offset] + edit["newText"] + result[end_offset:]
     return result
 
