@@ -3627,65 +3627,147 @@ async def lsp_declaration(file_path: str, symbol: str = "", line: int = 0) -> st
         return f"LSP error: {e}"
 
 
-def _format_type_hierarchy_item(item: dict) -> str:
-    """Format a TypeHierarchyItem as a compact source location."""
-    name = item.get("name", "")
-    kind = _symbol_kind_label(item.get("kind", 0))
-    path = _uri_to_path(item.get("uri", ""))
-    start = item.get("range", {}).get("start", {})
-    line_n = start.get("line", 0) + 1
-    return f"{line_n}  {kind}  {name}  {path}"
+async def _walk_type_edges(
+    direction: str,
+    root_item: dict,
+    max_depth: int,
+    max_edges: int,
+) -> list[tuple[dict, int]]:
+    """BFS-expand type-hierarchy edges in one direction.
 
-
-async def lsp_type_hierarchy_supertypes(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Find the supertypes (parents) of a type. Pass symbol name or line number.
-
-    Two-step LSP flow: textDocument/prepareTypeHierarchy then typeHierarchy/supertypes
-    on the first resolved item. Useful for climbing a class/interface chain.
+    ``direction`` is ``"super"`` (parents) or ``"sub"`` (children). Returns
+    ``[(type_item, depth)]`` — TypeHierarchyItem records, since unlike call
+    hierarchy responses there is no per-edge envelope to unwrap. Stops as
+    soon as ``max_edges`` is reached so the caller can interleave super and
+    sub under a shared budget.
     """
+    if max_edges <= 0:
+        return []
+    method = (
+        "typeHierarchy/supertypes" if direction == "super"
+        else "typeHierarchy/subtypes"
+    )
+    edges: list[tuple[dict, int]] = []
+    layer: list[dict] = [root_item]
+    seen: set[tuple[str, int, int]] = set()
+    for depth in range(1, max_depth + 1):
+        next_layer: list[dict] = []
+        for item in layer:
+            try:
+                result = await _request(method, {"item": item})
+            except LspError:
+                continue
+            if not result:
+                continue
+            for type_item in result:
+                edges.append((type_item, depth))
+                sel = type_item.get("selectionRange") or type_item.get("range") or {}
+                start = sel.get("start", {})
+                key = (
+                    type_item.get("uri", ""),
+                    start.get("line", 0),
+                    start.get("character", 0),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    next_layer.append(type_item)
+                if len(edges) >= max_edges:
+                    return edges
+        layer = next_layer
+        if not layer:
+            break
+    return edges
+
+
+async def lsp_types(
+    target: str = "",
+    direction: str = "both",
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+    max_depth: int = 1,
+    max_edges: int = 50,
+) -> str:
+    """Show super and/or sub type hierarchy edges for one semantic node.
+
+    Workflow replacement for raw ``typeHierarchy/supertypes`` /
+    ``typeHierarchy/subtypes`` (see ``docs/tool-surface.md``). Mirrors
+    ``lsp_calls``: resolves ``target`` via ``_resolve_semantic_target``
+    (graph index ``[N]``, bare ``Lxx`` from the last semantic graph,
+    ``file:Lx``, or ``file_path``+``symbol``/``line``), runs
+    ``prepareTypeHierarchy`` once, then expands supertypes / subtypes per
+    ``direction`` ("super", "sub", "both"). ``supertypes`` / ``subtypes``
+    are accepted as aliases.
+
+    Each rendered edge is recorded into the semantic nav context so a
+    follow-up ``lsp_symbol([N])`` / ``lsp_refs([N])`` / ``lsp_types([N])``
+    propagates through the type graph without re-resolving.
+    """
+    direction_raw = (direction or "both").strip().lower()
+    aliases = {"supertypes": "super", "subtypes": "sub"}
+    direction_key = aliases.get(direction_raw, direction_raw)
+    if direction_key not in {"super", "sub", "both"}:
+        return "direction must be one of: super, sub, both."
+
+    resolved = await _resolve_semantic_target(target, file_path, symbol, line)
+    if isinstance(resolved, str):
+        return resolved
+
+    max_depth = max(1, min(max_depth, 5))
+    max_edges = max(1, min(max_edges, 500))
+
     try:
-        uri, pos = await _resolve(file_path, symbol, line)
         items = await _request("textDocument/prepareTypeHierarchy", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
+            "textDocument": {"uri": resolved.uri},
+            "position": resolved.pos,
+        }, uri=resolved.uri)
         if not items:
             return "No type hierarchy item at this position."
 
-        result = await _request("typeHierarchy/supertypes", {"item": items[0]})
-        if not result:
-            return "No supertypes found."
+        directions = ["super", "sub"] if direction_key == "both" else [direction_key]
+        edges_by_dir: dict[str, list[tuple[dict, int]]] = {}
+        for d in directions:
+            edges = await _walk_type_edges(d, items[0], max_depth, max_edges)
+            edges_by_dir[d] = edges
 
-        return "\n".join(_format_type_hierarchy_item(item) for item in result)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
+        total = sum(len(v) for v in edges_by_dir.values())
+        groups: list[SemanticGrepGroup] = []
+        sections: list[str] = []
 
+        anchor_name = resolved.name or items[0].get("name", "")
+        head = f"Types for {anchor_name} ({resolved.path}:L{resolved.line})" if anchor_name \
+            else f"Types for {resolved.path}:L{resolved.line}"
+        sections.append(head)
 
-async def lsp_type_hierarchy_subtypes(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Find the subtypes (children) of a type. Pass symbol name or line number.
+        if total == 0:
+            sections.append("No types.")
+        else:
+            for d in directions:
+                edges = edges_by_dir.get(d, [])
+                if not edges:
+                    sections.append(f"{d}: (none)")
+                    continue
+                sections.append(f"{d}:")
+                for type_item, depth in edges:
+                    # TypeHierarchyItem and CallHierarchyItem share shape
+                    # (name/kind/uri/range/selectionRange), so the call-edge
+                    # group builder doubles as the type-edge group builder.
+                    group = _call_item_to_group(type_item)
+                    idx = len(groups)
+                    groups.append(group)
+                    depth_label = f" — depth {depth}" if depth > 1 else ""
+                    sections.append(_compact_line(
+                        f"  [{idx}] {Path(group.definition_path).name}:L{group.definition_line}"
+                        f"::{group.name} — {group.kind}{depth_label}",
+                        240,
+                    ))
+                if len(edges) >= max_edges:
+                    sections.append(f"  ... stopped at {max_edges} {d} edge(s); raise max_edges to unfold.")
 
-    Two-step LSP flow: textDocument/prepareTypeHierarchy then typeHierarchy/subtypes
-    on the first resolved item. Useful for discovering implementors/derivatives.
-    """
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
-        items = await _request("textDocument/prepareTypeHierarchy", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
-        if not items:
-            return "No type hierarchy item at this position."
-
-        result = await _request("typeHierarchy/subtypes", {"item": items[0]})
-        if not result:
-            return "No subtypes found."
-
-        return "\n".join(_format_type_hierarchy_item(item) for item in result)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
+        nav_query = f"types:{anchor_name or resolved.path}:L{resolved.line}"
+        _record_semantic_nav_context(nav_query, groups)
+        return "\n".join(sections)
+    except (LspError, ValueError, RuntimeError) as e:
         return f"LSP error: {e}"
 
 
@@ -3740,8 +3822,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "move": (lsp_move, "workspace/willRenameFiles"),
     "fix": (lsp_fix, "cc-lsp-now/fix"),
     "calls": (lsp_calls, "cc-lsp-now/calls"),
-    "type_hierarchy_supertypes": (lsp_type_hierarchy_supertypes, "typeHierarchy/supertypes"),
-    "type_hierarchy_subtypes": (lsp_type_hierarchy_subtypes, "typeHierarchy/subtypes"),
+    "types": (lsp_types, "cc-lsp-now/types"),
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
     "session": (lsp_session, "cc-lsp-now/session"),
 }
@@ -3785,9 +3866,8 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "rename": "renameProvider",
     "fix": "codeActionProvider",
     "calls": "callHierarchyProvider",
+    "types": "typeHierarchyProvider",
     "move": "workspace.fileOperations.willRename",
-    "type_hierarchy_supertypes": "typeHierarchyProvider",
-    "type_hierarchy_subtypes": "typeHierarchyProvider",
     "confirm": None,
     "session": None,
 }

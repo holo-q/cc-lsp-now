@@ -366,5 +366,127 @@ class WaveThreeSurfaceTests(unittest.TestCase):
             )
 
 
+# Wave 4 graph operator per docs/tool-surface.md. Wave 4 collapses the raw
+# type-hierarchy pair (`lsp_type_hierarchy_supertypes`,
+# `lsp_type_hierarchy_subtypes`) into a single direction-keyed graph
+# operator `lsp_types`, mirroring how Wave 2 collapsed call hierarchy into
+# `lsp_calls`. Same pattern, same backend (`typeHierarchyProvider`).
+WAVE_FOUR_PUBLIC = ["types"]
+
+WAVE_FOUR_REPLACEMENTS: dict[str, list[str]] = {
+    "types": ["type_hierarchy_supertypes", "type_hierarchy_subtypes"],
+}
+
+# Once `lsp_types` lands, the raw wrapper attrs must be removed from the
+# module - not just unregistered - so a future registry sweep cannot
+# re-expose them. Mirrors the Wave 1 / Wave 3 cut pattern.
+WAVE_FOUR_CUT_WRAPPER_ATTRS = [
+    "lsp_type_hierarchy_supertypes",
+    "lsp_type_hierarchy_subtypes",
+]
+
+
+class WaveFourSurfaceTests(unittest.TestCase):
+    """Wave 4 graph operator per docs/tool-surface.md.
+
+    Wave 4 collapses `lsp_type_hierarchy_supertypes` +
+    `lsp_type_hierarchy_subtypes` into a single `lsp_types` direction-keyed
+    verb, matching the `lsp_calls` shape. Tests gate on `types` being
+    registered so a partial wave still gets coverage on the live pieces; a
+    skipped test doubles as a punch-list reminder for the implementation
+    worker.
+    """
+
+    def test_types_replaces_type_hierarchy_pair(self) -> None:
+        if "types" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_types not yet registered "
+                "(Wave 4 graph operator). docs/tool-surface.md expects "
+                "`types` to absorb both `type_hierarchy_supertypes` and "
+                "`type_hierarchy_subtypes` with the raw entries cut from "
+                "both registries - no aliases, no shims."
+            )
+        self.assertIn("types", _ALL_TOOLS, "types not registered in _ALL_TOOLS")
+        self.assertIn(
+            "types",
+            TOOL_CAPABILITIES,
+            "types missing TOOL_CAPABILITIES entry - capability gating "
+            "quietly skips tools without one",
+        )
+        for raw in WAVE_FOUR_REPLACEMENTS["types"]:
+            self.assertNotIn(
+                raw,
+                _ALL_TOOLS,
+                f"types shipped but raw {raw} still in _ALL_TOOLS - "
+                f"docs/tool-surface.md says no aliases, no shims",
+            )
+            self.assertNotIn(
+                raw,
+                TOOL_CAPABILITIES,
+                f"types shipped but raw {raw} still in TOOL_CAPABILITIES - "
+                f"dead capability paths invite accidental re-introduction",
+            )
+
+    def test_types_capability_is_type_hierarchy_provider(self) -> None:
+        # Self-activating: as soon as `types` lands in TOOL_CAPABILITIES the
+        # value must specifically be `typeHierarchyProvider` - the same
+        # provider both raw super/sub tools gated on. A None or wrong-key
+        # value would slip through generic "is in TOOL_CAPABILITIES"
+        # assertions and silently disable capability gating for the whole
+        # types surface.
+        if "types" not in TOOL_CAPABILITIES:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_types capability not yet wired. "
+                "docs/tool-surface.md Raw Tool Cut Map binds `types` to "
+                "`typeHierarchyProvider` (the same provider the raw "
+                "supertypes / subtypes pair gated on)."
+            )
+        self.assertEqual(
+            TOOL_CAPABILITIES["types"],
+            "typeHierarchyProvider",
+            "types must gate on typeHierarchyProvider - anything else "
+            "(None, definitionProvider, etc.) silently breaks capability "
+            "gating for servers that don't advertise type hierarchy.",
+        )
+
+    def test_lsp_types_attr_exists(self) -> None:
+        # `types` is registered against the public `lsp_types` coroutine.
+        # Pinning the module attr (not just the registry entry) catches the
+        # case where the registry maps to a stale alias.
+        if "types" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_types not yet defined on "
+                "cc_lsp_now.server. docs/tool-surface.md expects "
+                "`async def lsp_types(target='', direction='both', "
+                "file_path='', symbol='', line=0, max_depth=1, "
+                "max_edges=50) -> str`."
+            )
+        self.assertTrue(
+            hasattr(_server, "lsp_types"),
+            "lsp_types public wrapper missing - Wave 4 graph operator "
+            "expects a coroutine attr matching the registry entry",
+        )
+
+    def test_raw_type_hierarchy_wrapper_attrs_are_removed(self) -> None:
+        # Public wrappers are removed, not merely unregistered, so the
+        # source cannot be re-exposed accidentally by a future registry
+        # sweep. Gate on `types` shipping so a half-built Wave 4 doesn't
+        # produce a false failure here while the implementation worker is
+        # still mid-edit on server.py.
+        if "types" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_types not yet registered; the "
+                "raw lsp_type_hierarchy_supertypes / "
+                "lsp_type_hierarchy_subtypes wrapper cuts only land once "
+                "`types` has shipped."
+            )
+        for attr in WAVE_FOUR_CUT_WRAPPER_ATTRS:
+            self.assertFalse(
+                hasattr(_server, attr),
+                f"{attr} should be removed once lsp_types ships - "
+                f"docs/tool-surface.md: no aliases, no shims",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

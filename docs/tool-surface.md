@@ -22,6 +22,7 @@ Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations ->
 | `lsp_refs` | Expand references for a known node or graph index. |
 | `lsp_outline` | Show compact file/workspace breadcrumbs. |
 | `lsp_calls` | Show incoming and/or outgoing call graph edges. |
+| `lsp_types` | Show super and/or sub type hierarchy edges. |
 | `lsp_diagnostics` | Report diagnostics as the primary verifier surface. |
 | `lsp_fix` | Preview and stage code actions/refactors for a location or diagnostic. |
 | `lsp_rename` | Preview symbol rename with final-line edits and confirmation. |
@@ -30,10 +31,10 @@ Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations ->
 | `lsp_confirm` | Commit the currently staged edit transaction. |
 
 `lsp_grep`, `lsp_symbols_at`, `lsp_symbol`, `lsp_goto`, `lsp_refs`,
-`lsp_outline`, `lsp_calls`, `lsp_session`, `lsp_fix`, `lsp_rename`, and
-`lsp_move` are the implemented pieces of this surface today. The graph-aware
-tools preserve semantic graph context between calls, which is the pattern the
-rest of the tools should follow.
+`lsp_outline`, `lsp_calls`, `lsp_types`, `lsp_session`, `lsp_fix`,
+`lsp_rename`, and `lsp_move` are the implemented pieces of this surface today.
+The graph-aware tools preserve semantic graph context between calls, which is
+the pattern the rest of the tools should follow.
 
 ## Raw Tool Cut Map
 
@@ -54,6 +55,8 @@ plumbing inside the workflow tools.
 | `lsp_document_symbols` | `lsp_outline` |
 | `lsp_call_hierarchy_incoming` | `lsp_calls` |
 | `lsp_call_hierarchy_outgoing` | `lsp_calls` |
+| `lsp_type_hierarchy_supertypes` | `lsp_types` |
+| `lsp_type_hierarchy_subtypes` | `lsp_types` |
 | `lsp_code_actions` | `lsp_fix` |
 | `lsp_move_file` | `lsp_move` |
 | `lsp_move_files` | `lsp_move` |
@@ -105,7 +108,7 @@ Wave 1 built the core node operators:
 - `lsp_refs`
 
 Wave 2 builds outline, session, graph, and verifier operators. The intended
-landing order is `outline → session → calls → fix`:
+landing order is `outline → session → calls → types → fix`:
 
 1. `lsp_outline` *(landed)* — pure read; reuses `_format_outline_tree` plumbing
    and shrinks the registry by one (`lsp_document_symbols`).
@@ -116,7 +119,11 @@ landing order is `outline → session → calls → fix`:
    propagation through call hierarchy edges, exercising the same nav-context
    recorder used by `lsp_grep` / `lsp_symbols_at`. Cuts both
    `lsp_call_hierarchy_incoming` and `lsp_call_hierarchy_outgoing`.
-4. `lsp_fix` *(landed)* — preview-and-stage mutation; reuses diagnostic-aware
+4. `lsp_types` *(landed)* — semantic graph operator paralleling `lsp_calls`,
+   walking type hierarchy super/sub edges from a node and recording results
+   into the nav context. Cuts both `lsp_type_hierarchy_supertypes` and
+   `lsp_type_hierarchy_subtypes`.
+5. `lsp_fix` *(landed)* — preview-and-stage mutation; reuses diagnostic-aware
    target resolution and the `_pending` buffer used by `lsp_rename` / `lsp_move`.
    Cuts `lsp_code_actions` from the public registry.
 
@@ -151,6 +158,33 @@ in:
 out:
   [3] src/server.py:L744::_symbol_kind_label — function — 1 site
   ... stopped at 50 out edge(s); raise max_edges to unfold.
+```
+
+```python
+async def lsp_types(
+    target: str = "",
+    direction: str = "both",         # "super" | "sub" | "both"
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+    max_depth: int = 1,
+    max_edges: int = 50,
+) -> str: ...
+```
+
+`lsp_types` resolves the target with `_resolve_semantic_target`, runs
+`prepareTypeHierarchy`, then supertypes and/or subtypes per `direction`.
+`max_edges` applies per direction. Edges are recorded into the semantic nav
+context so callers can chain `lsp_symbol([N])`, `lsp_refs([N])`, or
+`lsp_goto([N])` on any returned node. Sample:
+
+```text
+Types for IRenderer (/repo/src/IRenderer.cs:L9)
+super:
+  [0] src/IComponent.cs:L4::IComponent — interface
+sub:
+  [3] src/Renderer.cs:L44::Renderer — class
+  ... stopped at 50 sub edge(s); raise max_edges to unfold.
 ```
 
 ```python

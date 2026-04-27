@@ -15,6 +15,7 @@ The target public surface is documented in [docs/tool-surface.md](docs/tool-surf
 | `lsp_refs` | Expands references for a semantic node or graph index. |
 | `lsp_outline` | Shows compact file/workspace breadcrumbs from document symbols. |
 | `lsp_calls` | Walks incoming/outgoing call edges from a graph node via `direction=in\|out\|both`. |
+| `lsp_types` | Walks super/sub type hierarchy edges from a graph node via `direction=super\|sub\|both`. |
 | `lsp_session` | Inspects, adds, warms, and restarts workspaces/LSP sessions via `action=status\|add\|warm\|restart`. |
 | `lsp_diagnostics` | Reports diagnostics as the main verifier surface. |
 | `lsp_fix` | Lists code actions on a semantic target with line diagnostics; stages edit-backed actions for `lsp_confirm`. |
