@@ -30,8 +30,9 @@ Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations ->
 | `lsp_session` | Inspect, add, and warm workspaces and LSP sessions. |
 | `lsp_confirm` | Commit the currently staged edit transaction. |
 
-`lsp_grep`, `lsp_symbols_at`, `lsp_symbol`, `lsp_goto`, and `lsp_refs` are the
-first implemented pieces of this surface. They preserve semantic graph context
+`lsp_grep`, `lsp_symbols_at`, `lsp_symbol`, `lsp_goto`, `lsp_refs`,
+`lsp_outline`, `lsp_calls`, and `lsp_session` are the implemented pieces of
+this surface today. The graph-aware tools preserve semantic graph context
 between calls, which is the pattern the rest of the tools should follow.
 
 ## Raw Tool Cut Map
@@ -93,14 +94,15 @@ Wave 1 built the core node operators:
 Wave 2 builds outline, session, graph, and verifier operators. The intended
 landing order is `outline → session → calls → fix`:
 
-1. `lsp_outline` — pure read; reuses `_format_outline_tree` plumbing and shrinks
-   the registry by one (`lsp_document_symbols`).
-2. `lsp_session` — pure read/admin; collapses three tiny raw tools (`lsp_info`,
-   `lsp_workspaces`, `lsp_add_workspace`) into one verb-driven surface with no
-   semantic-graph plumbing, dropping the public tool count fast.
-3. `lsp_calls` — semantic graph operator; introduces `[N]`-target propagation
-   through call hierarchy edges, exercising the same nav-context recorder used
-   by `lsp_grep` / `lsp_symbols_at`.
+1. `lsp_outline` *(landed)* — pure read; reuses `_format_outline_tree` plumbing
+   and shrinks the registry by one (`lsp_document_symbols`).
+2. `lsp_session` *(landed)* — pure read/admin; collapses three tiny raw tools
+   (`lsp_info`, `lsp_workspaces`, `lsp_add_workspace`) into one verb-driven
+   surface with no semantic-graph plumbing, dropping the public tool count fast.
+3. `lsp_calls` *(landed)* — semantic graph operator; introduces `[N]`-target
+   propagation through call hierarchy edges, exercising the same nav-context
+   recorder used by `lsp_grep` / `lsp_symbols_at`. Cuts both
+   `lsp_call_hierarchy_incoming` and `lsp_call_hierarchy_outgoing`.
 4. `lsp_fix` — preview-and-stage mutation; depends on diagnostic-aware target
    resolution and the `_pending` buffer used by `lsp_rename` / `lsp_move`.
 
@@ -123,16 +125,18 @@ async def lsp_calls(
 ```
 
 `lsp_calls` resolves the target with `_resolve_semantic_target`, runs
-`prepareCallHierarchy`, then incoming and/or outgoing per `direction`. Results
-are recorded into the semantic nav context so callers can `lsp_symbol([3])` /
-`lsp_refs([3])` on any call edge. Sample line:
+`prepareCallHierarchy`, then incoming and/or outgoing per `direction`.
+`max_edges` applies per direction. Results are recorded into the semantic nav
+context so callers can `lsp_symbol([3])` / `lsp_refs([3])` on any call edge.
+Sample:
 
 ```text
+Calls for Render (/repo/src/Renderer.cs:L44)
 in:
   [0] src/server.py:L3669::_ALL_TOOLS — function — 1 site
 out:
   [3] src/server.py:L744::_symbol_kind_label — function — 1 site
-... 4 more; raise max_edges to unfold.
+  ... stopped at 50 out edge(s); raise max_edges to unfold.
 ```
 
 ```python

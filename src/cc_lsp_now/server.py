@@ -2851,66 +2851,183 @@ async def lsp_confirm(index: int = 0) -> str:
     return f"Applied [{kind} #{index}]: {candidate.title}. {file_count} file(s), {edit_count} edit(s)."
 
 
-async def lsp_call_hierarchy_incoming(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
-    """Find all callers of a function/method. Pass symbol name or line number.
-    Use symbols (comma-separated) to batch multiple lookups at once."""
+def _call_item_to_group(item: dict) -> SemanticGrepGroup:
+    """Wrap a CallHierarchyItem as a SemanticGrepGroup so call-edge targets land
+    in the same nav context as ``lsp_grep`` / ``lsp_symbols_at`` results.
 
-    async def _do(uri: str, pos: dict) -> str:
+    The hit is anchored at the item's ``selectionRange`` start (the function's
+    name token) so a follow-up ``lsp_symbol([N])`` / ``lsp_refs([N])`` hits the
+    correct identifier without re-resolving via text.
+    """
+    name = item.get("name", "")
+    uri = item.get("uri", "")
+    path = _uri_to_path(uri)
+    sel_range = item.get("selectionRange") or item.get("range") or {}
+    sel_start = sel_range.get("start", {})
+    line0 = sel_start.get("line", 0)
+    char0 = sel_start.get("character", 0)
+    line_text = _line_text(path, line0 + 1)
+    hit = SemanticGrepHit(
+        path=path,
+        line=line0,
+        character=char0,
+        line_text=line_text,
+        uri=uri,
+        pos={"line": line0, "character": char0},
+    )
+    kind_label = _symbol_kind_label(item.get("kind", 0)).lower()
+    return SemanticGrepGroup(
+        key=f"{path}:{line0}:{char0}:{name}",
+        name=name,
+        kind=kind_label,
+        type_text="",
+        definition_path=path,
+        definition_line=line0 + 1,
+        definition_character=char0,
+        hits=[hit],
+    )
+
+
+async def _walk_call_edges(
+    direction: str,
+    root_item: dict,
+    max_depth: int,
+    max_edges: int,
+) -> list[tuple[dict, int]]:
+    """BFS-expand call-hierarchy edges in one direction.
+
+    Returns ``[(call_record, depth)]`` where ``call_record`` is the LSP
+    ``CallHierarchyIncomingCall`` / ``CallHierarchyOutgoingCall`` envelope.
+    Stops as soon as ``max_edges`` is reached so the caller can interleave
+    incoming and outgoing under a shared budget.
+    """
+    if max_edges <= 0:
+        return []
+    method = (
+        "callHierarchy/incomingCalls" if direction == "in"
+        else "callHierarchy/outgoingCalls"
+    )
+    target_key = "from" if direction == "in" else "to"
+    edges: list[tuple[dict, int]] = []
+    layer: list[dict] = [root_item]
+    seen: set[tuple[str, int, int]] = set()
+    for depth in range(1, max_depth + 1):
+        next_layer: list[dict] = []
+        for item in layer:
+            try:
+                result = await _request(method, {"item": item})
+            except LspError:
+                continue
+            if not result:
+                continue
+            for call in result:
+                edges.append((call, depth))
+                target = call.get(target_key, {})
+                sel = target.get("selectionRange") or target.get("range") or {}
+                start = sel.get("start", {})
+                key = (
+                    target.get("uri", ""),
+                    start.get("line", 0),
+                    start.get("character", 0),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    next_layer.append(target)
+                if len(edges) >= max_edges:
+                    return edges
+        layer = next_layer
+        if not layer:
+            break
+    return edges
+
+
+async def lsp_calls(
+    target: str = "",
+    direction: str = "both",
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+    max_depth: int = 1,
+    max_edges: int = 50,
+) -> str:
+    """Show incoming and/or outgoing call graph edges for one semantic node.
+
+    Workflow replacement for raw ``callHierarchy/incomingCalls`` /
+    ``callHierarchy/outgoingCalls`` (see ``docs/tool-surface.md``). Resolves
+    ``target`` via ``_resolve_semantic_target`` (graph index ``[N]``, bare
+    ``Lxx`` from the last semantic graph, ``file:Lx``, or
+    ``file_path``+``symbol``/``line``), runs ``prepareCallHierarchy`` once,
+    then expands incoming / outgoing per ``direction`` ("in", "out", "both").
+
+    Each rendered edge is recorded into the semantic nav context so a follow-up
+    ``lsp_symbol([N])`` / ``lsp_refs([N])`` / ``lsp_calls([N])`` propagates
+    through the call graph without re-resolving.
+    """
+    direction_key = (direction or "both").strip().lower()
+    if direction_key not in {"in", "out", "both"}:
+        return "direction must be one of: in, out, both."
+
+    resolved = await _resolve_semantic_target(target, file_path, symbol, line)
+    if isinstance(resolved, str):
+        return resolved
+
+    max_depth = max(1, min(max_depth, 5))
+    max_edges = max(1, min(max_edges, 500))
+
+    try:
         items = await _request("textDocument/prepareCallHierarchy", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
+            "textDocument": {"uri": resolved.uri},
+            "position": resolved.pos,
+        }, uri=resolved.uri)
         if not items:
-            return "No call hierarchy item found at this position."
+            return "No call hierarchy item at this position."
 
-        result = await _request("callHierarchy/incomingCalls", {"item": items[0]})
-        if not result:
-            return "No incoming calls found."
+        directions = ["in", "out"] if direction_key == "both" else [direction_key]
+        edges_by_dir: dict[str, list[tuple[dict, int]]] = {}
+        for d in directions:
+            edges = await _walk_call_edges(d, items[0], max_depth, max_edges)
+            edges_by_dir[d] = edges
 
-        lines = []
-        for call in result:
-            from_item = call.get("from", {})
-            name = from_item.get("name", "")
-            kind = _symbol_kind_label(from_item.get("kind", 0))
-            path = _uri_to_path(from_item.get("uri", ""))
-            start = from_item.get("range", {}).get("start", {})
-            line_n = start.get("line", 0) + 1
-            n_sites = len(call.get("fromRanges", []))
-            lines.append(f"{line_n}  {kind}  {name}  {path}  ({n_sites} call site{'s' if n_sites != 1 else ''})")
-        return "\n".join(lines)
+        total = sum(len(v) for v in edges_by_dir.values())
+        groups: list[SemanticGrepGroup] = []
+        sections: list[str] = []
 
-    return await _batch(file_path, symbol, symbols, line, _do)
+        anchor_name = resolved.name or items[0].get("name", "")
+        head = f"Calls for {anchor_name} ({resolved.path}:L{resolved.line})" if anchor_name \
+            else f"Calls for {resolved.path}:L{resolved.line}"
+        sections.append(head)
 
+        if total == 0:
+            sections.append("No calls.")
+        else:
+            for d in directions:
+                edges = edges_by_dir.get(d, [])
+                if not edges:
+                    sections.append(f"{d}: (none)")
+                    continue
+                target_key = "from" if d == "in" else "to"
+                sections.append(f"{d}:")
+                for call, depth in edges:
+                    target_item = call.get(target_key, {})
+                    n_sites = max(1, len(call.get("fromRanges", [])))
+                    group = _call_item_to_group(target_item)
+                    idx = len(groups)
+                    groups.append(group)
+                    site_label = f"{n_sites} site{'s' if n_sites != 1 else ''}"
+                    depth_label = f" — depth {depth}" if depth > 1 else ""
+                    sections.append(_compact_line(
+                        f"  [{idx}] {Path(group.definition_path).name}:L{group.definition_line}"
+                        f"::{group.name} — {group.kind} — {site_label}{depth_label}",
+                        240,
+                    ))
+                if len(edges) >= max_edges:
+                    sections.append(f"  ... stopped at {max_edges} {d} edge(s); raise max_edges to unfold.")
 
-async def lsp_call_hierarchy_outgoing(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
-    """Find all functions/methods called by a function/method. Pass symbol name or line number.
-    Use symbols (comma-separated) to batch multiple lookups at once."""
-
-    async def _do(uri: str, pos: dict) -> str:
-        items = await _request("textDocument/prepareCallHierarchy", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
-        if not items:
-            return "No call hierarchy item found at this position."
-
-        result = await _request("callHierarchy/outgoingCalls", {"item": items[0]})
-        if not result:
-            return "No outgoing calls found."
-
-        lines = []
-        for call in result:
-            to_item = call.get("to", {})
-            name = to_item.get("name", "")
-            kind = _symbol_kind_label(to_item.get("kind", 0))
-            path = _uri_to_path(to_item.get("uri", ""))
-            start = to_item.get("range", {}).get("start", {})
-            line_n = start.get("line", 0) + 1
-            n_sites = len(call.get("fromRanges", []))
-            lines.append(f"{line_n}  {kind}  {name}  {path}  ({n_sites} call site{'s' if n_sites != 1 else ''})")
-        return "\n".join(lines)
-
-    return await _batch(file_path, symbol, symbols, line, _do)
+        nav_query = f"calls:{anchor_name or resolved.path}:L{resolved.line}"
+        _record_semantic_nav_context(nav_query, groups)
+        return "\n".join(sections)
+    except (LspError, ValueError, RuntimeError) as e:
+        return f"LSP error: {e}"
 
 
 async def _diagnostics_single(file_path: str) -> str:
@@ -3782,8 +3899,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "prepare_rename": (lsp_prepare_rename, "textDocument/prepareRename"),
     "move_file": (lsp_move_file, "workspace/willRenameFiles"),
     "code_actions": (lsp_code_actions, "textDocument/codeAction"),
-    "call_hierarchy_incoming": (lsp_call_hierarchy_incoming, "callHierarchy/incomingCalls"),
-    "call_hierarchy_outgoing": (lsp_call_hierarchy_outgoing, "callHierarchy/outgoingCalls"),
+    "calls": (lsp_calls, "cc-lsp-now/calls"),
     "type_hierarchy_supertypes": (lsp_type_hierarchy_supertypes, "typeHierarchy/supertypes"),
     "type_hierarchy_subtypes": (lsp_type_hierarchy_subtypes, "typeHierarchy/subtypes"),
     "inlay_hint": (lsp_inlay_hint, "textDocument/inlayHint"),
@@ -3838,8 +3954,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "rename": "renameProvider",
     "prepare_rename": "renameProvider",
     "code_actions": "codeActionProvider",
-    "call_hierarchy_incoming": "callHierarchyProvider",
-    "call_hierarchy_outgoing": "callHierarchyProvider",
+    "calls": "callHierarchyProvider",
     "move_file": "workspace.fileOperations.willRename",
     "type_hierarchy_supertypes": "typeHierarchyProvider",
     "type_hierarchy_subtypes": "typeHierarchyProvider",

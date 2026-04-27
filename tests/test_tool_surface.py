@@ -131,6 +131,28 @@ class WaveTwoSurfaceTests(unittest.TestCase):
             ["call_hierarchy_incoming", "call_hierarchy_outgoing"],
         )
 
+    def test_calls_capability_is_call_hierarchy_provider(self) -> None:
+        # Self-activating: as soon as ``calls`` lands in TOOL_CAPABILITIES the
+        # value must specifically be ``callHierarchyProvider`` (the same
+        # provider the raw incoming/outgoing pair gated on). The generic
+        # _assert_wave_two_tool only checks for *presence* of a capability
+        # entry — a None or wrong-key value would slip through it and
+        # silently disable gating for the whole calls surface, so the value
+        # itself needs its own pin.
+        if "calls" not in TOOL_CAPABILITIES:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_calls capability not yet wired. "
+                "docs/tool-surface.md Raw Tool Cut Map binds `calls` to "
+                "`callHierarchyProvider`."
+            )
+        self.assertEqual(
+            TOOL_CAPABILITIES["calls"],
+            "callHierarchyProvider",
+            "calls must gate on callHierarchyProvider — anything else "
+            "(None, definitionProvider, etc.) silently breaks capability "
+            "gating for servers that don't advertise call hierarchy.",
+        )
+
     def test_fix_replaces_code_actions(self) -> None:
         if "fix" not in _ALL_TOOLS:
             self.skipTest(
