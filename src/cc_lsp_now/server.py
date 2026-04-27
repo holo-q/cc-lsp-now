@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1757,110 +1756,7 @@ def _resolve_paths(file_path: str, pattern: str) -> list[str] | str:
     return "Provide file_path or pattern."
 
 
-# --- Multi-symbol batching ---
-
-
-async def _batch(
-    file_path: str,
-    symbol: str,
-    symbols: str,
-    line: int,
-    fn: Callable[[str, dict], Awaitable[str]],
-) -> str:
-    """Batch-resolve multiple symbols and run an LSP callback on each.
-
-    When ``symbols`` is non-empty (comma-separated), each symbol is resolved
-    independently via ``_resolve`` and passed through ``fn``. Results are labeled
-    per-symbol with ``--- {symbol} ---`` headers. Resolution or LSP errors
-    for individual symbols are captured inline without aborting the batch.
-
-    When ``symbols`` is empty, falls back to single-target mode: resolves
-    ``(file_path, symbol, line)`` once and calls ``fn`` -- no label block.
-    """
-    if not symbols:
-        # Single-target fallback -- no batching, no label header.
-        try:
-            uri, pos = await _resolve(file_path, symbol, line)
-            return await fn(uri, pos)
-        except AmbiguousSymbol as e:
-            return _ambiguous_msg(e)
-        except (LspError, ValueError) as e:
-            return f"LSP error: {e}"
-
-    parts: list[str] = []
-    for sym in (s.strip() for s in symbols.split(",")):
-        if not sym:
-            continue
-        header = f"--- {sym} ---"
-        try:
-            uri, pos = await _resolve(file_path, sym, line)
-            body = await fn(uri, pos)
-            parts.append(f"{header}\n{body}")
-        except AmbiguousSymbol as e:
-            parts.append(f"{header}\n{_ambiguous_msg(e)}")
-        except (LspError, ValueError) as e:
-            parts.append(f"{header}\nLSP error: {e}")
-    return "\n\n".join(parts)
-
-
 # --- Tool implementations ---
-
-
-async def lsp_type_definition(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
-    """Go to the type definition of a symbol. Pass symbol name or line number.
-    Use symbols (comma-separated) to batch multiple lookups at once."""
-
-    async def _do(uri: str, pos: dict) -> str:
-        result = await _request("textDocument/typeDefinition", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
-        locs = _normalize_locations(result)
-        if not locs:
-            return "No type definition found."
-        return "\n".join(locs)
-
-    return await _batch(file_path, symbol, symbols, line, _do)
-
-
-async def lsp_signature_help(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Get function signature and parameter info. Pass symbol name or line number."""
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
-        result = await _request("textDocument/signatureHelp", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
-        if not result or not result.get("signatures"):
-            return "No signature help available."
-
-        signatures = result["signatures"]
-        active_sig = result.get("activeSignature", 0)
-        active_param = result.get("activeParameter", 0)
-
-        output = []
-        for i, sig in enumerate(signatures):
-            marker = ">>> " if i == active_sig else "    "
-            label = sig.get("label", "")
-            output.append(f"{marker}{label}")
-            doc = sig.get("documentation")
-            if doc:
-                doc_text = doc.get("value", doc) if isinstance(doc, dict) else doc
-                output.append(f"    {doc_text}")
-            params = sig.get("parameters", [])
-            if params and i == active_sig:
-                for j, p in enumerate(params):
-                    active = " *" if j == active_param else ""
-                    p_label = p.get("label", "")
-                    p_doc = p.get("documentation", "")
-                    if isinstance(p_doc, dict):
-                        p_doc = p_doc.get("value", "")
-                    output.append(f"      param: {p_label}{active}  {p_doc}")
-        return "\n".join(output)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
 
 
 async def _outline_single(file_path: str) -> str:
@@ -1902,28 +1798,6 @@ async def lsp_outline(file_path: str = "", pattern: str = "") -> str:
             body = await _outline_single(p)
             sections.append(f"=== {p} ===\n{body}")
         return "\n\n".join(sections)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
-
-
-async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool = True) -> str:
-    """Format an entire document."""
-    try:
-        file_path = _resolve_file_path(file_path)
-        uri = file_uri(file_path)
-        result = await _request("textDocument/formatting", {
-            "textDocument": {"uri": uri},
-            "options": {
-                "tabSize": tab_size,
-                "insertSpaces": insert_spaces,
-            },
-        }, uri=uri)
-        if not result:
-            return "No formatting changes needed."
-        return json.dumps([{
-            "range": _range_str(e.get("range", {})),
-            "newText": e.get("newText", ""),
-        } for e in result], indent=2)
     except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
@@ -3279,65 +3153,6 @@ async def lsp_refs(
         return f"LSP error: {e}"
 
 
-async def lsp_hover(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
-    """Get type info and docs for a symbol. Pass symbol name or line number.
-    Use symbols (comma-separated) to batch multiple lookups at once."""
-
-    async def _do(uri: str, pos: dict) -> str:
-        result = await _request("textDocument/hover", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
-        if not result:
-            return "No hover information available."
-        contents = result.get("contents", "")
-        if isinstance(contents, dict):
-            return contents.get("value", str(contents))
-        if isinstance(contents, list):
-            return "\n\n".join(
-                c.get("value", str(c)) if isinstance(c, dict) else str(c)
-                for c in contents
-            )
-        return str(contents)
-
-    return await _batch(file_path, symbol, symbols, line, _do)
-
-
-async def lsp_definition(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
-    """Go to the definition of a symbol. Pass symbol name or line number.
-    Use symbols (comma-separated) to batch multiple lookups at once."""
-
-    async def _do(uri: str, pos: dict) -> str:
-        result = await _request("textDocument/definition", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
-        locs = _normalize_locations(result)
-        if not locs:
-            return "No definition found."
-        return "\n".join(locs)
-
-    return await _batch(file_path, symbol, symbols, line, _do)
-
-
-async def lsp_references(file_path: str, symbol: str = "", symbols: str = "", line: int = 0, include_declaration: bool = True) -> str:
-    """Find all references to a symbol. Pass symbol name or line number.
-    Use symbols (comma-separated) to batch multiple lookups at once."""
-
-    async def _do(uri: str, pos: dict) -> str:
-        result = await _request("textDocument/references", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-            "context": {"includeDeclaration": include_declaration},
-        }, uri=uri)
-        locs = _normalize_locations(result)
-        if not locs:
-            return "No references found."
-        return "\n".join(locs)
-
-    return await _batch(file_path, symbol, symbols, line, _do)
-
-
 async def _semantic_doc_symbols(path: str, uri: str, cache: dict[str, list[dict]]) -> list[dict]:
     if path in cache:
         return cache[path]
@@ -3581,52 +3396,6 @@ async def lsp_symbols_at(target: str = "", file_path: str = "", line: int = 0) -
     return "\n".join(lines)
 
 
-async def lsp_implementation(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Go to the implementation of a symbol (interfaces, abstract methods).
-
-    Unlike lsp_definition, which jumps to where a symbol is declared, this jumps
-    to concrete implementations — e.g. the classes implementing an interface, or
-    subclass overrides of an abstract method. Pass symbol name or line number.
-    """
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
-        result = await _request("textDocument/implementation", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
-        locs = _normalize_locations(result)
-        if not locs:
-            return "No implementations found."
-        return "\n".join(locs)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
-
-
-async def lsp_declaration(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Go to the declaration of a symbol. Pass symbol name or line number.
-
-    Distinct from lsp_definition: some languages (C/C++) separate declaration
-    (header) from definition (impl). For languages without that split, this
-    typically mirrors lsp_definition.
-    """
-    try:
-        uri, pos = await _resolve(file_path, symbol, line)
-        result = await _request("textDocument/declaration", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
-        locs = _normalize_locations(result)
-        if not locs:
-            return "No declaration found."
-        return "\n".join(locs)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
-
-
 async def _walk_type_edges(
     direction: str,
     root_item: dict,
@@ -3768,43 +3537,6 @@ async def lsp_types(
         _record_semantic_nav_context(nav_query, groups)
         return "\n".join(sections)
     except (LspError, ValueError, RuntimeError) as e:
-        return f"LSP error: {e}"
-
-
-async def lsp_range_formatting(
-    file_path: str,
-    start_line: int,
-    end_line: int,
-    tab_size: int = 4,
-    insert_spaces: bool = True,
-) -> str:
-    """Format a specific line range within a document.
-
-    Line numbers are 1-based (user-facing convention). The end position uses
-    character=99999 to reliably span to end-of-line without needing to measure
-    — the server clamps it to the actual line length.
-    """
-    try:
-        file_path = _resolve_file_path(file_path)
-        uri = file_uri(file_path)
-        result = await _request("textDocument/rangeFormatting", {
-            "textDocument": {"uri": uri},
-            "range": {
-                "start": {"line": start_line - 1, "character": 0},
-                "end": {"line": end_line - 1, "character": 99999},
-            },
-            "options": {
-                "tabSize": tab_size,
-                "insertSpaces": insert_spaces,
-            },
-        }, uri=uri)
-        if not result:
-            return "No formatting changes needed."
-        return json.dumps([{
-            "range": _range_str(e.get("range", {})),
-            "newText": e.get("newText", ""),
-        } for e in result], indent=2)
-    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 

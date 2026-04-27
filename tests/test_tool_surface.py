@@ -24,6 +24,16 @@ WAVE_ONE_REPLACED_RAW = [
     "references",
 ]
 
+WAVE_ONE_REPLACED_WRAPPER_ATTRS = [
+    "lsp_hover",
+    "lsp_signature_help",
+    "lsp_definition",
+    "lsp_declaration",
+    "lsp_type_definition",
+    "lsp_implementation",
+    "lsp_references",
+]
+
 
 # Wave 2 outline+verifier operators per docs/tool-surface.md. These tests
 # describe the expected post-Wave-2 registry shape; they self-activate as
@@ -41,6 +51,7 @@ WAVE_TWO_REPLACEMENTS: dict[str, list[str]] = {
 }
 
 FORMAT_TOOLS = ["formatting", "range_formatting"]
+FORMAT_TOOL_WRAPPER_ATTRS = ["lsp_formatting", "lsp_range_formatting"]
 
 CUT_WITHOUT_REPLACEMENT = [
     "completion",
@@ -86,6 +97,14 @@ class ToolSurfaceTests(unittest.TestCase):
         for name in WAVE_ONE_REPLACED_RAW:
             self.assertNotIn(name, TOOL_CAPABILITIES)
 
+    def test_replaced_raw_wrappers_are_removed(self) -> None:
+        # The public surface is now workflow-oriented, not a mirror of LSP
+        # protocol verbs. Removing raw wrapper attrs makes that irreversible
+        # by casual registry sweeps: lsp_symbol/lsp_goto/lsp_refs own these
+        # operations as graph-aware operators.
+        for attr in WAVE_ONE_REPLACED_WRAPPER_ATTRS:
+            self.assertFalse(hasattr(_server, attr), f"{attr} should be removed")
+
     def test_capability_table_matches_registry(self) -> None:
         # Every registered tool must have a capability entry, and the
         # capability table must not name phantom tools that aren't registered.
@@ -109,6 +128,8 @@ class ToolSurfaceTests(unittest.TestCase):
         for name in FORMAT_TOOLS:
             self.assertNotIn(name, _ALL_TOOLS)
             self.assertNotIn(name, TOOL_CAPABILITIES)
+        for attr in FORMAT_TOOL_WRAPPER_ATTRS:
+            self.assertFalse(hasattr(_server, attr), f"{attr} should be removed")
 
     def test_cut_without_replacement_tools_are_not_public(self) -> None:
         # These raw/editor-shaped tools have no current agent workflow. Keeping
