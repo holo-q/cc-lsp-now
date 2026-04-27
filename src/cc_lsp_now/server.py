@@ -1341,8 +1341,13 @@ def _format_semantic_sample_locs(group: SemanticGrepGroup) -> str:
                 parts.append(f"L{line}")
             else:
                 parts.append(f"{Path(path).name}:L{line}")
+        if len(group.reference_locs) > len(locs):
+            parts.append("...")
         return ",".join(parts)
-    return ",".join(f"L{hit.line + 1}" for hit in group.hits[:3])
+    hit_parts = [f"L{hit.line + 1}" for hit in group.hits[:3]]
+    if len(group.hits) > len(hit_parts):
+        hit_parts.append("...")
+    return ",".join(hit_parts)
 
 
 def _format_semantic_grep_group(index: int, group: SemanticGrepGroup) -> str:

@@ -7,8 +7,8 @@ means so the model receives symbol groups instead of loose line hits.
 Default output is one line per semantic identity:
 
 ```text
-[0] arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 9 — def L44 — samples L57,L694
-[1] field _ctx: HistorySurfaceContext — HistoryUI:64::_ctx — refs 14 — def L64 — samples L78,L159,L218
+[0] arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 9 — def L44 — samples L57,L694,...
+[1] field _ctx: HistorySurfaceContext — HistoryUI:64::_ctx — refs 14 — def L64 — samples L78,L159,L218,...
 ```
 
 Breadcrumbs use `::` instead of `>` so C# and TypeScript generics stay legible.

@@ -80,6 +80,14 @@ class LspGrepTests(unittest.TestCase):
                     "uri": "file:///repo/src/ComfyNodeRenderer.cs",
                     "range": {"start": {"line": 56, "character": 8}, "end": {"line": 56, "character": 11}},
                 },
+                {
+                    "uri": "file:///repo/src/ComfyNodeRenderer.cs",
+                    "range": {"start": {"line": 68, "character": 8}, "end": {"line": 68, "character": 11}},
+                },
+                {
+                    "uri": "file:///repo/src/ComfyNodeRenderer.cs",
+                    "range": {"start": {"line": 69, "character": 8}, "end": {"line": 69, "character": 11}},
+                },
             ],
             context_symbols=[
                 {
@@ -101,7 +109,7 @@ class LspGrepTests(unittest.TestCase):
 
         self.assertEqual(
             line,
-            "[3] arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 2 — def L44 — samples L44,L57",
+            "[3] arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 4 — def L44 — samples L44,L57,L69,...",
         )
 
 
