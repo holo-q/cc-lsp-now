@@ -21,6 +21,19 @@ Default output is one line per semantic identity:
 means more refs exist than were printed; use `lsp_refs([N])` or raise
 `max_hits` to unfold them. `refs N` is the full count.
 
+The renderer should distinguish language-server-verified references from
+text-only fallback hits:
+
+```text
+refs 9
+hits 4 (unresolved)
+```
+
+`refs` means the LSP bound the occurrences to a semantic identity and returned
+references. `hits (unresolved)` means text candidates were found but semantic
+binding or reference expansion failed. That degraded state must stay visible so
+agents do not treat cold-index text matches as verified symbol data.
+
 Breadcrumbs use `::` instead of `>` so C# and TypeScript generics stay legible.
 When a class name matches its file name, the path is abridged:
 

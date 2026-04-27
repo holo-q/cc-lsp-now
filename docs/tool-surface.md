@@ -11,6 +11,12 @@ The working rule is:
 Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations -> verify.
 ```
 
+Renderer details are part of this public contract. See
+`docs/rendering.md` for the canonical row shapes, graph-handle expectations,
+diagnostic repair flow, and preview rules. See `docs/agent-tool-roadmap.md` for
+the pending-edit, what-if, witness, multi-agent, and verifier tool roadmap that
+extends this surface beyond raw LSP orchestration.
+
 ## Target Tools
 
 | Tool | Purpose |
@@ -92,6 +98,10 @@ public MCP registry rather than being replaced by a workflow tool.
 - Outputs should stay compact, line-oriented, and breadcrumbed: one symbol per
   line. Sample lists are non-exhaustive — a trailing `...` means more exist;
   callers unfold with `lsp_refs` or by raising `max_hits` / `max_groups`.
+- Printed rows should generally be navigable. `outline`, `refs`, `goto`, and
+  diagnostics should seed the same follow-up context as `grep`, `symbols_at`,
+  `calls`, and `types`; diagnostics use `(dN)` handles because repairs target
+  diagnostic ranges.
 - Mutation tools should preview and stage edits. `lsp_confirm` is the only
   commit operator.
 - Capability gating should apply to workflow tools based on the backend methods

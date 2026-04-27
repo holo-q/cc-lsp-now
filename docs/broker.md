@@ -162,6 +162,35 @@ Agent coordination needs provenance. Broker responses should eventually include:
 This lets agents say "these callsites were computed against snapshot X" and
 avoid confirming stale rename previews after unrelated edits.
 
+Direct `cc-lsp-now` should grow the local version first: snapshot stamps on
+responses, named pending buffers, named semantic graph pins, and a mutation
+journal. Those primitives do not require a broker, and they make the later
+broker semantics concrete rather than speculative.
+
+## Staged Edits And Prediction
+
+Today mutation tools stage one in-process pending edit. The preview is useful,
+but the state is single-slot: another agent can stage a different edit before
+the first one confirms. A broker should model staged edits explicitly:
+
+```text
+stage name -> candidate list -> touched files -> snapshot -> owner/caller
+```
+
+Once staged edits are first-class, agents can ask predictive questions before
+touching disk:
+
+```text
+lsp_what_if(stage="rename-output-texture", tool="diagnostics")
+lsp_predict_conflict(stage="rename-output-texture")
+lsp_witness(stage="rename-output-texture")
+```
+
+`what_if` runs read-only tools against an overlay of the staged edit. `witness`
+applies a staged edit and reports before/after diagnostics, references, and
+other verifier signals. `predict_conflict` compares staged edits across callers
+and belongs naturally in the broker once it can see multiple clients.
+
 ## Relationship To cc-lsp-now
 
 `cc-lsp-now` should remain useful without a broker.
