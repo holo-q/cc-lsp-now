@@ -61,9 +61,18 @@ plumbing inside the workflow tools.
 | `lsp_workspaces` | `lsp_session` |
 | `lsp_add_workspace` | `lsp_session` |
 
-`lsp_completion`, `lsp_inlay_hint`, `lsp_folding_range`, and `lsp_code_lens`
-should be cut unless repeated agent workflows prove a need for a higher-level
-operator around them.
+Cut without replacement:
+- `lsp_completion` — agents do not autocomplete; semantic questions should go
+  through `lsp_symbol`, `lsp_goto`, `lsp_refs`, or `lsp_grep`.
+- `lsp_inlay_hint` — an editor affordance; type and scope context belongs in
+  compact semantic node output.
+- `lsp_folding_range` — an editor affordance with no current agent workflow.
+- `lsp_code_lens` — an editor affordance; actionable repair belongs in
+  `lsp_fix`.
+- `lsp_prepare_rename` — folded into `lsp_rename` preview and trace output.
+- `lsp_create_file` / `lsp_delete_file` — direct file creation and deletion
+  belong to normal file tools. Internal workspace-edit file operations stay
+  supported for refactors and confirmations.
 
 Formatting is intentionally excluded from the agent-facing surface. It is
 distracting context for agents, creates noisy staged diffs, and is better

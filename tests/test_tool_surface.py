@@ -1,5 +1,6 @@
 import unittest
 
+from cc_lsp_now import server as _server
 from cc_lsp_now.server import _ALL_TOOLS, DISABLED_BY_DEFAULT, TOOL_CAPABILITIES
 
 
@@ -40,6 +41,26 @@ WAVE_TWO_REPLACEMENTS: dict[str, list[str]] = {
 }
 
 FORMAT_TOOLS = ["formatting", "range_formatting"]
+
+CUT_WITHOUT_REPLACEMENT = [
+    "completion",
+    "inlay_hint",
+    "folding_range",
+    "code_lens",
+    "prepare_rename",
+    "create_file",
+    "delete_file",
+]
+
+CUT_WRAPPER_ATTRS = [
+    "lsp_completion",
+    "lsp_inlay_hint",
+    "lsp_folding_range",
+    "lsp_code_lens",
+    "lsp_prepare_rename",
+    "lsp_create_file",
+    "lsp_delete_file",
+]
 
 
 class ToolSurfaceTests(unittest.TestCase):
@@ -88,6 +109,20 @@ class ToolSurfaceTests(unittest.TestCase):
         for name in FORMAT_TOOLS:
             self.assertNotIn(name, _ALL_TOOLS)
             self.assertNotIn(name, TOOL_CAPABILITIES)
+
+    def test_cut_without_replacement_tools_are_not_public(self) -> None:
+        # These raw/editor-shaped tools have no current agent workflow. Keeping
+        # them out of both registries keeps the surface focused on semantic
+        # graph operators instead of protocol mirroring.
+        for name in CUT_WITHOUT_REPLACEMENT:
+            self.assertNotIn(name, _ALL_TOOLS)
+            self.assertNotIn(name, TOOL_CAPABILITIES)
+
+    def test_cut_without_replacement_wrappers_are_removed(self) -> None:
+        # Public wrappers are removed, not merely unregistered, so the source
+        # cannot be re-exposed accidentally by a future registry sweep.
+        for attr in CUT_WRAPPER_ATTRS:
+            self.assertFalse(hasattr(_server, attr), f"{attr} should be removed")
 
 
 class WaveTwoSurfaceTests(unittest.TestCase):
