@@ -3038,7 +3038,7 @@ async def lsp_declaration(file_path: str, symbol: str = "", line: int = 0) -> st
 
 
 def _format_type_hierarchy_item(item: dict) -> str:
-    """Format a TypeHierarchyItem to match the workspace_symbols line shape."""
+    """Format a TypeHierarchyItem as a compact source location."""
     name = item.get("name", "")
     kind = _symbol_kind_label(item.get("kind", 0))
     path = _uri_to_path(item.get("uri", ""))
@@ -3154,25 +3154,6 @@ async def lsp_inlay_hint(file_path: str, symbol: str = "", line: int = 0) -> str
     except AmbiguousSymbol as e:
         return _ambiguous_msg(e)
     except (LspError, ValueError) as e:
-        return f"LSP error: {e}"
-
-
-async def lsp_workspace_symbols(query: str) -> str:
-    """Search for symbols across the entire workspace."""
-    try:
-        result = await _request("workspace/symbol", {"query": query})
-        if not result:
-            return "No symbols found."
-        lines = []
-        for sym in result:
-            name = sym.get("name", "")
-            kind = _symbol_kind_label(sym.get("kind", 0))
-            loc = sym.get("location", {})
-            path = _uri_to_path(loc.get("uri", ""))
-            sl = loc.get("range", {}).get("start", {}).get("line", 0) + 1
-            lines.append(f"{sl}  {kind}  {name}  {path}")
-        return "\n".join(lines)
-    except LspError as e:
         return f"LSP error: {e}"
 
 
@@ -3370,7 +3351,6 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "references": (lsp_references, "textDocument/references"),
     "grep": (lsp_grep, "cc-lsp-now/grep"),
     "symbols_at": (lsp_symbols_at, "cc-lsp-now/symbols_at"),
-    "workspace_symbols": (lsp_workspace_symbols, "workspace/symbol"),
     "type_definition": (lsp_type_definition, "textDocument/typeDefinition"),
     "completion": (lsp_completion, "textDocument/completion"),
     "signature_help": (lsp_signature_help, "textDocument/signatureHelp"),
@@ -3434,7 +3414,6 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "references": "referencesProvider",
     "grep": "definitionProvider",
     "symbols_at": "definitionProvider",
-    "workspace_symbols": "workspaceSymbolProvider",
     "type_definition": "typeDefinitionProvider",
     "completion": "completionProvider",
     "signature_help": "signatureHelpProvider",
