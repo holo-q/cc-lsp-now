@@ -604,6 +604,56 @@ def _range_str(r: dict) -> str:
     return f"L{sl}:{sc}-L{el}:{ec}"
 
 
+def _line_snapshot(file_path: str, pos: dict) -> str:
+    """One-line context for position-sensitive failures."""
+    line_idx = pos.get("line", 0)
+    char_idx = pos.get("character", 0)
+    try:
+        text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        line_text = lines[line_idx] if 0 <= line_idx < len(lines) else ""
+    except OSError:
+        line_text = ""
+    caret = " " * max(char_idx, 0) + "^"
+    return f"{file_path}:{line_idx + 1}:{char_idx + 1}\n  {line_text}\n  {caret}"
+
+
+def _active_workspace_summary() -> str:
+    summaries: list[str] = []
+    for idx, client in enumerate(_chain_clients):
+        if client is None:
+            continue
+        label = _chain_configs[idx].label if idx < len(_chain_configs) else f"server[{idx}]"
+        folders = ", ".join(sorted(client.workspace_folders))
+        summaries.append(f"{label}: {folders}")
+    return "\n".join(summaries) if summaries else "(no active LSP clients)"
+
+
+def _diagnostic_snapshot(uri: str, pos: dict) -> str:
+    target_line = pos.get("line", 0)
+    lines: list[str] = []
+    for idx, client in enumerate(_chain_clients):
+        if client is None:
+            continue
+        label = _chain_configs[idx].label if idx < len(_chain_configs) else f"server[{idx}]"
+        for diag in client.diagnostics.get(uri, []):
+            rng = diag.get("range", {})
+            start = rng.get("start", {})
+            end = rng.get("end", {})
+            if start.get("line", -1) <= target_line <= end.get("line", -1):
+                severity = _severity_label(diag.get("severity", 0))
+                message = diag.get("message", "")
+                lines.append(f"{label}: {severity} {_range_str(rng)} {message}")
+    return "\n".join(lines) if lines else "(none on target line)"
+
+
+def _raw_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    except TypeError:
+        return repr(value)
+
+
 def _severity_label(n: int) -> str:
     return SEVERITY_LABELS.get(n, f"Unknown({n})")
 
@@ -641,6 +691,212 @@ def _format_symbol_tree(sym: dict, indent: int = 0) -> list[str]:
     return lines
 
 
+def _range_contains_line(r: dict, line: int) -> bool:
+    start = r.get("start", {})
+    end = r.get("end", {})
+    return start.get("line", -1) <= line <= end.get("line", -1)
+
+
+def _symbols_on_line(symbols: list[dict], line: int) -> list[tuple[int, dict, str, str]]:
+    """Return semantic symbol positions that are declared on or enclosing a line.
+
+    Each tuple is (rank, position, kind, name). Lower rank is better.
+    """
+    results: list[tuple[int, dict, str, str]] = []
+    for sym in symbols:
+        sel = sym.get("selectionRange", sym.get("range", sym.get("location", {}).get("range", {})))
+        rng = sym.get("range", sym.get("location", {}).get("range", {}))
+        sel_start = sel.get("start", {})
+        kind = _symbol_kind_label(sym.get("kind", 0))
+        name = sym.get("name", "")
+
+        if sel_start.get("line") == line:
+            results.append((0, sel_start, kind, name))
+        elif _range_contains_line(rng, line):
+            results.append((1, sel_start, kind, name))
+
+        for child in sym.get("children", []):
+            results.extend(_symbols_on_line([child], line))
+    return sorted(
+        results,
+        key=lambda h: (
+            h[0],
+            abs(h[1].get("line", line) - line),
+            h[1].get("character", 0),
+        ),
+    )
+
+
+_LINE_POSITION_SKIP_WORDS = {
+    "abstract",
+    "as",
+    "async",
+    "await",
+    "base",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "delegate",
+    "do",
+    "else",
+    "enum",
+    "event",
+    "explicit",
+    "extern",
+    "false",
+    "finally",
+    "fixed",
+    "for",
+    "foreach",
+    "get",
+    "if",
+    "implicit",
+    "in",
+    "interface",
+    "internal",
+    "is",
+    "lock",
+    "namespace",
+    "new",
+    "null",
+    "operator",
+    "out",
+    "override",
+    "params",
+    "partial",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "record",
+    "ref",
+    "return",
+    "sealed",
+    "set",
+    "sizeof",
+    "static",
+    "struct",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "unsafe",
+    "using",
+    "var",
+    "virtual",
+    "void",
+    "volatile",
+    "while",
+}
+
+
+def _fallback_position_on_line(file_path: str, line: int) -> dict:
+    """Pick a useful token when the caller provides only a line number.
+
+    LSP rename/prepareRename usually requires the cursor to sit on the symbol
+    token. Column 0 often points at whitespace or a modifier, which collapses
+    into an unhelpful "Cannot rename at this position." Use document symbols
+    when available; this fallback keeps line-only calls usable for servers that
+    do not return symbols.
+    """
+    try:
+        text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        line_text = text.splitlines()[line]
+    except (IndexError, OSError):
+        return {"line": line, "character": 0}
+
+    # Constructors, methods, and invocations: prefer the token immediately
+    # before an opening paren.
+    paren_match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>\n]+>)?\s*\(", line_text)
+    if paren_match and paren_match.group(1) not in _LINE_POSITION_SKIP_WORDS:
+        return {"line": line, "character": paren_match.start(1)}
+
+    tokens = list(re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", line_text))
+    for idx, token in enumerate(tokens):
+        word = token.group(0)
+        if word in {"class", "struct", "interface", "enum", "record", "delegate"} and idx + 1 < len(tokens):
+            return {"line": line, "character": tokens[idx + 1].start()}
+
+    for token in tokens:
+        if token.group(0) not in _LINE_POSITION_SKIP_WORDS:
+            return {"line": line, "character": token.start()}
+    return {"line": line, "character": 0}
+
+
+async def _position_for_line(file_path: str, uri: str, line: int) -> dict:
+    line_idx = line - 1
+    try:
+        doc_symbols = await _request("textDocument/documentSymbol", {
+            "textDocument": {"uri": uri},
+        }, uri=uri)
+    except LspError:
+        doc_symbols = None
+
+    if doc_symbols:
+        hits = _symbols_on_line(doc_symbols, line_idx)
+        if hits:
+            _rank, pos, _kind, _name = min(
+                hits,
+                key=lambda h: (h[0], abs(h[1].get("line", line_idx) - line_idx), h[1].get("character", 0)),
+            )
+            return pos
+
+    return _fallback_position_on_line(file_path, line_idx)
+
+
+async def _prepare_rename_probe(uri: str, pos: dict) -> tuple[bool, Any]:
+    try:
+        result = await _request("textDocument/prepareRename", {
+            "textDocument": {"uri": uri},
+            "position": pos,
+        }, uri=uri)
+        return True, result
+    except (LspError, asyncio.TimeoutError, ConnectionError) as e:
+        return False, str(e)
+
+
+async def _rename_trace(
+    *,
+    file_path: str,
+    uri: str,
+    pos: dict,
+    new_name: str,
+    operation: str = "rename",
+    rename_result: Any = None,
+    error: Exception | None = None,
+    include_prepare: bool = True,
+) -> str:
+    lines = [
+        "Rename trace:",
+        f"  server: {_last_server or '(unknown)'}",
+        f"  newName: {new_name!r}",
+        "  target:",
+        *[f"    {line}" for line in _line_snapshot(file_path, pos).splitlines()],
+        "  diagnostics on target line:",
+        *[f"    {line}" for line in _diagnostic_snapshot(uri, pos).splitlines()],
+        "  active workspaces:",
+        *[f"    {line}" for line in _active_workspace_summary().splitlines()],
+    ]
+    if include_prepare:
+        ok, prepare = await _prepare_rename_probe(uri, pos)
+        label = "raw prepareRename response" if ok else "prepareRename error"
+        lines.append(f"  {label}:")
+        lines.extend(f"    {line}" for line in _raw_json(prepare).splitlines())
+    if error is not None:
+        lines.append(f"  {operation} error:")
+        lines.extend(f"    {line}" for line in str(error).splitlines())
+    else:
+        lines.append(f"  raw {operation} response:")
+        lines.extend(f"    {line}" for line in _raw_json(rename_result).splitlines())
+    return "\n".join(lines)
+
+
 # --- Symbol resolution ---
 
 
@@ -657,7 +913,7 @@ async def _resolve(
     """Resolve a symbol name or line number to a URI + LSP position.
 
     Resolution pipeline:
-    1. If only line given → use it directly (col 0)
+    1. If only line given → use document symbols/token fallback
     2. If symbol given → documentSymbol search, then text fallback
     3. Multiple matches + line → disambiguate by closest line
     4. Multiple matches, no line → raise AmbiguousSymbol with all matches
@@ -665,7 +921,7 @@ async def _resolve(
     uri = file_uri(file_path)
 
     if not symbol and line > 0:
-        return uri, {"line": line - 1, "character": 0}
+        return uri, await _position_for_line(file_path, uri, line)
 
     if not symbol:
         raise ValueError("Provide 'symbol' name or 'line' number.")
@@ -968,13 +1224,29 @@ async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int 
     """Rename a symbol across the workspace. Pass symbol name or line number."""
     try:
         uri, pos = await _resolve(file_path, symbol, line)
-        result = await _request("textDocument/rename", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-            "newName": new_name,
-        }, uri=uri)
+        try:
+            result = await _request("textDocument/rename", {
+                "textDocument": {"uri": uri},
+                "position": pos,
+                "newName": new_name,
+            }, uri=uri)
+        except (LspError, asyncio.TimeoutError, ConnectionError) as e:
+            return await _rename_trace(
+                file_path=file_path,
+                uri=uri,
+                pos=pos,
+                new_name=new_name,
+                error=e,
+            )
         if not result:
-            return "No rename edits returned."
+            trace = await _rename_trace(
+                file_path=file_path,
+                uri=uri,
+                pos=pos,
+                new_name=new_name,
+                rename_result=result,
+            )
+            return f"No rename edits returned.\n\n{trace}"
 
         lines: list[str] = []
         for change_uri, edits in result.get("changes", {}).items():
@@ -1309,12 +1581,33 @@ async def lsp_prepare_rename(file_path: str, symbol: str = "", line: int = 0) ->
     """Check if a symbol can be renamed. Pass symbol name or line number."""
     try:
         uri, pos = await _resolve(file_path, symbol, line)
-        result = await _request("textDocument/prepareRename", {
-            "textDocument": {"uri": uri},
-            "position": pos,
-        }, uri=uri)
+        try:
+            result = await _request("textDocument/prepareRename", {
+                "textDocument": {"uri": uri},
+                "position": pos,
+            }, uri=uri)
+        except (LspError, asyncio.TimeoutError, ConnectionError) as e:
+            trace = await _rename_trace(
+                file_path=file_path,
+                uri=uri,
+                pos=pos,
+                new_name="",
+                operation="prepareRename",
+                error=e,
+                include_prepare=False,
+            )
+            return f"Cannot rename at this position.\n\n{trace}"
         if not result:
-            return "Cannot rename at this position."
+            trace = await _rename_trace(
+                file_path=file_path,
+                uri=uri,
+                pos=pos,
+                new_name="",
+                operation="prepareRename",
+                rename_result=result,
+                include_prepare=False,
+            )
+            return f"Cannot rename at this position.\n\n{trace}"
 
         if "range" in result and "placeholder" in result:
             return f"{_range_str(result['range'])} — current name: {result['placeholder']!r}"

@@ -85,6 +85,16 @@ class LspError(Exception):
         self.data = data
         super().__init__(f"LSP error {code}: {message}")
 
+    def __str__(self) -> str:
+        base = f"LSP error {self.code}: {self.message}"
+        if self.data is None:
+            return base
+        try:
+            data = json.dumps(self.data, ensure_ascii=False, indent=2)
+        except TypeError:
+            data = repr(self.data)
+        return f"{base}\nData: {data}"
+
 
 class LspClient:
     def __init__(self, command: list[str], root_path: str):
