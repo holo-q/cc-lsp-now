@@ -18,7 +18,7 @@ The target public surface is documented in [docs/tool-surface.md](docs/tool-surf
 | `lsp_move_file` / `lsp_move_files` | Preview file moves and import/update edits before `lsp_confirm`. |
 | `lsp_confirm` | Commits the currently staged edit transaction. |
 
-The remaining protocol-shaped tools are transitional. As workflow tools land (`lsp_outline`, `lsp_calls`, `lsp_fix`, `lsp_session`, `lsp_move`, `lsp_format`), the raw LSP command wrappers are removed from the public registry instead of kept as aliases.
+The remaining protocol-shaped tools are transitional. The cut direction is one-way: as each workflow tool lands (`lsp_outline`, `lsp_calls`, `lsp_fix`, `lsp_session`, `lsp_move`, `lsp_format`), the corresponding raw LSP command wrapper is removed from the public registry — no aliases. See [docs/tool-surface.md](docs/tool-surface.md) for the full raw → workflow cut map.
 
 File arguments may be full paths, relative paths, or unique basenames. For example, `lsp_document_symbols(file_path="NodesWindow.cs")` resolves the file under active workspaces; if the basename is not unique, the tool returns the matching paths and asks for a more specific path.
 
@@ -30,13 +30,17 @@ File arguments may be full paths, relative paths, or unique basenames. For examp
 
 ## How the model calls the tools
 
-**Semantic targets, not raw protocol calls.** Tools accept graph indices, `file:Lx`, or `file_path` plus `symbol`/`line`:
+**Semantic targets, not raw protocol calls.** Tools accept graph indices, bare `Lxx`, `file:Lx`, unique basenames, or `file_path` plus `symbol`/`line`:
 
 ```
 lsp_symbol(file_path="src/app.py", symbol="OmfiApp")
 lsp_goto(file_path="src/app.py", symbol="workflow", line=476, mode="all")
-lsp_refs(target="[0]")   # from the previous lsp_grep/lsp_symbols_at graph
+lsp_refs(target="[0]")           # graph index from the previous lsp_grep/lsp_symbols_at
+lsp_symbols_at("L78")            # bare Lxx — resolves against the last printed graph
+lsp_symbols_at("HistoryUI.cs:L78")  # basename + line, no full path required
 ```
+
+Sample lists shown by `lsp_grep` (`samples L57,L694,...`) are non-exhaustive — a trailing `...` means more refs exist; unfold with `lsp_refs([N])` or raise `max_hits`. The full count is always reported as `refs N`.
 
 **Batching.** Multiple symbols in one file, multiple files in one call:
 

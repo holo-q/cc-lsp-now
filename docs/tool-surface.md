@@ -36,9 +36,10 @@ between calls, which is the pattern the rest of the tools should follow.
 
 ## Raw Tool Cut Map
 
-Raw protocol-shaped tools should be removed from the public MCP registry once a
-workflow replacement exists. Do not keep aliases unless a later compatibility
-decision explicitly reverses this.
+Direction is one-way: raw protocol-shaped tool → workflow replacement. Once the
+workflow tool ships, the raw entry is removed from the public MCP registry — no
+aliases, no shims, no fallback names. The raw verbs survive only as internal
+plumbing inside the workflow tools.
 
 | Raw tool | Replacement |
 |----------|-------------|
@@ -67,11 +68,13 @@ operator around them.
 
 ## Interface Defaults
 
-- Every target-taking tool should accept graph indices, `file:Lx`,
-  `file_path+line`, `file_path+symbol`, full paths, relative paths, and unique
-  basenames where applicable.
-- Outputs should stay compact, line-oriented, and breadcrumbed. Prefer one-line
-  summaries first, with explicit ways to unfold.
+- Every target-taking tool should accept graph indices (`[N]` from the last
+  `lsp_grep`/`lsp_symbols_at`), bare `Lxx` (resolved against the last graph),
+  `file:Lx`, `file_path+line`, `file_path+symbol`, full paths, relative paths,
+  and unique basenames where applicable.
+- Outputs should stay compact, line-oriented, and breadcrumbed: one symbol per
+  line. Sample lists are non-exhaustive — a trailing `...` means more exist;
+  callers unfold with `lsp_refs` or by raising `max_hits` / `max_groups`.
 - Mutation tools should preview and stage edits. `lsp_confirm` is the only
   commit operator.
 - Capability gating should apply to workflow tools based on the backend methods
@@ -81,11 +84,13 @@ operator around them.
 
 Wave 1 built the core node operators:
 
+- `lsp_grep`
+- `lsp_symbols_at`
 - `lsp_symbol`
 - `lsp_goto`
 - `lsp_refs`
 
-Wave 2 builds graph and verifier operators:
+Wave 2 builds outline and verifier operators:
 
 - `lsp_outline`
 - `lsp_calls`

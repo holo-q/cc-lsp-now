@@ -17,6 +17,10 @@ Default output is one line per semantic identity:
 [1] field _ctx: HistorySurfaceContext — HistoryUI:64::_ctx — refs 14 — def L64 — samples L78,L159,L218,...
 ```
 
+`samples` is a non-exhaustive excerpt of the reference set — a trailing `...`
+means more refs exist than were printed; use `lsp_refs([N])` or raise
+`max_hits` to unfold them. `refs N` is the full count.
+
 Breadcrumbs use `::` instead of `>` so C# and TypeScript generics stay legible.
 When a class name matches its file name, the path is abridged:
 
@@ -49,23 +53,23 @@ warm sessions and indexes across agents.
 ## Bouncing From Samples
 
 `lsp_grep` records the reference graph it just showed. `lsp_symbols_at` can use
-that graph as context, so a bare line target works when it was present in the
-last refs/samples:
+that graph as context, so a bare `Lxx` target — no path — resolves against the
+last printed refs/samples:
 
 ```text
-lsp_symbols_at("L78")
+lsp_symbols_at("L78")          # bare Lxx — uses last lsp_grep graph
+lsp_symbols_at("HistoryUI.cs:L78")        # basename + line, no full path needed
+lsp_symbols_at("/repo/src/HistoryUI.cs:L78")  # explicit absolute path
 ```
 
-Explicit targets do not need context:
-
-```text
-lsp_symbols_at("HistoryUI.cs:L78")
-lsp_symbols_at("/repo/src/HistoryUI.cs:L78")
-```
+Basenames resolve under the active workspaces; if ambiguous, the tool lists the
+candidates and asks for a more specific path. Explicit `file:Lx` targets do not
+need prior graph context.
 
 The output is the same one-line semantic-bucket shape, but for every identifier
 on that source line. On a function declaration this intentionally includes the
 function name and all arguments, so the model can hop from a sample line into the
 local symbol graph without first doing a separate text search. This graph memory
 is also reused by `lsp_symbol`, `lsp_goto`, and `lsp_refs`, which accept graph
-indices such as `[0]` from the previous semantic result.
+indices such as `[0]` or `[1]` from the previous semantic result — index targets
+always refer to the most recent `lsp_grep`/`lsp_symbols_at` output.
