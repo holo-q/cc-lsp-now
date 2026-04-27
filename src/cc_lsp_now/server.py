@@ -2406,7 +2406,7 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
         if warning:
             lines.append("")
             lines.append(warning)
-            lines.append("Options: (1) pre-warm importer files via lsp_symbol, (2) lsp_add_workspace on the project, (3) fall back to regex rewrite if LSP is unreliable here.")
+            lines.append("Options: (1) pre-warm importer files via lsp_symbol, (2) lsp_session(action='add', path=...) on the project, (3) fall back to regex rewrite if LSP is unreliable here.")
 
     return "\n".join(lines)
 
@@ -2597,111 +2597,131 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
         return f"LSP error: {e}"
 
 
-async def lsp_info() -> str:
-    """Report the running cc-lsp-now build and the probed capabilities of each chain server.
+async def lsp_session(action: str = "status", path: str = "", server: str = "") -> str:
+    """Inspect and manage LSP chain sessions: status, add, warm, restart.
 
-    Useful when tool behavior is confusing — compare the displayed git SHA
-    against cc-lsp-now's current HEAD to confirm the MCP process isn't stale
-    from a prior Claude Code session. Stale MCPs are the #1 reason new features
-    appear to not work after a plugin update: Claude Code reuses the subprocess
-    across /reload-plugins; only a full Claude Code restart spawns a fresh one.
+    One workflow surface that replaces the old ``lsp_info`` /
+    ``lsp_workspaces`` / ``lsp_add_workspace`` triad. Actions:
+
+    - ``status`` (default): compact build/version + per-server chain config,
+      capability summary, registered workspace folders, and warmup ages.
+      Use when tool behavior looks stale (compare the printed git SHA
+      against cc-lsp-now's HEAD — Claude Code reuses the MCP subprocess
+      across /reload-plugins, only a full restart spawns a fresh one).
+    - ``add``: register ``path`` as a workspace folder on every server in
+      the chain and run warmup. Use when LSP_PROJECT_MARKERS auto-detection
+      misses an unusual layout, or to pre-index before a batch refactor.
+    - ``warm``: re-run warmup for ``path`` (or every registered folder if
+      omitted), bypassing the once-per-folder cache. ``server`` filters by
+      chain label/command/name. Use after files appear/disappear on disk and
+      the LSP's view drifts.
+    - ``restart``: stop and respawn LSP clients (filter via ``server``).
+      Use when a server is wedged or its in-memory state is corrupt.
     """
+    act = (action or "status").lower()
+    if act == "status":
+        return await _session_status()
+    if act == "add":
+        if not path:
+            return "action=add requires path"
+        return await _session_add(path)
+    if act == "warm":
+        return await _session_warm(path, server)
+    if act == "restart":
+        return await _session_restart(server)
+    return f"Unknown action: {action!r}. Valid: status, add, warm, restart."
+
+
+def _session_resolve_indices(server: str) -> list[int] | str:
+    """Map a server label/command/name filter to chain indices. Empty filter = all."""
+    if not server:
+        return list(range(len(_chain_configs)))
+    query = server.strip()
+    matches = [
+        i for i, cfg in enumerate(_chain_configs)
+        if query in {cfg.label, cfg.command, cfg.name}
+    ]
+    if not matches:
+        labels = ", ".join(f"{cfg.label} ({cfg.command})" for cfg in _chain_configs) or "(none)"
+        return f"No chain server matches {server!r}. Known: {labels}"
+    return matches
+
+
+async def _session_status() -> str:
     import importlib.metadata as _imd
     import subprocess as _subp
 
     module_file = Path(__file__).resolve()
-    info_lines: list[str] = []
+    lines: list[str] = []
 
-    # Try to detect install path + git commit
     try:
-        pkg_root = module_file.parent.parent.parent  # .../src/cc_lsp_now/server.py → .../
+        pkg_root = module_file.parent.parent.parent
         git_dir = pkg_root / ".git"
         if git_dir.exists():
             sha = _subp.run(
                 ["git", "-C", str(pkg_root), "rev-parse", "--short", "HEAD"],
                 capture_output=True, text=True, timeout=3,
             ).stdout.strip()
-            info_lines.append(f"cc-lsp-now: {pkg_root} @ {sha or 'unknown'}")
+            lines.append(f"cc-lsp-now: {pkg_root} @ {sha or 'unknown'}")
         else:
-            info_lines.append(f"cc-lsp-now install: {pkg_root} (no .git — probably installed package)")
+            lines.append(f"cc-lsp-now install: {pkg_root} (no .git — installed package)")
     except Exception as e:
-        info_lines.append(f"cc-lsp-now introspection failed: {e}")
+        lines.append(f"cc-lsp-now introspection failed: {e}")
 
     try:
-        version = _imd.version("cc-lsp-now")
-        info_lines.append(f"version: {version}")
+        lines.append(f"version: {_imd.version('cc-lsp-now')}")
     except Exception:
         pass
 
     _ensure_chain_configs()
-    info_lines.append("")
-    info_lines.append("Chain:")
-    for cfg in _chain_configs:
-        info_lines.append(f"  {cfg.label}: {cfg.command} {' '.join(cfg.args)}")
+    now = time.time()
+    lines.append("")
+    lines.append("Chain:")
+    if not _chain_configs:
+        lines.append("  (no chain configured)")
+        return "\n".join(lines)
 
-    if _probed_caps:
-        info_lines.append("")
-        info_lines.append("Probed capabilities (at module load):")
-        for cfg, caps in zip(_chain_configs, _probed_caps):
-            if not caps:
-                info_lines.append(f"  [{cfg.label}] (probe failed or no caps reported)")
-                continue
-            key_caps = [k for k in caps.keys() if k.endswith("Provider") or k == "workspace"]
-            info_lines.append(f"  [{cfg.label}] {len(caps)} caps; providers: {', '.join(sorted(key_caps))}")
+    for idx, cfg in enumerate(_chain_configs):
+        client = _chain_clients[idx] if idx < len(_chain_clients) else None
+        state = "live" if client is not None else "not spawned"
+        lines.append(f"  [{cfg.label}] {state}: {cfg.command} {' '.join(cfg.args)}")
+
+        caps = client.capabilities if client is not None else (_probed_caps[idx] if idx < len(_probed_caps) else {})
+        caps_source = "live" if client is not None else "probe"
+        if caps:
+            providers = sorted(k for k in caps.keys() if k.endswith("Provider") or k == "workspace")
+            lines.append(f"    caps ({caps_source}): {len(caps)}; providers: {', '.join(providers)}")
             ws_caps = caps.get("workspace", {})
             file_ops = ws_caps.get("fileOperations", {}) if isinstance(ws_caps, dict) else {}
             if file_ops:
-                info_lines.append(f"    fileOperations: {', '.join(sorted(file_ops.keys()))}")
-    else:
-        info_lines.append("")
-        info_lines.append("Capabilities probe was skipped (empty chain caps).")
+                lines.append(f"    fileOperations: {', '.join(sorted(file_ops.keys()))}")
+        else:
+            lines.append(f"    caps ({caps_source}): (none reported)")
 
-    return "\n".join(info_lines)
-
-
-async def lsp_workspaces() -> str:
-    """List workspace folders registered with each LSP, plus warmup stats.
-
-    Proactively spawns every server in the chain (reporting dead state isn't
-    useful). Each folder line shows files warmed and seconds since warmup —
-    a folder with no warmup count means didOpen hasn't been bulk-fired there,
-    so operations touching files in that folder may hit an unindexed LSP.
-    """
-    _ensure_chain_configs()
-    for idx in range(len(_chain_configs)):
-        await _get_client(idx)
-
-    now = time.time()
-    lines: list[str] = []
-    for idx, cfg in enumerate(_chain_configs):
-        client = _chain_clients[idx]
-        assert client is not None
-        lines.append(f"[{cfg.label}]")
-        for folder in sorted(client.workspace_folders):
-            stats = _folder_warmup_stats.get((idx, folder))
-            if stats:
-                age = int(now - stats.timestamp)
-                lines.append(f"  {folder}  (warmed {stats.count} files, {age}s ago)")
-            else:
-                lines.append(f"  {folder}  (not warmed)")
-    return "\n".join(lines) if lines else "No chain configured."
+        if client is None:
+            lines.append("    folders: (server not yet spawned)")
+            continue
+        folders = sorted(client.workspace_folders)
+        if not folders:
+            lines.append("    folders: (none)")
+        else:
+            lines.append("    folders:")
+            for folder in folders:
+                stats = _folder_warmup_stats.get((idx, folder))
+                if stats:
+                    age = int(now - stats.timestamp)
+                    lines.append(f"      {folder}  (warmed {stats.count} files, {age}s ago)")
+                else:
+                    lines.append(f"      {folder}  (not warmed)")
+    return "\n".join(lines)
 
 
-async def lsp_add_workspace(path: str) -> str:
-    """Explicitly add a workspace folder. Applies to every LSP in the chain.
-
-    Proactively spawns every chain server (if any aren't already) and then
-    registers the folder + runs warmup on each. Use this when auto-detection
-    via LSP_PROJECT_MARKERS doesn't find the root (unusual layout, no marker
-    files) or you want to pre-index before a batch refactor.
-    """
-    _ensure_chain_configs()
+async def _session_add(path: str) -> str:
     abs_path = os.path.abspath(path)
     if not os.path.isdir(abs_path):
         return f"Not a directory: {abs_path}"
 
-    # Spawn every chain client — "queued (applied on spawn)" is a terrible UX
-    # when the operation the caller invoked is specifically about workspaces.
+    _ensure_chain_configs()
     for idx in range(len(_chain_configs)):
         await _get_client(idx)
 
@@ -2717,6 +2737,90 @@ async def lsp_add_workspace(path: str) -> str:
         else:
             results.append(f"[{cfg.label}] already present")
     return "\n".join(results)
+
+
+async def _session_warm(path: str, server: str) -> str:
+    abs_path = os.path.abspath(path) if path else ""
+    if abs_path and not os.path.isdir(abs_path):
+        return f"Not a directory: {abs_path}"
+
+    _ensure_chain_configs()
+    indices = _session_resolve_indices(server)
+    if isinstance(indices, str):
+        return indices
+
+    # Spawn target servers so warm has a client to talk to.
+    for idx in indices:
+        await _get_client(idx)
+
+    results: list[str] = []
+    for idx in indices:
+        cfg = _chain_configs[idx]
+        client = _chain_clients[idx]
+        assert client is not None
+        if abs_path:
+            if abs_path not in client.workspace_folders:
+                results.append(f"[{cfg.label}] {abs_path} is not registered; use action=add first")
+                continue
+            targets = [abs_path]
+        else:
+            targets = sorted(client.workspace_folders)
+
+        for folder in targets:
+            # Drop the once-per-folder cache so warmup actually re-runs.
+            _warmed_folders.discard((idx, folder))
+            n = await _warmup_folder(client, folder)
+            _folder_warmup_stats[(idx, folder)] = WarmupStats(count=n, timestamp=time.time())
+            _warmed_folders.add((idx, folder))
+            results.append(f"[{cfg.label}] {folder} — warmed {n} files")
+    return "\n".join(results) if results else "No targets to warm."
+
+
+async def _session_restart(server: str) -> str:
+    _ensure_chain_configs()
+    indices = _session_resolve_indices(server)
+    if isinstance(indices, str):
+        return indices
+
+    for method, handler_idx in list(_method_handler.items()):
+        if handler_idx is None or handler_idx in indices:
+            _method_handler.pop(method, None)
+
+    results: list[str] = []
+    for idx in indices:
+        cfg = _chain_configs[idx]
+        client = _chain_clients[idx]
+        if client is None:
+            results.append(f"[{cfg.label}] not running — will spawn fresh on next call")
+            continue
+        extra_folders = sorted(folder for folder in client.workspace_folders if folder != client._root_path)
+        try:
+            await client.stop()
+            stopped = True
+        except Exception as e:
+            stopped = False
+            results.append(f"[{cfg.label}] stop failed: {e}")
+        _chain_clients[idx] = None
+        # Drop warmup memo so the fresh server gets re-indexed lazily.
+        for key in list(_warmed_folders):
+            if key[0] == idx:
+                _warmed_folders.discard(key)
+        for key in list(_folder_warmup_stats):
+            if key[0] == idx:
+                _folder_warmup_stats.pop(key, None)
+        if stopped:
+            try:
+                restarted = await _get_client(idx)
+                restored = 0
+                for folder in extra_folders:
+                    if restarted.add_workspace_folder(folder):
+                        restored += 1
+                    await _maybe_warmup(restarted, idx, folder)
+                suffix = f" — restored {restored} workspace folder(s)" if extra_folders else ""
+                results.append(f"[{cfg.label}] restarted{suffix}")
+            except Exception as e:
+                results.append(f"[{cfg.label}] respawn failed: {e}")
+    return "\n".join(results) if results else "No servers to restart."
 
 
 async def lsp_confirm(index: int = 0) -> str:
@@ -3689,9 +3793,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "create_file": (lsp_create_file, "workspace/willCreateFiles"),
     "delete_file": (lsp_delete_file, "workspace/willDeleteFiles"),
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
-    "info": (lsp_info, "cc-lsp-now/info"),
-    "workspaces": (lsp_workspaces, "cc-lsp-now/workspaces"),
-    "add_workspace": (lsp_add_workspace, "cc-lsp-now/add_workspace"),
+    "session": (lsp_session, "cc-lsp-now/session"),
     "move_files": (lsp_move_files, "workspace/willRenameFiles"),
 }
 
@@ -3748,9 +3850,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "create_file": "workspace.fileOperations.willCreate",
     "delete_file": "workspace.fileOperations.willDelete",
     "confirm": None,
-    "info": None,
-    "workspaces": None,
-    "add_workspace": None,
+    "session": None,
     "move_files": "workspace.fileOperations.willRename",
 }
 

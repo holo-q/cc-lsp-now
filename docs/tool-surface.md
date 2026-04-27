@@ -143,12 +143,12 @@ async def lsp_session(
 ) -> str: ...
 ```
 
-`status` is the default and folds `lsp_info` + `lsp_workspaces` into one block:
-build SHA, per-server one-line capability summary, then per-folder warmup state.
-`add` mirrors today's `lsp_add_workspace` (proactively spawns the chain, warms
-the new folder). `warm` re-fires bulk warmup against an existing folder.
-`restart` shuts down a chain server and lets the lazy `_get_client` respawn it
-on the next request.
+Verbs:
+
+- `status` (default) — build SHA, per-server capability summary, per-folder warmup state. Folds `lsp_info` + `lsp_workspaces` into one block.
+- `add path` — proactively spawn the chain, attach the folder, bulk-warm it. Replaces `lsp_add_workspace`.
+- `warm path` — re-fire bulk warmup against a registered folder.
+- `restart [server]` — shut and immediately respawn a chain server (or the whole chain when empty).
 
 ```python
 async def lsp_fix(
