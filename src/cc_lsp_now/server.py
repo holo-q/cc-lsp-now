@@ -52,14 +52,6 @@ SYMBOL_KIND_LABELS = {
     25: "Operator", 26: "TypeParameter",
 }
 
-COMPLETION_KIND_LABELS = {
-    1: "Text", 2: "Method", 3: "Function", 4: "Constructor", 5: "Field",
-    6: "Variable", 7: "Class", 8: "Interface", 9: "Module", 10: "Property",
-    11: "Unit", 12: "Value", 13: "Enum", 14: "Keyword", 15: "Snippet",
-    16: "Color", 17: "File", 18: "Reference", 19: "Folder", 20: "EnumMember",
-    21: "Constant", 22: "Struct", 23: "Event", 24: "Operator", 25: "TypeParameter",
-}
-
 DISABLED_BY_DEFAULT: set[str] = set()
 
 
@@ -79,7 +71,7 @@ _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
-# Several tools (rename, fix, move_file, ...) now emit previews instead of
+# Several tools (rename, fix, move, ...) now emit previews instead of
 # applying edits immediately. The preview populates a module-level buffer that
 # the agent can then commit via `lsp_confirm(index)`.
 #
@@ -174,7 +166,7 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
     The candidate's ``edit`` dict holds the WorkspaceEdit. Special-cased:
     if candidate kind is ``FILE_MOVE`` with ``from_path`` / ``to_path``, the
     actual ``os.rename`` happens after edits are written — this keeps the
-    import-rewrite + file-move atomic per the move_file flow.
+    import-rewrite + file-move atomic per the lsp_move flow.
 
     Returns (file_count, edit_count) for the summary line.
     """
@@ -746,12 +738,6 @@ def _severity_label(n: int) -> str:
 
 def _symbol_kind_label(n: int) -> str:
     return SYMBOL_KIND_LABELS.get(n, f"Unknown({n})")
-
-
-def _completion_kind_label(n: int | None) -> str:
-    if n is None:
-        return ""
-    return COMPLETION_KIND_LABELS.get(n, "")
 
 
 def _normalize_locations(result: dict | list | None) -> list[str]:
@@ -2223,7 +2209,7 @@ def _collect_edit_files(result: dict) -> list[tuple[str, list[dict]]]:
 
 
 def _check_move_discrepancy(from_paths: list[str]) -> str | None:
-    """Heuristic: if move_file returned 0 edits, scan for files that mention any
+    """Heuristic: if lsp_move returned 0 edits, scan for files that mention any
     moved file's module name (basename sans extension). Catches the 'cold index' failure
     mode where the LSP returns 0 edits but regex shows actual importers exist.
     """
@@ -2403,51 +2389,77 @@ async def _resolve_symbol_to_file(symbol: str) -> str | None:
     return os.path.abspath(path) if path else None
 
 
-async def lsp_move_file(from_path: str = "", to_path: str = "", symbol: str = "") -> str:
-    """Move/rename a file and preview the import-updating edits.
+def _parse_moves(moves: str) -> list[tuple[str, str]]:
+    """Parse the ``moves`` batch payload into ``(from, to)`` pairs.
 
-    Pass either ``from_path`` directly, or ``symbol=<name>`` to have the
-    bridge resolve the source file via workspace/symbol (useful when you
-    know the class/function but not the file).
+    Format: ``from=>to`` pairs, one per line or comma-separated. Whitespace
+    around paths and around ``=>`` is ignored. Blank entries are dropped so
+    a trailing newline or comma is harmless. Anything that is not a single
+    ``from=>to`` pair raises ``ValueError`` so the caller surfaces a clear
+    error rather than silently swallowing a malformed batch.
+    """
+    raw_entries = [e.strip() for chunk in moves.splitlines() for e in chunk.split(",")]
+    pairs: list[tuple[str, str]] = []
+    for entry in raw_entries:
+        if not entry:
+            continue
+        if entry.count("=>") != 1:
+            raise ValueError(f"Bad move entry {entry!r}; expected 'from=>to'.")
+        from_part, to_part = entry.split("=>", 1)
+        from_part, to_part = from_part.strip(), to_part.strip()
+        if not from_part or not to_part:
+            raise ValueError(f"Bad move entry {entry!r}; from/to must be non-empty.")
+        pairs.append((from_part, to_part))
+    return pairs
+
+
+async def lsp_move(
+    from_path: str = "",
+    to_path: str = "",
+    symbol: str = "",
+    moves: str = "",
+) -> str:
+    """Preview file/symbol moves with their import-updating edits.
+
+    Three call shapes:
+
+    - Single move: ``from_path`` + ``to_path``.
+    - Symbol move: ``symbol`` + ``to_path`` resolves the source file via
+      ``workspace/symbol`` (useful when you know the class/function but not
+      its file).
+    - Batch move: ``moves`` accepts a list of ``from=>to`` pairs separated
+      by newlines or commas — e.g. ``"a.py=>b.py, c.py=>pkg/c.py"`` or one
+      pair per line. A single ``willRenameFiles`` round-trip covers all of
+      them; a single ``lsp_confirm(0)`` commits the lot atomically.
 
     Always previews — the resulting WorkspaceEdit + file-move metadata is
-    staged under ``_pending``. Call ``lsp_confirm(0)`` to commit both the
-    edits and the ``os.rename`` atomically.
-
-    For bulk reorgs, prefer ``lsp_move_files``.
+    staged under ``_pending``. ``lsp_confirm(0)`` runs the edits then the
+    ``os.rename``(s) so the import rewrite and the file move stay atomic.
     """
     try:
+        if moves:
+            if from_path or to_path or symbol:
+                return "moves= is exclusive with from_path/to_path/symbol."
+            try:
+                pairs = _parse_moves(moves)
+            except ValueError as e:
+                return str(e)
+            if not pairs:
+                return "No files specified."
+            pairs = [(_resolve_file_path(f), t) for f, t in pairs]
+            return await _do_move(pairs)
+
         if symbol and not from_path:
             resolved = await _resolve_symbol_to_file(symbol)
             if not resolved:
                 return f"Could not resolve symbol {symbol!r} to a file via workspace/symbol."
             from_path = resolved
         if not from_path:
-            return "Provide from_path or symbol."
+            return "Provide from_path, symbol, or moves."
         if not to_path:
             return "to_path is required."
         from_path = _resolve_file_path(from_path)
         return await _do_move([(from_path, to_path)])
-    except (LspError, ValueError, OSError) as e:
-        return f"LSP error: {e}"
-
-
-async def lsp_move_files(from_paths: str, to_paths: str) -> str:
-    """Batch-move multiple files in one willRenameFiles call.
-
-    Pass comma-separated lists; the i-th from-path moves to the i-th to-path.
-    Single preview covers all renames; single lsp_confirm(0) commits them
-    atomically. Much faster than N individual move_file calls for reorgs.
-    """
-    try:
-        froms = [p.strip() for p in from_paths.split(",") if p.strip()]
-        tos = [p.strip() for p in to_paths.split(",") if p.strip()]
-        if len(froms) != len(tos):
-            return f"Mismatch: {len(froms)} from-paths vs {len(tos)} to-paths"
-        if not froms:
-            return "No files specified."
-        froms = [_resolve_file_path(path) for path in froms]
-        return await _do_move(list(zip(froms, tos)))
     except (LspError, ValueError, OSError) as e:
         return f"LSP error: {e}"
 
@@ -2864,7 +2876,7 @@ async def lsp_confirm(index: int = 0) -> str:
     """Apply one staged candidate from the preview buffer.
 
     Companion to tools that stage previews (currently ``lsp_fix``,
-    ``lsp_rename``, and ``lsp_move_file``). Index into the ``candidates`` list
+    ``lsp_rename``, and ``lsp_move``). Index into the ``candidates`` list
     shown by the most recent preview. Clears ``_pending`` on success so the buffer is
     single-shot — a stale preview can't be re-committed after context drifts.
     """
@@ -3725,14 +3737,13 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "refs": (lsp_refs, "cc-lsp-now/refs"),
     "outline": (lsp_outline, "textDocument/documentSymbol"),
     "rename": (lsp_rename, "textDocument/rename"),
-    "move_file": (lsp_move_file, "workspace/willRenameFiles"),
+    "move": (lsp_move, "workspace/willRenameFiles"),
     "fix": (lsp_fix, "cc-lsp-now/fix"),
     "calls": (lsp_calls, "cc-lsp-now/calls"),
     "type_hierarchy_supertypes": (lsp_type_hierarchy_supertypes, "typeHierarchy/supertypes"),
     "type_hierarchy_subtypes": (lsp_type_hierarchy_subtypes, "typeHierarchy/subtypes"),
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
     "session": (lsp_session, "cc-lsp-now/session"),
-    "move_files": (lsp_move_files, "workspace/willRenameFiles"),
 }
 
 
@@ -3774,12 +3785,11 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "rename": "renameProvider",
     "fix": "codeActionProvider",
     "calls": "callHierarchyProvider",
-    "move_file": "workspace.fileOperations.willRename",
+    "move": "workspace.fileOperations.willRename",
     "type_hierarchy_supertypes": "typeHierarchyProvider",
     "type_hierarchy_subtypes": "typeHierarchyProvider",
     "confirm": None,
     "session": None,
-    "move_files": "workspace.fileOperations.willRename",
 }
 
 

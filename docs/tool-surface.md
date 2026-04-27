@@ -30,10 +30,10 @@ Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations ->
 | `lsp_confirm` | Commit the currently staged edit transaction. |
 
 `lsp_grep`, `lsp_symbols_at`, `lsp_symbol`, `lsp_goto`, `lsp_refs`,
-`lsp_outline`, `lsp_calls`, `lsp_session`, and `lsp_fix` are the implemented
-pieces of this surface today. The graph-aware tools preserve semantic graph
-context between calls, which is the pattern the rest of the tools should
-follow.
+`lsp_outline`, `lsp_calls`, `lsp_session`, `lsp_fix`, `lsp_rename`, and
+`lsp_move` are the implemented pieces of this surface today. The graph-aware
+tools preserve semantic graph context between calls, which is the pattern the
+rest of the tools should follow.
 
 ## Raw Tool Cut Map
 
@@ -188,8 +188,34 @@ for "just organize-imports" without scanning the full menu.
 
 Wave 3 merges mutation utilities and cuts replaced raw tools:
 
-- `lsp_move`
+- `lsp_move` *(landed)* — preview-and-stage mutation; absorbs both single-file
+  and batched file moves through one verb, reusing the `_pending` buffer used
+  by `lsp_rename` / `lsp_fix`. Cuts both `lsp_move_file` and `lsp_move_files`
+  from the public registry.
 - remove each raw tool from `_ALL_TOOLS` as soon as its replacement is tested.
+
+```python
+async def lsp_move(
+    from_path: str = "",
+    to_path: str = "",
+    symbol: str = "",                # optional: resolve source file by symbol name
+    moves: str = "",                 # batched: newline- or comma-separated `from=>to` pairs
+) -> str: ...
+```
+
+`lsp_move` is the single public mutation tool for relocation. Pass `from_path`
++ `to_path` for a single move, `symbol` + `to_path` to resolve the source file
+through `workspace/symbol`, or `moves` for a batched set expressed as
+`from=>to` pairs separated by newlines or commas; the tool runs
+`workspace/willRenameFiles` against the chain, previews the resulting import /
+reference edits, and stages them into `_pending` for `lsp_confirm`. Sample:
+
+```text
+Move src/old.py -> src/new.py
+edits:
+  src/app.py:L12 import old -> import new
+  ... 3 more edit(s); confirm to apply.
+```
 
 ## Acceptance Checks
 

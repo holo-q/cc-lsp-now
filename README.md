@@ -19,7 +19,7 @@ The target public surface is documented in [docs/tool-surface.md](docs/tool-surf
 | `lsp_diagnostics` | Reports diagnostics as the main verifier surface. |
 | `lsp_fix` | Lists code actions on a semantic target with line diagnostics; stages edit-backed actions for `lsp_confirm`. |
 | `lsp_rename` | Previews and stages semantic renames before `lsp_confirm`. |
-| `lsp_move_file` / `lsp_move_files` | Preview file moves and import/update edits before `lsp_confirm`. |
+| `lsp_move` | Previews file moves (single or batched) and import/update edits before `lsp_confirm`. |
 | `lsp_confirm` | Commits the currently staged edit transaction. |
 
 The remaining protocol-shaped tools are transitional. The cut direction is one-way: as each workflow tool lands (`lsp_outline`, `lsp_calls`, `lsp_fix`, `lsp_session`, `lsp_move`), the corresponding raw LSP command wrapper is removed from the public registry — no aliases. Formatting is deliberately not exposed to agents; use editor/save hooks, pre-commit hooks, CI, or a direct formatter run instead. See [docs/tool-surface.md](docs/tool-surface.md) for the full raw → workflow cut map.

@@ -249,5 +249,122 @@ class WaveTwoSurfaceTests(unittest.TestCase):
         )
 
 
+# Wave 3 mutation operators per docs/tool-surface.md. Wave 3 collapses the
+# raw move-file pair (`lsp_move_file`, `lsp_move_files`) into a single
+# preview-and-stage tool `lsp_move` with the documented signature
+# `lsp_move(from_path='', to_path='', symbol='', moves='') -> str`.
+WAVE_THREE_PUBLIC = ["move"]
+
+WAVE_THREE_REPLACEMENTS: dict[str, list[str]] = {
+    "move": ["move_file", "move_files"],
+}
+
+# Once `lsp_move` lands, the public wrapper attrs for the raw pair must be
+# removed from the module — not just unregistered — so a future registry
+# sweep cannot re-expose them. Mirrors Wave 1's CUT_WRAPPER_ATTRS pattern.
+WAVE_THREE_CUT_WRAPPER_ATTRS = ["lsp_move_file", "lsp_move_files"]
+
+
+class WaveThreeSurfaceTests(unittest.TestCase):
+    """Wave 3 mutation operators per docs/tool-surface.md.
+
+    Wave 3 collapses `lsp_move_file` + `lsp_move_files` into a single
+    `lsp_move` workflow tool. As with Wave 2, the test gates on the new
+    tool's presence so a partial Wave 3 still gets coverage on the live
+    pieces; a skipped test doubles as a punch-list reminder for the
+    implementation worker.
+    """
+
+    def test_move_replaces_move_file_and_move_files(self) -> None:
+        if "move" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_move not yet registered "
+                "(Wave 3 mutation lane). docs/tool-surface.md expects "
+                "`move` to absorb both `move_file` and `move_files`, "
+                "with the raw entries cut from both registries — no "
+                "aliases, no shims."
+            )
+        self.assertIn("move", _ALL_TOOLS, "move not registered in _ALL_TOOLS")
+        self.assertIn(
+            "move",
+            TOOL_CAPABILITIES,
+            "move missing TOOL_CAPABILITIES entry — capability gating "
+            "quietly skips tools without one",
+        )
+        for raw in WAVE_THREE_REPLACEMENTS["move"]:
+            self.assertNotIn(
+                raw,
+                _ALL_TOOLS,
+                f"move shipped but raw {raw} still in _ALL_TOOLS — "
+                f"docs/tool-surface.md says no aliases, no shims",
+            )
+            self.assertNotIn(
+                raw,
+                TOOL_CAPABILITIES,
+                f"move shipped but raw {raw} still in TOOL_CAPABILITIES — "
+                f"dead capability paths invite accidental re-introduction",
+            )
+
+    def test_move_capability_is_will_rename_files(self) -> None:
+        # Self-activating: as soon as `move` lands in TOOL_CAPABILITIES
+        # the value must specifically be `workspace.fileOperations.willRename`
+        # — the same provider both raw `move_file` and `move_files` gated
+        # on. A None or wrong-key value would slip through generic
+        # "is in TOOL_CAPABILITIES" assertions and silently disable
+        # capability gating for the whole move surface, letting `move`
+        # register against servers that don't advertise willRename support.
+        if "move" not in TOOL_CAPABILITIES:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_move capability not yet wired. "
+                "docs/tool-surface.md Raw Tool Cut Map binds `move` to "
+                "the willRenameFiles backend (the same provider the raw "
+                "move_file / move_files gated on)."
+            )
+        self.assertEqual(
+            TOOL_CAPABILITIES["move"],
+            "workspace.fileOperations.willRename",
+            "move must gate on workspace.fileOperations.willRename — "
+            "anything else (None, definitionProvider, etc.) silently "
+            "breaks capability gating for servers that don't advertise "
+            "willRename.",
+        )
+
+    def test_lsp_move_attr_exists(self) -> None:
+        # `move` is registered against the public `lsp_move` coroutine.
+        # Pinning the module attr (not just the registry entry) catches
+        # the case where the registry maps to a stale alias.
+        if "move" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_move not yet defined on "
+                "cc_lsp_now.server. docs/tool-surface.md expects "
+                "`async def lsp_move(from_path='', to_path='', "
+                "symbol='', moves='') -> str`."
+            )
+        self.assertTrue(
+            hasattr(_server, "lsp_move"),
+            "lsp_move public wrapper missing — Wave 3 mutation lane "
+            "expects a coroutine attr matching the registry entry",
+        )
+
+    def test_raw_move_wrapper_attrs_are_removed(self) -> None:
+        # Public wrappers are removed, not merely unregistered, so the
+        # source cannot be re-exposed accidentally by a future registry
+        # sweep. Gate on `move` shipping so a half-built Wave 3 doesn't
+        # produce a false failure here while the implementation worker
+        # is still mid-edit on server.py.
+        if "move" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_move not yet registered; the "
+                "raw lsp_move_file / lsp_move_files wrapper cuts only "
+                "land once `move` has shipped."
+            )
+        for attr in WAVE_THREE_CUT_WRAPPER_ATTRS:
+            self.assertFalse(
+                hasattr(_server, attr),
+                f"{attr} should be removed once lsp_move ships — "
+                f"docs/tool-surface.md: no aliases, no shims",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
