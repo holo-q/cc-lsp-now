@@ -6,8 +6,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +88,20 @@ _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 _pending: PendingBuffer | None = None
 
 
+@dataclass
+class WorkspaceApplyResult:
+    affected: list[str] = field(default_factory=list)
+    renamed: list[tuple[str, str]] = field(default_factory=list)
+    created: list[str] = field(default_factory=list)
+    deleted: list[str] = field(default_factory=list)
+
+    def absorb(self, other: WorkspaceApplyResult) -> None:
+        self.affected.extend(other.affected)
+        self.renamed.extend(other.renamed)
+        self.created.extend(other.created)
+        self.deleted.extend(other.deleted)
+
+
 def _set_pending(kind: str, candidates: list[Candidate], description: str) -> None:
     """Stage a set of candidate WorkspaceEdits for later confirmation.
 
@@ -94,6 +110,11 @@ def _set_pending(kind: str, candidates: list[Candidate], description: str) -> No
     """
     global _pending
     _pending = PendingBuffer(kind=kind, candidates=candidates, description=description)
+
+
+def _clear_pending() -> None:
+    global _pending
+    _pending = None
 
 
 def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
@@ -108,9 +129,9 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
     """
     edit = candidate.edit
 
-    affected: list[str] = []
+    applied = WorkspaceApplyResult()
     if edit.get("changes") or edit.get("documentChanges"):
-        affected = _apply_workspace_edit(edit)
+        applied = _apply_workspace_edit(edit)
 
     edit_count = 0
     for _uri, edits in edit.get("changes", {}).items():
@@ -178,10 +199,13 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
     for client in _chain_clients:
         if client is None:
             continue
-        client.notify_files_renamed(renamed)
-        client.notify_files_created(created)
-        client.notify_files_deleted(deleted)
+        client.notify_files_renamed([*applied.renamed, *renamed])
+        client.notify_files_created([*applied.created, *created])
+        client.notify_files_deleted([*applied.deleted, *deleted])
 
+    affected = {*applied.affected, *created, *deleted}
+    affected.update(new for _old, new in renamed)
+    affected.update(new for _old, new in applied.renamed)
     return len(affected), edit_count
 
 
@@ -1249,6 +1273,7 @@ async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int 
                 error=e,
             )
         if not result:
+            _clear_pending()
             trace = await _rename_trace(
                 file_path=file_path,
                 uri=uri,
@@ -1340,7 +1365,9 @@ def _apply_text_edits(text: str, edits: list[dict]) -> str:
         start_offset = _offset(edit["range"]["start"])
         end_offset = _offset(edit["range"]["end"])
         if start_offset is None or end_offset is None:
-            continue
+            raise ValueError(f"Invalid text edit range: {_range_str(edit.get('range', {}))}")
+        if start_offset > end_offset:
+            raise ValueError(f"Invalid reversed text edit range: {_range_str(edit.get('range', {}))}")
         result = result[:start_offset] + edit["newText"] + result[end_offset:]
     return result
 
@@ -1396,15 +1423,74 @@ def _format_text_edit_preview(path: str, edits: list[dict]) -> list[str]:
     return lines
 
 
-def _apply_workspace_edit(edit: dict) -> list[str]:
-    """Apply a WorkspaceEdit to the filesystem. Returns list of affected paths."""
-    affected: list[str] = []
+def _apply_create_file(uri: str, options: dict) -> WorkspaceApplyResult:
+    path = _uri_to_path(uri)
+    target = Path(path)
+    ignore_if_exists = bool(options.get("ignoreIfExists"))
+    overwrite = bool(options.get("overwrite"))
+    if target.exists():
+        if ignore_if_exists:
+            return WorkspaceApplyResult()
+        if not overwrite:
+            raise FileExistsError(path)
+    if target.parent:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    if overwrite:
+        target.write_text("", encoding="utf-8")
+    else:
+        target.touch(exist_ok=False)
+    return WorkspaceApplyResult(affected=[path], created=[path])
+
+
+def _apply_rename_file(old_uri: str, new_uri: str, options: dict) -> WorkspaceApplyResult:
+    old_path = _uri_to_path(old_uri)
+    new_path = _uri_to_path(new_uri)
+    old = Path(old_path)
+    new = Path(new_path)
+    ignore_if_exists = bool(options.get("ignoreIfExists"))
+    overwrite = bool(options.get("overwrite"))
+    if new.exists():
+        if ignore_if_exists:
+            return WorkspaceApplyResult()
+        if not overwrite:
+            raise FileExistsError(new_path)
+        if new.is_dir():
+            shutil.rmtree(new)
+        else:
+            new.unlink()
+    if new.parent:
+        new.parent.mkdir(parents=True, exist_ok=True)
+    old.rename(new)
+    return WorkspaceApplyResult(affected=[old_path, new_path], renamed=[(old_path, new_path)])
+
+
+def _apply_delete_file(uri: str, options: dict) -> WorkspaceApplyResult:
+    path = _uri_to_path(uri)
+    target = Path(path)
+    ignore_if_not_exists = bool(options.get("ignoreIfNotExists"))
+    recursive = bool(options.get("recursive"))
+    if not target.exists():
+        if ignore_if_not_exists:
+            return WorkspaceApplyResult()
+        raise FileNotFoundError(path)
+    if target.is_dir():
+        if not recursive:
+            raise IsADirectoryError(path)
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+    return WorkspaceApplyResult(affected=[path], deleted=[path])
+
+
+def _apply_workspace_edit(edit: dict) -> WorkspaceApplyResult:
+    """Apply a WorkspaceEdit to the filesystem."""
+    result = WorkspaceApplyResult()
 
     for change_uri, edits in edit.get("changes", {}).items():
         path = _uri_to_path(change_uri)
         text = Path(path).read_text(encoding="utf-8")
         Path(path).write_text(_apply_text_edits(text, edits), encoding="utf-8")
-        affected.append(path)
+        result.affected.append(path)
 
     for doc_change in edit.get("documentChanges", []):
         if "textDocument" in doc_change:
@@ -1413,9 +1499,21 @@ def _apply_workspace_edit(edit: dict) -> list[str]:
             edits = doc_change.get("edits", [])
             text = Path(path).read_text(encoding="utf-8")
             Path(path).write_text(_apply_text_edits(text, edits), encoding="utf-8")
-            affected.append(path)
+            result.affected.append(path)
+            continue
 
-    return affected
+        kind = doc_change.get("kind")
+        options = doc_change.get("options", {})
+        if kind == "create":
+            result.absorb(_apply_create_file(doc_change["uri"], options))
+        elif kind == "rename":
+            result.absorb(_apply_rename_file(doc_change["oldUri"], doc_change["newUri"], options))
+        elif kind == "delete":
+            result.absorb(_apply_delete_file(doc_change["uri"], options))
+        else:
+            raise ValueError(f"Unsupported documentChanges operation: {kind!r}")
+
+    return result
 
 
 def _collect_edit_files(result: dict) -> list[tuple[str, list[dict]]]:
@@ -1726,40 +1824,48 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
             "context": {"diagnostics": range_diagnostics},
         }, uri=uri)
         if not result:
+            _clear_pending()
             return "No code actions available."
 
         lines = []
-        for idx, action in enumerate(result):
+        action_candidates: list[Candidate] = []
+        for action in result:
             title = action.get("title", "")
             kind = action.get("kind", "")
             edit = action.get("edit")
-            parts = [f"[{idx}] {title}"]
+            if edit:
+                idx = len(action_candidates)
+                parts = [f"[{idx}] {title}"]
+            else:
+                parts = [f"[-] {title}"]
             if kind:
                 parts.append(f"[{kind}]")
             if edit:
                 n = len(edit.get("changes", {})) + len(edit.get("documentChanges", []))
                 parts.append(f"({n} file(s))")
+                action_candidates.append(Candidate(
+                    kind=CandidateKind.CODE_ACTION,
+                    title=title,
+                    edit=edit,
+                ))
+            elif action.get("command"):
+                parts.append("(command-only; not staged)")
+            else:
+                parts.append("(no edit; not staged)")
             lines.append(" ".join(parts))
 
-        # Wrap raw LSP action objects into Candidate dataclasses so lsp_confirm
-        # can access their .edit field via _apply_candidate. Some actions have
-        # no edit (command-only) — those apply as 0 file(s)/0 edit(s), effectively noop.
-        action_candidates = [
-            Candidate(
-                kind=CandidateKind.CODE_ACTION,
-                title=action.get("title", ""),
-                edit=action.get("edit", {}),
+        if action_candidates:
+            _set_pending(
+                "code_action",
+                action_candidates,
+                f"{len(action_candidates)} code action(s) at {_uri_to_path(uri)}:{target_line + 1}",
             )
-            for action in result
-        ]
-        _set_pending(
-            "code_action",
-            action_candidates,
-            f"{len(result)} code action(s) at {_uri_to_path(uri)}:{target_line + 1}",
-        )
-
-        lines.append("")
-        lines.append(f"Staged {len(result)} action(s). Call lsp_confirm(N) to apply.")
+            lines.append("")
+            lines.append(f"Staged {len(action_candidates)} edit action(s). Call lsp_confirm(N) to apply.")
+        else:
+            _clear_pending()
+            lines.append("")
+            lines.append("No edit-backed actions to stage.")
         return "\n".join(lines)
     except AmbiguousSymbol as e:
         return _ambiguous_msg(e)
@@ -1904,7 +2010,7 @@ async def lsp_confirm(index: int = 0) -> str:
     candidates = _pending.candidates
     kind = _pending.kind
 
-    if index >= len(candidates):
+    if index < 0 or index >= len(candidates):
         return f"Invalid index {index}, only {len(candidates)} candidates available."
 
     candidate = candidates[index]

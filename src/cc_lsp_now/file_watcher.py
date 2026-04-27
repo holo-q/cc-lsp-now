@@ -23,7 +23,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -100,7 +100,7 @@ class FileWatcher:
 
     def __init__(self, client: LspClient) -> None:
         self._client = client
-        self._observer: Observer | None = None
+        self._observer: Any | None = None
         self._watched_paths: set[str] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pending: dict[str, int] = {}  # path → last FileChangeType
