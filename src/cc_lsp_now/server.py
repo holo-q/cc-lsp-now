@@ -60,7 +60,7 @@ COMPLETION_KIND_LABELS = {
     21: "Constant", 22: "Struct", 23: "Event", 24: "Operator", 25: "TypeParameter",
 }
 
-DISABLED_BY_DEFAULT = {"formatting"}
+DISABLED_BY_DEFAULT: set[str] = set()
 
 
 _last_server: str = ""
@@ -4004,7 +4004,6 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "refs": (lsp_refs, "cc-lsp-now/refs"),
     "completion": (lsp_completion, "textDocument/completion"),
     "outline": (lsp_outline, "textDocument/documentSymbol"),
-    "formatting": (lsp_formatting, "textDocument/formatting"),
     "rename": (lsp_rename, "textDocument/rename"),
     "prepare_rename": (lsp_prepare_rename, "textDocument/prepareRename"),
     "move_file": (lsp_move_file, "workspace/willRenameFiles"),
@@ -4014,7 +4013,6 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "type_hierarchy_subtypes": (lsp_type_hierarchy_subtypes, "typeHierarchy/subtypes"),
     "inlay_hint": (lsp_inlay_hint, "textDocument/inlayHint"),
     "folding_range": (lsp_folding_range, "textDocument/foldingRange"),
-    "range_formatting": (lsp_range_formatting, "textDocument/rangeFormatting"),
     "code_lens": (lsp_code_lens, "textDocument/codeLens"),
     "create_file": (lsp_create_file, "workspace/willCreateFiles"),
     "delete_file": (lsp_delete_file, "workspace/willDeleteFiles"),
@@ -4060,7 +4058,6 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "refs": "referencesProvider",
     "completion": "completionProvider",
     "outline": "documentSymbolProvider",
-    "formatting": "documentFormattingProvider",
     "rename": "renameProvider",
     "prepare_rename": "renameProvider",
     "fix": "codeActionProvider",
@@ -4070,7 +4067,6 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "type_hierarchy_subtypes": "typeHierarchyProvider",
     "inlay_hint": "inlayHintProvider",
     "folding_range": "foldingRangeProvider",
-    "range_formatting": "documentRangeFormattingProvider",
     "code_lens": "codeLensProvider",
     "create_file": "workspace.fileOperations.willCreate",
     "delete_file": "workspace.fileOperations.willDelete",

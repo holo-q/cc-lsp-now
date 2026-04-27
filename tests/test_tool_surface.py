@@ -39,6 +39,8 @@ WAVE_TWO_REPLACEMENTS: dict[str, list[str]] = {
     "session": ["info", "workspaces", "add_workspace"],
 }
 
+FORMAT_TOOLS = ["formatting", "range_formatting"]
+
 
 class ToolSurfaceTests(unittest.TestCase):
     def test_wave_one_graph_tools_are_public(self) -> None:
@@ -73,6 +75,19 @@ class ToolSurfaceTests(unittest.TestCase):
         # silently no-op the subtraction in the registration block.
         for name in DISABLED_BY_DEFAULT:
             self.assertIn(name, _ALL_TOOLS)
+
+    def test_formatting_tools_are_not_agent_facing(self) -> None:
+        # Formatting is intentionally outside the agent-facing surface. It is
+        # noisy, low-reasoning-value mutation and belongs in editor/save hooks,
+        # pre-commit hooks, CI, or explicit user formatter runs.
+        self.assertFalse(
+            DISABLED_BY_DEFAULT,
+            "off-by-default formatting aliases should not linger; excluded "
+            "tools must be cut from the registry entirely",
+        )
+        for name in FORMAT_TOOLS:
+            self.assertNotIn(name, _ALL_TOOLS)
+            self.assertNotIn(name, TOOL_CAPABILITIES)
 
 
 class WaveTwoSurfaceTests(unittest.TestCase):

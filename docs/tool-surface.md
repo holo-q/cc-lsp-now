@@ -26,7 +26,6 @@ Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations ->
 | `lsp_fix` | Preview and stage code actions/refactors for a location or diagnostic. |
 | `lsp_rename` | Preview symbol rename with final-line edits and confirmation. |
 | `lsp_move` | Preview file/symbol moves with import/update edits and confirmation. |
-| `lsp_format` | Preview document or range formatting as staged edits. |
 | `lsp_session` | Inspect, add, and warm workspaces and LSP sessions. |
 | `lsp_confirm` | Commit the currently staged edit transaction. |
 
@@ -56,8 +55,6 @@ plumbing inside the workflow tools.
 | `lsp_call_hierarchy_incoming` | `lsp_calls` |
 | `lsp_call_hierarchy_outgoing` | `lsp_calls` |
 | `lsp_code_actions` | `lsp_fix` |
-| `lsp_formatting` | `lsp_format` |
-| `lsp_range_formatting` | `lsp_format` |
 | `lsp_move_file` | `lsp_move` |
 | `lsp_move_files` | `lsp_move` |
 | `lsp_info` | `lsp_session` |
@@ -67,6 +64,12 @@ plumbing inside the workflow tools.
 `lsp_completion`, `lsp_inlay_hint`, `lsp_folding_range`, and `lsp_code_lens`
 should be cut unless repeated agent workflows prove a need for a higher-level
 operator around them.
+
+Formatting is intentionally excluded from the agent-facing surface. It is
+distracting context for agents, creates noisy staged diffs, and is better
+handled by editor/save hooks, pre-commit hooks, CI, or occasional direct user
+formatter runs. Raw `lsp_formatting` and `lsp_range_formatting` stay out of the
+public MCP registry rather than being replaced by a workflow tool.
 
 ## Interface Defaults
 
@@ -177,7 +180,6 @@ for "just organize-imports" without scanning the full menu.
 Wave 3 merges mutation utilities and cuts replaced raw tools:
 
 - `lsp_move`
-- `lsp_format`
 - remove each raw tool from `_ALL_TOOLS` as soon as its replacement is tested.
 
 ## Acceptance Checks
