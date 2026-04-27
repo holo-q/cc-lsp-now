@@ -1,29 +1,21 @@
-# LSP Now — Full LSP Protocol for Claude Code
+# LSP Now — Agent-First LSP for Claude Code
 
-A **standalone MCP server** that bridges the Language Server Protocol into Claude Code, exposing LSP-backed operations as typed MCP tools. Claude Code's built-in `LSP()` tool covers ~9 methods and is often buggy — this bridge covers the protocol surface for **any** language server while also growing higher-level agent workflows such as semantic grep, symbol-line navigation, symbol-name addressing, multi-target batching, and a fallback chain.
+A **standalone MCP server** that bridges the Language Server Protocol into Claude Code, exposing LSP-backed operations as typed MCP tools. Claude Code's built-in `LSP()` tool covers ~9 methods and is often buggy — this bridge covers the protocol surface for **any** language server while evolving toward a smaller graph-operator interface for agents: find semantic nodes, inspect nodes, expand graph edges, stage mutations, and verify.
 
 ## Tools
 
-| Tool | LSP Method |
-|------|-----------|
-| `lsp_diagnostics` | `textDocument/diagnostic` |
-| `lsp_hover` | `textDocument/hover` |
-| `lsp_definition` | `textDocument/definition` |
-| `lsp_references` | `textDocument/references` |
-| `lsp_grep` | text scan + `textDocument/definition`/`references` |
-| `lsp_symbols_at` | line scan + `textDocument/definition`/`references` |
-| `lsp_type_definition` | `textDocument/typeDefinition` |
-| `lsp_completion` | `textDocument/completion` |
-| `lsp_signature_help` | `textDocument/signatureHelp` |
-| `lsp_document_symbols` | `textDocument/documentSymbol` |
-| `lsp_formatting` | `textDocument/formatting` |
-| `lsp_rename` | `textDocument/rename` |
-| `lsp_prepare_rename` | `textDocument/prepareRename` |
-| `lsp_code_actions` | `textDocument/codeAction` |
-| `lsp_call_hierarchy_incoming` | `callHierarchy/incomingCalls` |
-| `lsp_call_hierarchy_outgoing` | `callHierarchy/outgoingCalls` |
+The target public surface is documented in [docs/tool-surface.md](docs/tool-surface.md). The first implemented graph operators are:
 
-Plus `lsp_move_file`, `lsp_create_file`, `lsp_delete_file`, `lsp_implementation`, `lsp_declaration`, `lsp_type_hierarchy_supertypes`, `lsp_type_hierarchy_subtypes`, `lsp_inlay_hint`, `lsp_folding_range`, `lsp_range_formatting`, `lsp_code_lens`, `lsp_confirm`. Tools are capability-gated at startup: if no server in the chain advertises the capability, the tool isn't registered, saving context tokens. `lsp_grep` is the bridge between `rg ctx` and semantic references: it finds identifier text candidates, asks the LSP what each occurrence binds to, then emits one-line buckets such as `arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 9 — def L44`. `lsp_symbols_at("L78")` can then bounce from that graph's last `samples`/refs, or use explicit `path:L78`, and expands all semantic symbols on that line. Raw protocol commands are intentionally pruned when a higher-level workflow becomes the better agent interface.
+| Tool | Purpose |
+|------|---------|
+| `lsp_grep` | Text search plus semantic binding; groups identifier hits by symbol identity. |
+| `lsp_symbols_at` | Expands all semantic symbols on a line, including function args, with last-graph navigation. |
+| `lsp_diagnostics` | Reports diagnostics as the main verifier surface. |
+| `lsp_rename` | Previews and stages semantic renames before `lsp_confirm`. |
+| `lsp_move_file` / `lsp_move_files` | Preview file moves and import/update edits before `lsp_confirm`. |
+| `lsp_confirm` | Commits the currently staged edit transaction. |
+
+The remaining protocol-shaped tools are transitional. As workflow tools land (`lsp_symbol`, `lsp_goto`, `lsp_refs`, `lsp_outline`, `lsp_calls`, `lsp_fix`, `lsp_session`, `lsp_move`, `lsp_format`), the raw LSP command wrappers are removed from the public registry instead of kept as aliases.
 
 File arguments may be full paths, relative paths, or unique basenames. For example, `lsp_document_symbols(file_path="NodesWindow.cs")` resolves the file under active workspaces; if the basename is not unique, the tool returns the matching paths and asks for a more specific path.
 
@@ -60,7 +52,7 @@ Standalone ComfyUI frontend built on AppKit.
 
 ## For LSP Plugin Authors
 
-cc-lsp-now is the MCP server; your plugin bundles it. Users install one plugin (yours), get both the native `lspServers` integration (for hooks/diagnostics) *and* the full MCP tool set.
+cc-lsp-now is the MCP server; your plugin bundles it. Users install one plugin (yours), get both the native `lspServers` integration (for hooks/diagnostics) *and* the graph-oriented MCP tool set.
 
 ### 1. Declare the MCP server in `plugin.json`
 

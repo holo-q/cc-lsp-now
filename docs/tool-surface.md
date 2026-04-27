@@ -1,0 +1,116 @@
+# Agent-First LSP Tool Surface
+
+`cc-lsp-now` started as a direct MCP bridge over LSP methods. That was the
+right bootstrap, but it is not the final agent interface. The stable surface
+should expose semantic graph operators and keep raw LSP verbs as internal
+plumbing.
+
+The working rule is:
+
+```text
+Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations -> verify.
+```
+
+## Target Tools
+
+| Tool | Purpose |
+|------|---------|
+| `lsp_grep` | Find semantic symbol buckets from identifier text candidates. |
+| `lsp_symbols_at` | Expand every semantic symbol on a line, with last-graph navigation. |
+| `lsp_symbol` | Inspect one semantic node: kind, type, hover/docs, definition, scope, signature, references summary. |
+| `lsp_goto` | Resolve destinations for a node: definition, declaration, type definition, implementation. |
+| `lsp_refs` | Expand references for a known node or graph index. |
+| `lsp_outline` | Show compact file/workspace breadcrumbs. |
+| `lsp_calls` | Show incoming and/or outgoing call graph edges. |
+| `lsp_diagnostics` | Report diagnostics as the primary verifier surface. |
+| `lsp_fix` | Preview and stage code actions/refactors for a location or diagnostic. |
+| `lsp_rename` | Preview symbol rename with final-line edits and confirmation. |
+| `lsp_move` | Preview file/symbol moves with import/update edits and confirmation. |
+| `lsp_format` | Preview document or range formatting as staged edits. |
+| `lsp_session` | Inspect, add, and warm workspaces and LSP sessions. |
+| `lsp_confirm` | Commit the currently staged edit transaction. |
+
+`lsp_grep` and `lsp_symbols_at` are the first implemented pieces of this
+surface. They already preserve a semantic graph between calls, which is the
+pattern the rest of the tools should follow.
+
+## Raw Tool Cut Map
+
+Raw protocol-shaped tools should be removed from the public MCP registry once a
+workflow replacement exists. Do not keep aliases unless a later compatibility
+decision explicitly reverses this.
+
+| Raw tool | Replacement |
+|----------|-------------|
+| `lsp_hover` | `lsp_symbol` |
+| `lsp_signature_help` | `lsp_symbol` |
+| `lsp_definition` | `lsp_goto` |
+| `lsp_declaration` | `lsp_goto` |
+| `lsp_type_definition` | `lsp_goto` |
+| `lsp_implementation` | `lsp_goto` |
+| `lsp_references` | `lsp_refs` |
+| `lsp_document_symbols` | `lsp_outline` |
+| `lsp_call_hierarchy_incoming` | `lsp_calls` |
+| `lsp_call_hierarchy_outgoing` | `lsp_calls` |
+| `lsp_code_actions` | `lsp_fix` |
+| `lsp_formatting` | `lsp_format` |
+| `lsp_range_formatting` | `lsp_format` |
+| `lsp_move_file` | `lsp_move` |
+| `lsp_move_files` | `lsp_move` |
+| `lsp_info` | `lsp_session` |
+| `lsp_workspaces` | `lsp_session` |
+| `lsp_add_workspace` | `lsp_session` |
+
+`lsp_completion`, `lsp_inlay_hint`, `lsp_folding_range`, and `lsp_code_lens`
+should be cut unless repeated agent workflows prove a need for a higher-level
+operator around them.
+
+## Interface Defaults
+
+- Every target-taking tool should accept graph indices, `file:Lx`,
+  `file_path+line`, `file_path+symbol`, full paths, relative paths, and unique
+  basenames where applicable.
+- Outputs should stay compact, line-oriented, and breadcrumbed. Prefer one-line
+  summaries first, with explicit ways to unfold.
+- Mutation tools should preview and stage edits. `lsp_confirm` is the only
+  commit operator.
+- Capability gating should apply to workflow tools based on the backend methods
+  they need, not based on their public names.
+
+## Implementation Waves
+
+Wave 1 builds the core node operators:
+
+- `lsp_symbol`
+- `lsp_goto`
+- `lsp_refs`
+
+Wave 2 builds graph and verifier operators:
+
+- `lsp_outline`
+- `lsp_calls`
+- `lsp_fix`
+- `lsp_session`
+
+Wave 3 merges mutation utilities and cuts replaced raw tools:
+
+- `lsp_move`
+- `lsp_format`
+- remove each raw tool from `_ALL_TOOLS` as soon as its replacement is tested.
+
+## Acceptance Checks
+
+- Each new workflow tool has unit coverage for graph index targets, explicit
+  `file:Lx`, unique basenames, and symbol disambiguation.
+- Registry tests or assertions prove replaced raw tools are absent from
+  `_ALL_TOOLS`.
+- Existing checks remain green:
+
+```text
+uvx ruff check src tests
+uv run --frozen ty check src tests
+uv run --frozen python -m unittest discover -s tests
+```
+
+Live smoke should cover at least `ty` and `csharp-ls` after each implementation
+wave.

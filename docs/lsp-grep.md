@@ -4,6 +4,12 @@
 fast, wide feel of `rg ctx`, then asks the language server what each occurrence
 means so the model receives symbol groups instead of loose line hits.
 
+Together with `lsp_symbols_at`, it is the first shipped piece of the
+graph-operator surface described in `docs/tool-surface.md`. The long-term
+interface is not a one-tool-per-LSP-method mirror; it is a small set of
+operators for finding semantic nodes, inspecting them, expanding edges, staging
+mutations, and verifying the result.
+
 Default output is one line per semantic identity:
 
 ```text
@@ -60,4 +66,6 @@ lsp_symbols_at("/repo/src/HistoryUI.cs:L78")
 The output is the same one-line semantic-bucket shape, but for every identifier
 on that source line. On a function declaration this intentionally includes the
 function name and all arguments, so the model can hop from a sample line into the
-local symbol graph without first doing a separate text search.
+local symbol graph without first doing a separate text search. This graph memory
+is the pattern later tools such as `lsp_symbol`, `lsp_goto`, and `lsp_refs`
+should reuse.
