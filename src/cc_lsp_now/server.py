@@ -762,7 +762,13 @@ def _normalize_locations(result: dict | list | None) -> list[str]:
     return [_loc_str(loc) for loc in result]
 
 
-def _format_symbol_tree(sym: dict, indent: int = 0) -> list[str]:
+def _format_outline_tree(sym: dict, indent: int = 0) -> list[str]:
+    """One-line breadcrumb per symbol; nesting shown by indent, line by ``Lxx``.
+
+    Output shape matches the rest of the workflow surface (see ``lsp_grep``,
+    ``lsp_folding_range``): leading ``Lxx`` so a model can hop straight from
+    outline to ``lsp_symbols_at("Lxx")`` without re-grepping the file.
+    """
     kind = _symbol_kind_label(sym.get("kind", 0))
     name = sym.get("name", "")
     loc = sym.get("location", sym.get("range", {}))
@@ -771,9 +777,9 @@ def _format_symbol_tree(sym: dict, indent: int = 0) -> list[str]:
     else:
         line = loc.get("start", {}).get("line", 0) + 1
     pad = "  " * indent
-    lines = [f"{line}  {pad}{kind}  {name}"]
+    lines = [f"L{line}  {pad}{kind} {name}"]
     for child in sym.get("children", []):
-        lines.extend(_format_symbol_tree(child, indent + 1))
+        lines.extend(_format_outline_tree(child, indent + 1))
     return lines
 
 
@@ -1901,8 +1907,8 @@ async def lsp_signature_help(file_path: str, symbol: str = "", line: int = 0) ->
         return f"LSP error: {e}"
 
 
-async def _document_symbols_single(file_path: str) -> str:
-    """Get symbols for a single file. Returns formatted tree or 'No symbols found.'."""
+async def _outline_single(file_path: str) -> str:
+    """Compact symbol outline for one file. Empty result → 'No symbols found.'."""
     file_path = _resolve_file_path(file_path)
     uri = file_uri(file_path)
     result = await _request("textDocument/documentSymbol", {
@@ -1912,24 +1918,32 @@ async def _document_symbols_single(file_path: str) -> str:
         return "No symbols found."
     lines: list[str] = []
     for sym in result:
-        lines.extend(_format_symbol_tree(sym))
+        lines.extend(_format_outline_tree(sym))
     return "\n".join(lines)
 
 
-async def lsp_document_symbols(file_path: str = "", pattern: str = "") -> str:
-    """Get all symbols in one or more documents (outline).
+async def lsp_outline(file_path: str = "", pattern: str = "") -> str:
+    """Compact file/workspace breadcrumbs — one line per symbol.
 
-    Supports comma-separated file_path or glob pattern for multi-file symbols.
+    Workflow replacement for the raw ``textDocument/documentSymbol`` verb (see
+    ``docs/tool-surface.md``). Each line is ``Lxx  <indent><Kind> <name>`` so a
+    model can pivot straight into ``lsp_symbols_at("Lxx")`` without re-scanning.
+
+    ``file_path`` accepts a single path, a comma-separated list, or a unique
+    basename resolved under the active workspaces (via ``_resolve_paths``).
+    ``pattern`` is a glob fallback when ``file_path`` is empty. Multi-file
+    output is grouped under ``=== path ===`` headers, mirroring the batching
+    shape of ``lsp_diagnostics`` and ``lsp_folding_range``.
     """
     paths = _resolve_paths(file_path, pattern)
     if isinstance(paths, str):
         return paths
     try:
         if len(paths) == 1:
-            return await _document_symbols_single(paths[0])
+            return await _outline_single(paths[0])
         sections: list[str] = []
         for p in paths:
-            body = await _document_symbols_single(p)
+            body = await _outline_single(p)
             sections.append(f"=== {p} ===\n{body}")
         return "\n\n".join(sections)
     except (LspError, ValueError) as e:
@@ -2863,7 +2877,6 @@ async def lsp_symbol(target: str = "", file_path: str = "", symbol: str = "", li
         if text:
             lines.append(f"  {text}")
         if group is not None:
-            _record_semantic_nav_context(group.name, [group])
             lines.append(_format_semantic_grep_group(0, group))
 
         try:
@@ -2982,7 +2995,6 @@ async def lsp_refs(
         group = await _semantic_group_for_target(resolved)
         if group is not None:
             group.reference_locs = locs
-            _record_semantic_nav_context(group.name, [group])
             label = f"{group.kind} {group.name}"
         else:
             label = resolved.name or "symbol"
@@ -3489,7 +3501,7 @@ async def lsp_folding_range(file_path: str = "", pattern: str = "") -> str:
     """Get folding regions (imports, comments, blocks) for one or more files.
 
     Supports comma-separated file_path or glob pattern for multi-file requests.
-    Mirrors the batching shape of ``lsp_diagnostics`` / ``lsp_document_symbols``.
+    Mirrors the batching shape of ``lsp_diagnostics`` / ``lsp_outline``.
     """
     paths = _resolve_paths(file_path, pattern)
     if isinstance(paths, str):
@@ -3660,7 +3672,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "goto": (lsp_goto, "cc-lsp-now/goto"),
     "refs": (lsp_refs, "cc-lsp-now/refs"),
     "completion": (lsp_completion, "textDocument/completion"),
-    "document_symbols": (lsp_document_symbols, "textDocument/documentSymbol"),
+    "outline": (lsp_outline, "textDocument/documentSymbol"),
     "formatting": (lsp_formatting, "textDocument/formatting"),
     "rename": (lsp_rename, "textDocument/rename"),
     "prepare_rename": (lsp_prepare_rename, "textDocument/prepareRename"),
@@ -3719,7 +3731,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "goto": "definitionProvider",
     "refs": "referencesProvider",
     "completion": "completionProvider",
-    "document_symbols": "documentSymbolProvider",
+    "outline": "documentSymbolProvider",
     "formatting": "documentFormattingProvider",
     "rename": "renameProvider",
     "prepare_rename": "renameProvider",

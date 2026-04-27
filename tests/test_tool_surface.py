@@ -24,6 +24,22 @@ WAVE_ONE_REPLACED_RAW = [
 ]
 
 
+# Wave 2 outline+verifier operators per docs/tool-surface.md. These tests
+# describe the expected post-Wave-2 registry shape; they self-activate as
+# each tool lands so a partial Wave 2 (e.g. only `outline`) still gets the
+# surface check it deserves without blocking the suite on the others.
+WAVE_TWO_PUBLIC = ["outline", "calls", "fix", "session"]
+
+# Raw tools that Wave 2 replaces. When the matching workflow tool ships
+# the raw entry must be cut from _ALL_TOOLS and TOOL_CAPABILITIES.
+WAVE_TWO_REPLACEMENTS: dict[str, list[str]] = {
+    "outline": ["document_symbols"],
+    "calls": ["call_hierarchy_incoming", "call_hierarchy_outgoing"],
+    "fix": ["code_actions"],
+    "session": ["info", "workspaces", "add_workspace"],
+}
+
+
 class ToolSurfaceTests(unittest.TestCase):
     def test_wave_one_graph_tools_are_public(self) -> None:
         for name in WAVE_ONE_PUBLIC:
@@ -57,6 +73,86 @@ class ToolSurfaceTests(unittest.TestCase):
         # silently no-op the subtraction in the registration block.
         for name in DISABLED_BY_DEFAULT:
             self.assertIn(name, _ALL_TOOLS)
+
+
+class WaveTwoSurfaceTests(unittest.TestCase):
+    """Wave 2 outline+verifier operators per docs/tool-surface.md.
+
+    Each Wave 2 tool ships independently. The tests gate on the tool's
+    presence in ``_ALL_TOOLS`` so that a partial Wave 2 (e.g. only
+    ``outline`` shipped) still gets full acceptance coverage on the live
+    pieces without blocking the suite on the unlanded ones. Skipped tests
+    double as a punch list of remaining Wave 2 source hooks.
+    """
+
+    def _assert_wave_two_tool(self, name: str, replaces: list[str]) -> None:
+        self.assertIn(name, _ALL_TOOLS, f"{name} not registered in _ALL_TOOLS")
+        self.assertIn(
+            name,
+            TOOL_CAPABILITIES,
+            f"{name} missing TOOL_CAPABILITIES entry — capability gating "
+            f"quietly skips tools without one",
+        )
+        for raw in replaces:
+            self.assertNotIn(
+                raw,
+                _ALL_TOOLS,
+                f"{name} shipped but raw {raw} still in _ALL_TOOLS — "
+                f"docs/tool-surface.md says no aliases, no shims",
+            )
+            self.assertNotIn(
+                raw,
+                TOOL_CAPABILITIES,
+                f"{name} shipped but raw {raw} still in TOOL_CAPABILITIES — "
+                f"dead capability paths invite accidental re-introduction",
+            )
+
+    def test_outline_replaces_document_symbols(self) -> None:
+        if "outline" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_outline not yet registered "
+                "(Wave 2 outline lane). docs/tool-surface.md expects "
+                "`outline` → documentSymbolProvider with raw "
+                "`document_symbols` cut from both registries."
+            )
+        self._assert_wave_two_tool("outline", ["document_symbols"])
+
+    def test_calls_replaces_call_hierarchy_pair(self) -> None:
+        if "calls" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_calls not yet registered "
+                "(Wave 2 verifier lane). docs/tool-surface.md expects "
+                "`calls` → callHierarchyProvider with both raw "
+                "`call_hierarchy_incoming` and `call_hierarchy_outgoing` "
+                "cut from both registries."
+            )
+        self._assert_wave_two_tool(
+            "calls",
+            ["call_hierarchy_incoming", "call_hierarchy_outgoing"],
+        )
+
+    def test_fix_replaces_code_actions(self) -> None:
+        if "fix" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_fix not yet registered "
+                "(Wave 2 verifier lane). docs/tool-surface.md expects "
+                "`fix` → codeActionProvider with `code_actions` cut "
+                "from both registries."
+            )
+        self._assert_wave_two_tool("fix", ["code_actions"])
+
+    def test_session_replaces_info_workspaces_add_workspace(self) -> None:
+        if "session" not in _ALL_TOOLS:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_session not yet registered "
+                "(Wave 2 verifier lane). docs/tool-surface.md expects "
+                "`session` to absorb `info`, `workspaces`, and "
+                "`add_workspace`, all cut from both registries."
+            )
+        self._assert_wave_two_tool(
+            "session",
+            ["info", "workspaces", "add_workspace"],
+        )
 
 
 if __name__ == "__main__":

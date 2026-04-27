@@ -12,7 +12,8 @@ The target public surface is documented in [docs/tool-surface.md](docs/tool-surf
 | `lsp_symbols_at` | Expands all semantic symbols on a line, including function args, with last-graph navigation. |
 | `lsp_symbol` | Inspects one semantic node from a graph index, `file:Lx`, or `file_path` plus `symbol`/`line`. |
 | `lsp_goto` | Resolves definition/declaration/type/implementation destinations through one command. |
-| `lsp_refs` | Expands references for a semantic node and records them as the next graph context. |
+| `lsp_refs` | Expands references for a semantic node or graph index. |
+| `lsp_outline` | Shows compact file/workspace breadcrumbs from document symbols. |
 | `lsp_diagnostics` | Reports diagnostics as the main verifier surface. |
 | `lsp_rename` | Previews and stages semantic renames before `lsp_confirm`. |
 | `lsp_move_file` / `lsp_move_files` | Preview file moves and import/update edits before `lsp_confirm`. |
@@ -20,7 +21,7 @@ The target public surface is documented in [docs/tool-surface.md](docs/tool-surf
 
 The remaining protocol-shaped tools are transitional. The cut direction is one-way: as each workflow tool lands (`lsp_outline`, `lsp_calls`, `lsp_fix`, `lsp_session`, `lsp_move`, `lsp_format`), the corresponding raw LSP command wrapper is removed from the public registry — no aliases. See [docs/tool-surface.md](docs/tool-surface.md) for the full raw → workflow cut map.
 
-File arguments may be full paths, relative paths, or unique basenames. For example, `lsp_document_symbols(file_path="NodesWindow.cs")` resolves the file under active workspaces; if the basename is not unique, the tool returns the matching paths and asks for a more specific path.
+File arguments may be full paths, relative paths, or unique basenames. For example, `lsp_outline(file_path="NodesWindow.cs")` resolves the file under active workspaces; if the basename is not unique, the tool returns the matching paths and asks for a more specific path.
 
 ## Known LSP Plugins using cc-lsp-now
 

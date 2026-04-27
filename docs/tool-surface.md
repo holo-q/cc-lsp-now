@@ -90,12 +90,83 @@ Wave 1 built the core node operators:
 - `lsp_goto`
 - `lsp_refs`
 
-Wave 2 builds outline and verifier operators:
+Wave 2 builds outline, session, graph, and verifier operators. The intended
+landing order is `outline → session → calls → fix`:
 
-- `lsp_outline`
-- `lsp_calls`
-- `lsp_fix`
-- `lsp_session`
+1. `lsp_outline` — pure read; reuses `_format_outline_tree` plumbing and shrinks
+   the registry by one (`lsp_document_symbols`).
+2. `lsp_session` — pure read/admin; collapses three tiny raw tools (`lsp_info`,
+   `lsp_workspaces`, `lsp_add_workspace`) into one verb-driven surface with no
+   semantic-graph plumbing, dropping the public tool count fast.
+3. `lsp_calls` — semantic graph operator; introduces `[N]`-target propagation
+   through call hierarchy edges, exercising the same nav-context recorder used
+   by `lsp_grep` / `lsp_symbols_at`.
+4. `lsp_fix` — preview-and-stage mutation; depends on diagnostic-aware target
+   resolution and the `_pending` buffer used by `lsp_rename` / `lsp_move`.
+
+### Public API shapes
+
+Every signature below stays one-line agent-first: the first argument is the
+graph-aware `target`, the rest are narrow knobs with safe defaults. Output is
+breadcrumbed, one-symbol-per-line, with `...` tails when truncated.
+
+```python
+async def lsp_calls(
+    target: str = "",
+    direction: str = "both",         # "in" | "out" | "both"
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+    max_depth: int = 1,
+    max_edges: int = 50,
+) -> str: ...
+```
+
+`lsp_calls` resolves the target with `_resolve_semantic_target`, runs
+`prepareCallHierarchy`, then incoming and/or outgoing per `direction`. Results
+are recorded into the semantic nav context so callers can `lsp_symbol([3])` /
+`lsp_refs([3])` on any call edge. Sample line:
+
+```text
+in:
+  [0] src/server.py:L3669::_ALL_TOOLS — function — 1 site
+out:
+  [3] src/server.py:L744::_symbol_kind_label — function — 1 site
+... 4 more; raise max_edges to unfold.
+```
+
+```python
+async def lsp_session(
+    action: str = "status",          # "status" | "add" | "warm" | "restart"
+    path: str = "",                  # for add / warm
+    server: str = "",                # for restart; "" = whole chain
+) -> str: ...
+```
+
+`status` is the default and folds `lsp_info` + `lsp_workspaces` into one block:
+build SHA, per-server one-line capability summary, then per-folder warmup state.
+`add` mirrors today's `lsp_add_workspace` (proactively spawns the chain, warms
+the new folder). `warm` re-fires bulk warmup against an existing folder.
+`restart` shuts down a chain server and lets the lazy `_get_client` respawn it
+on the next request.
+
+```python
+async def lsp_fix(
+    target: str = "",
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+    diagnostic_index: int = -1,      # -1 = all diagnostics on the line
+    kind: str = "",                  # filter, e.g. "quickfix" / "refactor.extract"
+) -> str: ...
+```
+
+`lsp_fix` accepts the same target shapes as the rest of Wave 1/2, lists the
+line's diagnostics as `[d0]`, `[d1]`, ..., then numbers the edit-backed code
+actions as `[0]`, `[1]`, ... and stages them into `_pending` for `lsp_confirm(N)`.
+Command-only or no-edit actions render as `[-]` and are excluded from the index.
+The `kind` filter narrows by LSP `CodeActionKind` prefix so an agent can ask
+for "just organize-imports" without scanning the full menu.
 
 Wave 3 merges mutation utilities and cuts replaced raw tools:
 
