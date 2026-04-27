@@ -26,6 +26,8 @@ A **standalone MCP server** that bridges the Language Server Protocol into Claud
 
 Plus `lsp_move_file`, `lsp_create_file`, `lsp_delete_file`, `lsp_implementation`, `lsp_declaration`, `lsp_type_hierarchy_supertypes`, `lsp_type_hierarchy_subtypes`, `lsp_inlay_hint`, `lsp_folding_range`, `lsp_range_formatting`, `lsp_code_lens`, `lsp_confirm` — full LSP surface. Tools are capability-gated at startup: if no server in the chain advertises the capability, the tool isn't registered, saving context tokens. `lsp_grep` is the bridge between `rg ctx` and semantic references: it finds identifier text candidates, asks the LSP what each occurrence binds to, then emits one-line buckets such as `arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 9 — def L44`. `lsp_symbols_at("L78")` can then bounce from that graph's last `samples`/refs, or use explicit `path:L78`, and expands all semantic symbols on that line.
 
+File arguments may be full paths, relative paths, or unique basenames. For example, `lsp_document_symbols(file_path="NodesWindow.cs")` resolves the file under active workspaces; if the basename is not unique, the tool returns the matching paths and asks for a more specific path.
+
 ## Known LSP Plugins using cc-lsp-now
 
 - **[cc-ty-plugin](https://github.com/holo-q/cc-ty-plugin)** — Python via [ty](https://github.com/astral-sh/ty) (Astral), with basedpyright fallback for call hierarchy and `willRenameFiles`.

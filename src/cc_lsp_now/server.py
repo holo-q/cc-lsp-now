@@ -814,6 +814,7 @@ _LINE_POSITION_SKIP_WORDS = {
     "const",
     "continue",
     "default",
+    "def",
     "delegate",
     "do",
     "else",
@@ -822,24 +823,31 @@ _LINE_POSITION_SKIP_WORDS = {
     "explicit",
     "extern",
     "false",
+    "False",
     "finally",
     "fixed",
+    "from",
     "for",
     "foreach",
     "get",
     "if",
     "implicit",
+    "import",
     "in",
     "interface",
     "internal",
     "is",
+    "lambda",
     "lock",
     "namespace",
     "new",
+    "None",
+    "nonlocal",
     "null",
     "operator",
     "out",
     "override",
+    "pass",
     "params",
     "partial",
     "private",
@@ -858,6 +866,7 @@ _LINE_POSITION_SKIP_WORDS = {
     "this",
     "throw",
     "true",
+    "True",
     "try",
     "typeof",
     "unsafe",
@@ -867,6 +876,8 @@ _LINE_POSITION_SKIP_WORDS = {
     "void",
     "volatile",
     "while",
+    "with",
+    "yield",
 }
 
 
@@ -979,6 +990,101 @@ class AmbiguousSymbol(Exception):
         self.matches = matches
 
 
+class AmbiguousFilePath(ValueError):
+    def __init__(self, query: str, matches: list[str]):
+        super().__init__(query)
+        self.query = query
+        self.matches = matches
+
+    def __str__(self) -> str:
+        return _file_path_error(self)
+
+
+def _file_path_error(e: AmbiguousFilePath) -> str:
+    lines = [f"Multiple files match {e.query!r} — pass a more specific path:"]
+    lines.extend(f"  {match}" for match in e.matches[:50])
+    if len(e.matches) > 50:
+        lines.append(f"  ... {len(e.matches) - 50} more")
+    return "\n".join(lines)
+
+
+def _file_search_roots() -> list[Path]:
+    roots: list[Path] = []
+    for client in _chain_clients:
+        if client is not None:
+            roots.extend(Path(folder) for folder in client.workspace_folders)
+    roots.extend(Path(path) for path in _pending_workspace_adds)
+    roots.append(Path(os.environ.get("LSP_ROOT", os.getcwd())))
+    roots.append(Path(os.getcwd()))
+
+    seen: set[str] = set()
+    resolved_roots: list[Path] = []
+    for root in roots:
+        try:
+            resolved = root.expanduser().resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen or not resolved.exists():
+            continue
+        seen.add(key)
+        resolved_roots.append(resolved)
+    return resolved_roots
+
+
+def _find_file_by_name(query: str) -> list[str]:
+    exclude_names = _parse_warmup_exclude()
+    matches: list[str] = []
+    seen: set[str] = set()
+    for root in _file_search_roots():
+        try:
+            candidates = [root] if root.is_file() else root.rglob(query)
+        except OSError:
+            continue
+        for path in candidates:
+            if not path.is_file():
+                continue
+            if path.name != query:
+                continue
+            parent = root.parent if root.is_file() else root
+            if _is_excluded(path, parent, exclude_names):
+                continue
+            try:
+                resolved = str(path.resolve())
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            matches.append(resolved)
+    return sorted(matches)
+
+
+def _resolve_file_path(file_path: str, *, must_exist: bool = True) -> str:
+    raw = file_path.strip()
+    if not raw:
+        raise ValueError("File path is required.")
+
+    path = Path(raw).expanduser()
+    if path.exists():
+        return str(path.resolve())
+
+    has_path_part = path.is_absolute() or len(path.parts) > 1
+    if has_path_part:
+        if must_exist:
+            raise ValueError(f"File not found: {raw}")
+        return str(path.resolve())
+
+    matches = _find_file_by_name(raw)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise AmbiguousFilePath(raw, matches)
+    if must_exist:
+        raise ValueError(f"File {raw!r} not found under active workspaces.")
+    return str(path.resolve())
+
+
 async def _resolve(
     file_path: str,
     symbol: str = "",
@@ -992,6 +1098,7 @@ async def _resolve(
     3. Multiple matches + line → disambiguate by closest line
     4. Multiple matches, no line → raise AmbiguousSymbol with all matches
     """
+    file_path = _resolve_file_path(file_path)
     uri = file_uri(file_path)
 
     if not symbol and line > 0:
@@ -1150,7 +1257,8 @@ def _semantic_grep_paths(file_path: str, pattern: str, roots: list[str], max_fil
         for raw in (p.strip() for p in file_path.split(",")):
             if not raw:
                 continue
-            paths.extend(_candidate_scan_paths(Path(raw).expanduser(), pattern, max_files - len(paths)))
+            resolved = _resolve_file_path(raw)
+            paths.extend(_candidate_scan_paths(Path(resolved).expanduser(), pattern, max_files - len(paths)))
             if len(paths) >= max_files:
                 break
         return paths
@@ -1451,21 +1559,28 @@ def _resolve_path_hint(path_hint: str) -> str | None:
     path_hint = path_hint.strip()
     if not path_hint:
         return None
+    try:
+        return _resolve_file_path(path_hint)
+    except ValueError:
+        pass
     direct = Path(path_hint).expanduser()
-    if direct.exists():
-        return str(direct.resolve())
     matches = [entry.path for entry in _last_semantic_nav if entry.path == path_hint or Path(entry.path).name == path_hint]
     if len(set(matches)) == 1:
         return matches[0]
     suffix_matches = [entry.path for entry in _last_semantic_nav if entry.path.endswith(path_hint)]
     if len(set(suffix_matches)) == 1:
         return suffix_matches[0]
-    return str(direct.resolve()) if not direct.is_absolute() else str(direct)
+    if direct.is_absolute() or len(direct.parts) > 1:
+        return str(direct.resolve())
+    return None
 
 
 def _resolve_line_target(target: str, file_path: str = "", line: int = 0) -> tuple[str, int] | str:
     if file_path and line > 0:
-        return str(Path(file_path).expanduser().resolve()), line
+        try:
+            return _resolve_file_path(file_path), line
+        except ValueError as e:
+            return str(e)
 
     target = target.strip()
     if not target:
@@ -1486,7 +1601,13 @@ def _resolve_line_target(target: str, file_path: str = "", line: int = 0) -> tup
 
     explicit = re.fullmatch(r"(.+?):L?(\d+)", target)
     if explicit:
-        path = _resolve_path_hint(explicit.group(1))
+        path_hint = explicit.group(1)
+        try:
+            path = _resolve_file_path(path_hint)
+        except AmbiguousFilePath as e:
+            return str(e)
+        except ValueError:
+            path = _resolve_path_hint(path_hint)
         if path is None:
             return f"Could not resolve path in target {target!r}."
         return path, int(explicit.group(2))
@@ -1525,10 +1646,13 @@ def _resolve_paths(file_path: str, pattern: str) -> list[str] | str:
     Supports comma-separated file_path and glob patterns.
     Returns a list of paths on success, or an error string if inputs are empty.
     """
-    if file_path and "," in file_path:
-        return [p.strip() for p in file_path.split(",") if p.strip()]
-    if file_path:
-        return [file_path]
+    try:
+        if file_path and "," in file_path:
+            return [_resolve_file_path(p.strip()) for p in file_path.split(",") if p.strip()]
+        if file_path:
+            return [_resolve_file_path(file_path)]
+    except ValueError as e:
+        return str(e)
     if pattern:
         return sorted(glob.glob(pattern, recursive=True))
     return "Provide file_path or pattern."
@@ -1672,6 +1796,7 @@ async def lsp_signature_help(file_path: str, symbol: str = "", line: int = 0) ->
 
 async def _document_symbols_single(file_path: str) -> str:
     """Get symbols for a single file. Returns formatted tree or 'No symbols found.'."""
+    file_path = _resolve_file_path(file_path)
     uri = file_uri(file_path)
     result = await _request("textDocument/documentSymbol", {
         "textDocument": {"uri": uri},
@@ -1700,13 +1825,14 @@ async def lsp_document_symbols(file_path: str = "", pattern: str = "") -> str:
             body = await _document_symbols_single(p)
             sections.append(f"=== {p} ===\n{body}")
         return "\n\n".join(sections)
-    except LspError as e:
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
 async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool = True) -> str:
     """Format an entire document."""
     try:
+        file_path = _resolve_file_path(file_path)
         uri = file_uri(file_path)
         result = await _request("textDocument/formatting", {
             "textDocument": {"uri": uri},
@@ -1721,7 +1847,7 @@ async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool 
             "range": _range_str(e.get("range", {})),
             "newText": e.get("newText", ""),
         } for e in result], indent=2)
-    except LspError as e:
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
@@ -2209,6 +2335,7 @@ async def lsp_move_file(from_path: str = "", to_path: str = "", symbol: str = ""
             return "Provide from_path or symbol."
         if not to_path:
             return "to_path is required."
+        from_path = _resolve_file_path(from_path)
         return await _do_move([(from_path, to_path)])
     except (LspError, ValueError, OSError) as e:
         return f"LSP error: {e}"
@@ -2228,6 +2355,7 @@ async def lsp_move_files(from_paths: str, to_paths: str) -> str:
             return f"Mismatch: {len(froms)} from-paths vs {len(tos)} to-paths"
         if not froms:
             return "No files specified."
+        froms = [_resolve_file_path(path) for path in froms]
         return await _do_move(list(zip(froms, tos)))
     except (LspError, ValueError, OSError) as e:
         return f"LSP error: {e}"
@@ -2562,6 +2690,7 @@ async def lsp_call_hierarchy_outgoing(file_path: str, symbol: str = "", symbols:
 
 async def _diagnostics_single(file_path: str) -> str:
     """Get diagnostics for a single file. Returns formatted lines or '(clean)'."""
+    file_path = _resolve_file_path(file_path)
     uri = file_uri(file_path)
     diagnostics = []
     try:
@@ -2606,7 +2735,7 @@ async def lsp_diagnostics(file_path: str = "", pattern: str = "") -> str:
             body = await _diagnostics_single(p)
             sections.append(f"=== {p} ===\n{body}")
         return "\n\n".join(sections)
-    except LspError as e:
+    except (LspError, ValueError) as e:
         return f"LSP error: {e}"
 
 
@@ -2982,6 +3111,7 @@ async def lsp_inlay_hint(file_path: str, symbol: str = "", line: int = 0) -> str
     Type (1) or Parameter (2).
     """
     try:
+        file_path = _resolve_file_path(file_path)
         uri = file_uri(file_path)
         # Whole-file path: no symbol/line given — skip _resolve and scan everything.
         if not symbol and line == 0:
@@ -3050,6 +3180,7 @@ async def _folding_range_single(file_path: str) -> str:
     """Folding regions for a single file. Each region reports its 1-based line
     span and its classifying kind (``comment`` / ``imports`` / ``region``).
     """
+    file_path = _resolve_file_path(file_path)
     uri = file_uri(file_path)
     result = await _request("textDocument/foldingRange", {
         "textDocument": {"uri": uri},
@@ -3100,6 +3231,7 @@ async def lsp_range_formatting(
     — the server clamps it to the actual line length.
     """
     try:
+        file_path = _resolve_file_path(file_path)
         uri = file_uri(file_path)
         result = await _request("textDocument/rangeFormatting", {
             "textDocument": {"uri": uri},
@@ -3125,6 +3257,7 @@ async def lsp_range_formatting(
 async def lsp_code_lens(file_path: str) -> str:
     """List code lenses (inline actionable hints: run/debug/references/etc) for a file."""
     try:
+        file_path = _resolve_file_path(file_path)
         uri = file_uri(file_path)
         result = await _request("textDocument/codeLens", {
             "textDocument": {"uri": uri},
@@ -3154,6 +3287,7 @@ async def lsp_create_file(file_path: str) -> str:
     ``_apply_candidate`` after ``lsp_confirm()`` commits the edits.
     """
     try:
+        file_path = _resolve_file_path(file_path, must_exist=False)
         uri = file_uri(file_path)
         result = await _request(
             "workspace/willCreateFiles",
@@ -3194,6 +3328,7 @@ async def lsp_delete_file(file_path: str) -> str:
     edits land so re-confirming is idempotent.
     """
     try:
+        file_path = _resolve_file_path(file_path)
         uri = file_uri(file_path)
         result = await _request(
             "workspace/willDeleteFiles",

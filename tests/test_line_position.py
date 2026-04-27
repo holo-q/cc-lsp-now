@@ -1,7 +1,8 @@
 from pathlib import Path
+import shutil
 import unittest
 
-from cc_lsp_now.server import _fallback_position_on_line, _symbols_on_line
+from cc_lsp_now.server import _fallback_position_on_line, _resolve_file_path, _resolve_line_target, _symbols_on_line
 
 
 class LinePositionTests(unittest.TestCase):
@@ -73,6 +74,42 @@ class LinePositionTests(unittest.TestCase):
 
         self.assertEqual(hits[0][1], {"line": 2, "character": 21})
         self.assertEqual(hits[0][3], "GetOutputTexture")
+
+    def test_bare_file_name_resolves_when_unique_under_workspace(self) -> None:
+        fixture = Path("tmp/test_file_resolution/UniqueResolverFixture.cs")
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text("class UniqueResolverFixture {}\n", encoding="utf-8")
+        self.addCleanup(lambda: shutil.rmtree(fixture.parent, ignore_errors=True))
+
+        self.assertEqual(_resolve_file_path("UniqueResolverFixture.cs"), str(fixture.resolve()))
+
+    def test_bare_file_name_reports_ambiguous_matches(self) -> None:
+        root = Path("tmp/test_file_resolution_ambiguous")
+        first = root / "a" / "DuplicateResolverFixture.cs"
+        second = root / "b" / "DuplicateResolverFixture.cs"
+        first.parent.mkdir(parents=True, exist_ok=True)
+        second.parent.mkdir(parents=True, exist_ok=True)
+        first.write_text("class A {}\n", encoding="utf-8")
+        second.write_text("class B {}\n", encoding="utf-8")
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+
+        with self.assertRaisesRegex(ValueError, "Multiple files match"):
+            _resolve_file_path("DuplicateResolverFixture.cs")
+
+    def test_explicit_line_target_reports_ambiguous_bare_file_name(self) -> None:
+        root = Path("tmp/test_line_target_ambiguous")
+        first = root / "a" / "AmbiguousLineFixture.cs"
+        second = root / "b" / "AmbiguousLineFixture.cs"
+        first.parent.mkdir(parents=True, exist_ok=True)
+        second.parent.mkdir(parents=True, exist_ok=True)
+        first.write_text("class A {}\n", encoding="utf-8")
+        second.write_text("class B {}\n", encoding="utf-8")
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+
+        result = _resolve_line_target("AmbiguousLineFixture.cs:L1")
+
+        self.assertIsInstance(result, str)
+        self.assertIn("Multiple files match", result)
 
 
 if __name__ == "__main__":
