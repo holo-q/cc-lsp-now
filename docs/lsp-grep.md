@@ -67,5 +67,5 @@ The output is the same one-line semantic-bucket shape, but for every identifier
 on that source line. On a function declaration this intentionally includes the
 function name and all arguments, so the model can hop from a sample line into the
 local symbol graph without first doing a separate text search. This graph memory
-is the pattern later tools such as `lsp_symbol`, `lsp_goto`, and `lsp_refs`
-should reuse.
+is also reused by `lsp_symbol`, `lsp_goto`, and `lsp_refs`, which accept graph
+indices such as `[0]` from the previous semantic result.

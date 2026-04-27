@@ -30,9 +30,9 @@ Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations ->
 | `lsp_session` | Inspect, add, and warm workspaces and LSP sessions. |
 | `lsp_confirm` | Commit the currently staged edit transaction. |
 
-`lsp_grep` and `lsp_symbols_at` are the first implemented pieces of this
-surface. They already preserve a semantic graph between calls, which is the
-pattern the rest of the tools should follow.
+`lsp_grep`, `lsp_symbols_at`, `lsp_symbol`, `lsp_goto`, and `lsp_refs` are the
+first implemented pieces of this surface. They preserve semantic graph context
+between calls, which is the pattern the rest of the tools should follow.
 
 ## Raw Tool Cut Map
 
@@ -79,7 +79,7 @@ operator around them.
 
 ## Implementation Waves
 
-Wave 1 builds the core node operators:
+Wave 1 built the core node operators:
 
 - `lsp_symbol`
 - `lsp_goto`

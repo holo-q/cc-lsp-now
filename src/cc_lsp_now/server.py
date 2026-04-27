@@ -91,6 +91,7 @@ _pending: PendingBuffer | None = None
 # compact samples field into the referenced line without repeating the path.
 _last_semantic_nav: list["SemanticNavEntry"] = []
 _last_semantic_nav_query: str = ""
+_last_semantic_groups: list["SemanticGrepGroup"] = []
 
 
 @dataclass
@@ -139,6 +140,17 @@ class SemanticNavEntry:
     group_index: int
     name: str
     kind: str
+
+
+@dataclass
+class SemanticTarget:
+    uri: str
+    pos: dict
+    path: str
+    line: int
+    character: int
+    name: str = ""
+    group: SemanticGrepGroup | None = None
 
 
 def _set_pending(kind: str, candidates: list[Candidate], description: str) -> None:
@@ -1506,6 +1518,8 @@ def _format_semantic_grep_group(index: int, group: SemanticGrepGroup) -> str:
 def _record_semantic_nav_context(query: str, groups: list[SemanticGrepGroup]) -> None:
     """Remember the last semantic graph so a later bare ``L78`` has context."""
     global _last_semantic_nav_query
+    _last_semantic_groups.clear()
+    _last_semantic_groups.extend(groups)
     _last_semantic_nav.clear()
     _last_semantic_nav_query = query
     seen: set[tuple[str, int, int, int]] = set()
@@ -1553,6 +1567,99 @@ def _nav_context_summary(entries: list[SemanticNavEntry]) -> str:
     if len(entries) > 20:
         lines.append(f"  ... {len(entries) - 20} more")
     return "\n".join(lines)
+
+
+def _graph_target_from_index(raw_index: str) -> SemanticTarget | str:
+    if not _last_semantic_groups:
+        return "No previous semantic graph. Run lsp_grep/lsp_symbols_at first or pass file_path+symbol."
+    index = int(raw_index)
+    if index < 0 or index >= len(_last_semantic_groups):
+        return f"Graph index [{index}] not found in last semantic graph for {_last_semantic_nav_query!r}."
+    group = _last_semantic_groups[index]
+    if not group.hits:
+        return f"Graph index [{index}] has no source hits."
+    hit = group.hits[0]
+    return SemanticTarget(
+        uri=hit.uri,
+        pos=hit.pos,
+        path=hit.path,
+        line=hit.line + 1,
+        character=hit.character,
+        name=group.name,
+        group=group,
+    )
+
+
+def _line_text(path: str, line: int) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[line - 1].strip()
+    except (OSError, IndexError):
+        return ""
+
+
+def _identifier_at_position(path: str, pos: dict) -> str:
+    try:
+        line_text = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[pos.get("line", 0)]
+    except (OSError, IndexError):
+        return ""
+    character = pos.get("character", 0)
+    search_text = _identifier_search_region(line_text)
+    fallback = ""
+    for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", search_text):
+        name = match.group(0)
+        if name in _LINE_POSITION_SKIP_WORDS:
+            continue
+        start = _py_index_to_utf16_units(line_text, match.start())
+        end = _py_index_to_utf16_units(line_text, match.end())
+        if start <= character <= end:
+            return name
+        if not fallback and start >= character:
+            fallback = name
+    return fallback
+
+
+def _target_from_resolved_uri(uri: str, pos: dict, name: str = "") -> SemanticTarget:
+    path = _uri_to_path(uri)
+    return SemanticTarget(
+        uri=uri,
+        pos=pos,
+        path=path,
+        line=pos.get("line", 0) + 1,
+        character=pos.get("character", 0),
+        name=name or _identifier_at_position(path, pos),
+    )
+
+
+async def _resolve_semantic_target(
+    target: str = "",
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+) -> SemanticTarget | str:
+    target = target.strip()
+    if target:
+        graph_index = re.fullmatch(r"\[?(\d+)\]?", target)
+        if graph_index:
+            return _graph_target_from_index(graph_index.group(1))
+
+        resolved_line = _resolve_line_target(target)
+        if isinstance(resolved_line, tuple):
+            path, target_line = resolved_line
+            uri = file_uri(path)
+            pos = await _position_for_line(path, uri, target_line)
+            return _target_from_resolved_uri(uri, pos)
+        return resolved_line
+
+    if file_path or symbol or line > 0:
+        try:
+            uri, pos = await _resolve(file_path, symbol, line)
+            return _target_from_resolved_uri(uri, pos, symbol)
+        except AmbiguousSymbol as e:
+            return _ambiguous_msg(e)
+        except (LspError, ValueError) as e:
+            return f"LSP error: {e}"
+
+    return "Provide target, or file_path with symbol/line."
 
 
 def _resolve_path_hint(path_hint: str) -> str | None:
@@ -2285,7 +2392,7 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
         if warning:
             lines.append("")
             lines.append(warning)
-            lines.append("Options: (1) pre-warm importer files via lsp_hover, (2) lsp_add_workspace on the project, (3) fall back to regex rewrite if LSP is unreliable here.")
+            lines.append("Options: (1) pre-warm importer files via lsp_symbol, (2) lsp_add_workspace on the project, (3) fall back to regex rewrite if LSP is unreliable here.")
 
     return "\n".join(lines)
 
@@ -2739,6 +2846,157 @@ async def lsp_diagnostics(file_path: str = "", pattern: str = "") -> str:
         return f"LSP error: {e}"
 
 
+async def lsp_symbol(target: str = "", file_path: str = "", symbol: str = "", line: int = 0) -> str:
+    """Inspect one semantic node.
+
+    Accepts a graph index from the last semantic result, explicit ``file:Lx``,
+    or ``file_path`` with ``symbol``/``line``. Returns the compact semantic
+    bucket plus hover/signature context when available.
+    """
+    resolved = await _resolve_semantic_target(target, file_path, symbol, line)
+    if isinstance(resolved, str):
+        return resolved
+    try:
+        group = await _semantic_group_for_target(resolved)
+        lines = [f"Target: {resolved.path}:L{resolved.line}:{resolved.character + 1}"]
+        text = _line_text(resolved.path, resolved.line)
+        if text:
+            lines.append(f"  {text}")
+        if group is not None:
+            _record_semantic_nav_context(group.name, [group])
+            lines.append(_format_semantic_grep_group(0, group))
+
+        try:
+            hover = await _request("textDocument/hover", {
+                "textDocument": {"uri": resolved.uri},
+                "position": resolved.pos,
+            }, uri=resolved.uri)
+        except LspError:
+            hover = None
+        hover_summary = _hover_text(hover)
+        if hover_summary:
+            lines.append(f"hover: {_compact_line(hover_summary, 220)}")
+
+        try:
+            signature = await _request("textDocument/signatureHelp", {
+                "textDocument": {"uri": resolved.uri},
+                "position": resolved.pos,
+            }, uri=resolved.uri)
+        except LspError:
+            signature = None
+        signature_summary = _format_signature_summary(signature)
+        if signature_summary:
+            lines.append(f"signature: {signature_summary}")
+
+        if len(lines) == 1:
+            lines.append("No semantic information available.")
+        return "\n".join(lines)
+    except (LspError, ValueError, RuntimeError) as e:
+        return f"LSP error: {e}"
+
+
+async def lsp_goto(
+    target: str = "",
+    mode: str = "all",
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+) -> str:
+    """Resolve destinations for one semantic node.
+
+    ``mode`` may be ``all``, ``def``, ``decl``, ``type``, or ``impl``.
+    """
+    resolved = await _resolve_semantic_target(target, file_path, symbol, line)
+    if isinstance(resolved, str):
+        return resolved
+
+    mode_key = mode.strip().lower() or "all"
+    method_map = {
+        "def": ("definition", "textDocument/definition"),
+        "definition": ("definition", "textDocument/definition"),
+        "decl": ("declaration", "textDocument/declaration"),
+        "declaration": ("declaration", "textDocument/declaration"),
+        "type": ("type", "textDocument/typeDefinition"),
+        "type_definition": ("type", "textDocument/typeDefinition"),
+        "impl": ("implementation", "textDocument/implementation"),
+        "implementation": ("implementation", "textDocument/implementation"),
+    }
+    if mode_key == "all":
+        requests = [
+            ("definition", "textDocument/definition"),
+            ("declaration", "textDocument/declaration"),
+            ("type", "textDocument/typeDefinition"),
+            ("implementation", "textDocument/implementation"),
+        ]
+    elif mode_key in method_map:
+        requests = [method_map[mode_key]]
+    else:
+        return "mode must be one of: all, def, decl, type, impl."
+
+    lines = [f"Target: {resolved.path}:L{resolved.line}:{resolved.character + 1}"]
+    found = False
+    for title, method in requests:
+        try:
+            result = await _request(method, {
+                "textDocument": {"uri": resolved.uri},
+                "position": resolved.pos,
+            }, uri=resolved.uri)
+        except LspError as e:
+            if mode_key != "all":
+                return f"LSP error: {e}"
+            continue
+        locs = _locations_from_lsp(result)
+        if not locs:
+            continue
+        found = True
+        lines.extend(_format_location_section(title, locs))
+
+    if not found:
+        lines.append("No destinations found.")
+    return "\n".join(lines)
+
+
+async def lsp_refs(
+    target: str = "",
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+    include_declaration: bool = True,
+    max_refs: int = 100,
+) -> str:
+    """Expand references for a known semantic node or graph index."""
+    resolved = await _resolve_semantic_target(target, file_path, symbol, line)
+    if isinstance(resolved, str):
+        return resolved
+    max_refs = max(1, min(max_refs, 500))
+    try:
+        result = await _request("textDocument/references", {
+            "textDocument": {"uri": resolved.uri},
+            "position": resolved.pos,
+            "context": {"includeDeclaration": include_declaration},
+        }, uri=resolved.uri)
+        locs = _locations_from_lsp(result)
+        if not locs:
+            return "No references found."
+
+        group = await _semantic_group_for_target(resolved)
+        if group is not None:
+            group.reference_locs = locs
+            _record_semantic_nav_context(group.name, [group])
+            label = f"{group.kind} {group.name}"
+        else:
+            label = resolved.name or "symbol"
+
+        lines = [f"References for {label}: {len(locs)}"]
+        for loc in locs[:max_refs]:
+            lines.append(f"  {_format_location_with_context(loc)}")
+        if len(locs) > max_refs:
+            lines.append(f"... {len(locs) - max_refs} more; raise max_refs to unfold.")
+        return "\n".join(lines)
+    except (LspError, ValueError, RuntimeError) as e:
+        return f"LSP error: {e}"
+
+
 async def lsp_hover(file_path: str, symbol: str = "", symbols: str = "", line: int = 0) -> str:
     """Get type info and docs for a symbol. Pass symbol name or line number.
     Use symbols (comma-separated) to batch multiple lookups at once."""
@@ -2885,6 +3143,56 @@ async def _fill_reference_locs(group: SemanticGrepGroup) -> None:
         group.reference_locs = _locations_from_lsp(refs)
     except LspError:
         group.reference_locs = []
+
+
+async def _semantic_group_for_target(target: SemanticTarget) -> SemanticGrepGroup | None:
+    if target.group is not None:
+        if not target.group.reference_locs:
+            await _fill_reference_locs(target.group)
+        return target.group
+    name = target.name or _identifier_at_position(target.path, target.pos)
+    if not name:
+        return None
+    hit = SemanticGrepHit(
+        path=target.path,
+        line=target.pos.get("line", 0),
+        character=target.pos.get("character", 0),
+        line_text=_line_text(target.path, target.line),
+        uri=target.uri,
+        pos=target.pos,
+    )
+    group = await _semantic_group_for_hit(name, hit, {})
+    await _fill_reference_locs(group)
+    return group
+
+
+def _format_location_with_context(loc: dict) -> str:
+    path = _uri_to_path(loc.get("uri", ""))
+    start = loc.get("range", {}).get("start", {})
+    line = start.get("line", 0) + 1
+    snippet = _line_text(path, line)
+    if snippet:
+        return _compact_line(f"{Path(path).name}:L{line}  {snippet}", 220)
+    return f"{Path(path).name}:L{line}  {path}"
+
+
+def _format_location_section(title: str, locs: list[dict]) -> list[str]:
+    if not locs:
+        return []
+    lines = [f"{title}:"]
+    lines.extend(f"  {_format_location_with_context(loc)}" for loc in locs)
+    return lines
+
+
+def _format_signature_summary(result: Any) -> str:
+    if not result or not isinstance(result, dict) or not result.get("signatures"):
+        return ""
+    signatures = result.get("signatures", [])
+    active_sig = result.get("activeSignature", 0)
+    if active_sig < 0 or active_sig >= len(signatures):
+        active_sig = 0
+    label = str(signatures[active_sig].get("label", "")).strip()
+    return _compact_line(label, 220)
 
 
 async def lsp_grep(
@@ -3346,14 +3654,12 @@ async def lsp_delete_file(file_path: str) -> str:
 
 _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "diagnostics": (lsp_diagnostics, "textDocument/diagnostic"),
-    "hover": (lsp_hover, "textDocument/hover"),
-    "definition": (lsp_definition, "textDocument/definition"),
-    "references": (lsp_references, "textDocument/references"),
     "grep": (lsp_grep, "cc-lsp-now/grep"),
     "symbols_at": (lsp_symbols_at, "cc-lsp-now/symbols_at"),
-    "type_definition": (lsp_type_definition, "textDocument/typeDefinition"),
+    "symbol": (lsp_symbol, "cc-lsp-now/symbol"),
+    "goto": (lsp_goto, "cc-lsp-now/goto"),
+    "refs": (lsp_refs, "cc-lsp-now/refs"),
     "completion": (lsp_completion, "textDocument/completion"),
-    "signature_help": (lsp_signature_help, "textDocument/signatureHelp"),
     "document_symbols": (lsp_document_symbols, "textDocument/documentSymbol"),
     "formatting": (lsp_formatting, "textDocument/formatting"),
     "rename": (lsp_rename, "textDocument/rename"),
@@ -3362,8 +3668,6 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "code_actions": (lsp_code_actions, "textDocument/codeAction"),
     "call_hierarchy_incoming": (lsp_call_hierarchy_incoming, "callHierarchy/incomingCalls"),
     "call_hierarchy_outgoing": (lsp_call_hierarchy_outgoing, "callHierarchy/outgoingCalls"),
-    "implementation": (lsp_implementation, "textDocument/implementation"),
-    "declaration": (lsp_declaration, "textDocument/declaration"),
     "type_hierarchy_supertypes": (lsp_type_hierarchy_supertypes, "typeHierarchy/supertypes"),
     "type_hierarchy_subtypes": (lsp_type_hierarchy_subtypes, "typeHierarchy/subtypes"),
     "inlay_hint": (lsp_inlay_hint, "textDocument/inlayHint"),
@@ -3409,14 +3713,12 @@ def _wrap_with_header(func: Any, method: str) -> Any:
 # None means the tool is always enabled (e.g. lsp_confirm is client-side).
 TOOL_CAPABILITIES: dict[str, str | None] = {
     "diagnostics": "diagnosticProvider",
-    "hover": "hoverProvider",
-    "definition": "definitionProvider",
-    "references": "referencesProvider",
     "grep": "definitionProvider",
     "symbols_at": "definitionProvider",
-    "type_definition": "typeDefinitionProvider",
+    "symbol": "definitionProvider",
+    "goto": "definitionProvider",
+    "refs": "referencesProvider",
     "completion": "completionProvider",
-    "signature_help": "signatureHelpProvider",
     "document_symbols": "documentSymbolProvider",
     "formatting": "documentFormattingProvider",
     "rename": "renameProvider",
@@ -3425,8 +3727,6 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "call_hierarchy_incoming": "callHierarchyProvider",
     "call_hierarchy_outgoing": "callHierarchyProvider",
     "move_file": "workspace.fileOperations.willRename",
-    "implementation": "implementationProvider",
-    "declaration": "declarationProvider",
     "type_hierarchy_supertypes": "typeHierarchyProvider",
     "type_hierarchy_subtypes": "typeHierarchyProvider",
     "inlay_hint": "inlayHintProvider",

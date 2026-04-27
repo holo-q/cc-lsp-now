@@ -6,6 +6,7 @@ from cc_lsp_now.server import (
     SemanticGrepHit,
     _context_breadcrumb,
     _format_semantic_grep_group,
+    _graph_target_from_index,
     _identifier_hits_on_line,
     _record_semantic_nav_context,
     _resolve_line_target,
@@ -164,6 +165,35 @@ class LspGrepTests(unittest.TestCase):
             _resolve_line_target("L78"),
             ("/repo/src/ComfyNodeRenderer.cs", 78),
         )
+
+    def test_graph_index_resolves_through_last_semantic_context(self) -> None:
+        hit = SemanticGrepHit(
+            path="/repo/src/ComfyNodeRenderer.cs",
+            line=43,
+            character=12,
+            line_text="Render(RenderContext ctx)",
+            uri="file:///repo/src/ComfyNodeRenderer.cs",
+            pos={"line": 43, "character": 12},
+        )
+        group = SemanticGrepGroup(
+            key="k",
+            name="ctx",
+            kind="arg",
+            type_text="RenderContext",
+            definition_path="/repo/src/ComfyNodeRenderer.cs",
+            definition_line=44,
+            definition_character=12,
+            hits=[hit],
+        )
+        _record_semantic_nav_context("ctx", [group])
+
+        target = _graph_target_from_index("0")
+
+        if isinstance(target, str):
+            self.fail(target)
+        self.assertEqual(target.name, "ctx")
+        self.assertEqual(target.path, "/repo/src/ComfyNodeRenderer.cs")
+        self.assertEqual(target.line, 44)
 
 
 if __name__ == "__main__":

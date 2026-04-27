@@ -4,18 +4,21 @@ A **standalone MCP server** that bridges the Language Server Protocol into Claud
 
 ## Tools
 
-The target public surface is documented in [docs/tool-surface.md](docs/tool-surface.md). The first implemented graph operators are:
+The target public surface is documented in [docs/tool-surface.md](docs/tool-surface.md). Implemented graph operators include:
 
 | Tool | Purpose |
 |------|---------|
 | `lsp_grep` | Text search plus semantic binding; groups identifier hits by symbol identity. |
 | `lsp_symbols_at` | Expands all semantic symbols on a line, including function args, with last-graph navigation. |
+| `lsp_symbol` | Inspects one semantic node from a graph index, `file:Lx`, or `file_path` plus `symbol`/`line`. |
+| `lsp_goto` | Resolves definition/declaration/type/implementation destinations through one command. |
+| `lsp_refs` | Expands references for a semantic node and records them as the next graph context. |
 | `lsp_diagnostics` | Reports diagnostics as the main verifier surface. |
 | `lsp_rename` | Previews and stages semantic renames before `lsp_confirm`. |
 | `lsp_move_file` / `lsp_move_files` | Preview file moves and import/update edits before `lsp_confirm`. |
 | `lsp_confirm` | Commits the currently staged edit transaction. |
 
-The remaining protocol-shaped tools are transitional. As workflow tools land (`lsp_symbol`, `lsp_goto`, `lsp_refs`, `lsp_outline`, `lsp_calls`, `lsp_fix`, `lsp_session`, `lsp_move`, `lsp_format`), the raw LSP command wrappers are removed from the public registry instead of kept as aliases.
+The remaining protocol-shaped tools are transitional. As workflow tools land (`lsp_outline`, `lsp_calls`, `lsp_fix`, `lsp_session`, `lsp_move`, `lsp_format`), the raw LSP command wrappers are removed from the public registry instead of kept as aliases.
 
 File arguments may be full paths, relative paths, or unique basenames. For example, `lsp_document_symbols(file_path="NodesWindow.cs")` resolves the file under active workspaces; if the basename is not unique, the tool returns the matching paths and asks for a more specific path.
 
@@ -27,17 +30,17 @@ File arguments may be full paths, relative paths, or unique basenames. For examp
 
 ## How the model calls the tools
 
-**Symbol names, not line/col.** The bridge resolves names via `documentSymbol` with a text-search fallback:
+**Semantic targets, not raw protocol calls.** Tools accept graph indices, `file:Lx`, or `file_path` plus `symbol`/`line`:
 
 ```
-lsp_hover(file_path="src/app.py", symbol="OmfiApp")
-lsp_definition(file_path="src/app.py", symbol="workflow", line=476)   # disambiguate
+lsp_symbol(file_path="src/app.py", symbol="OmfiApp")
+lsp_goto(file_path="src/app.py", symbol="workflow", line=476, mode="all")
+lsp_refs(target="[0]")   # from the previous lsp_grep/lsp_symbols_at graph
 ```
 
 **Batching.** Multiple symbols in one file, multiple files in one call:
 
 ```
-lsp_hover(file_path="src/app.py", symbols="Foo,Bar,Baz")
 lsp_diagnostics(file_path="a.py,b.py,c.py")
 lsp_diagnostics(pattern="src/**/*.py")
 ```

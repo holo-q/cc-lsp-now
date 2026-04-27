@@ -22,9 +22,9 @@ import sys
 
 REDIRECT_MESSAGE = (
     "The built-in LSP tool is disabled in favor of the cc-lsp-now MCP tools "
-    "(lsp_hover, lsp_definition, lsp_references, lsp_grep, lsp_symbols_at, lsp_rename, "
+    "(lsp_symbol, lsp_goto, lsp_refs, lsp_grep, lsp_symbols_at, lsp_rename, "
     "lsp_code_actions, lsp_diagnostics, lsp_document_symbols, lsp_completion, "
-    "lsp_signature_help, lsp_type_definition, lsp_call_hierarchy_incoming, "
+    "lsp_call_hierarchy_incoming, "
     "lsp_call_hierarchy_outgoing, lsp_prepare_rename). "
     "They accept symbol names directly (e.g. symbol='MyClass'), batch with commas "
     "(symbols='Foo,Bar'), and route through the primary LSP server with automatic "
