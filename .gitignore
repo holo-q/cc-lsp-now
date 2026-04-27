@@ -2,3 +2,4 @@ __pycache__/
 .venv/
 tmp/foo/
 tmp/foo_run/
+tmp/csharp-fixtures/
