@@ -654,6 +654,12 @@ def _raw_json(value: Any) -> str:
         return repr(value)
 
 
+def _compact_line(text: str, limit: int = 180) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def _severity_label(n: int) -> str:
     return SEVERITY_LABELS.get(n, f"Unknown({n})")
 
@@ -1258,8 +1264,7 @@ async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int 
         lines: list[str] = []
         for path, edits in edit_files:
             lines.append(f"{path}: {len(edits)} edit(s)")
-            for e in edits:
-                lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
+            lines.extend(_format_text_edit_preview(path, edits))
 
         title = f"rename {symbol or f'line {line}'} → {new_name} ({len(edit_files)} file(s), {total_edits} edit(s))"
         _set_pending(
@@ -1271,6 +1276,8 @@ async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int 
             0,
             f"Preview: {len(edit_files)} file(s), {total_edits} edit(s). Call lsp_confirm(0) to commit the rename.",
         )
+        lines.insert(1, "Target:")
+        lines[2:2] = [f"  {line}" for line in _line_snapshot(file_path, pos).splitlines()]
         return "\n".join(lines)
     except AmbiguousSymbol as e:
         return _ambiguous_msg(e)
@@ -1336,6 +1343,57 @@ def _apply_text_edits(text: str, edits: list[dict]) -> str:
             continue
         result = result[:start_offset] + edit["newText"] + result[end_offset:]
     return result
+
+
+def _format_text_edit_preview(path: str, edits: list[dict]) -> list[str]:
+    """Render final before/after lines for a set of LSP TextEdits.
+
+    Roslyn often returns minimal edits such as ``Outpu -> Artifac`` for
+    ``GetOutputTexture -> GetArtifactTexture``. Showing only that raw span is
+    correct but misleading; this preview applies the edits in-memory and prints
+    the resulting line so the agent can confirm the semantic effect before
+    calling ``lsp_confirm``.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [
+            f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}"
+            for e in edits
+        ]
+
+    after_text = _apply_text_edits(text, edits)
+    before_lines = text.splitlines()
+    after_lines = after_text.splitlines()
+    touched_lines = sorted({
+        e.get("range", {}).get("start", {}).get("line", -1)
+        for e in edits
+    })
+
+    lines: list[str] = []
+    for line_idx in touched_lines:
+        if line_idx < 0:
+            continue
+        before = before_lines[line_idx] if line_idx < len(before_lines) else ""
+        after = after_lines[line_idx] if line_idx < len(after_lines) else ""
+        line_edits = [
+            e for e in edits
+            if e.get("range", {}).get("start", {}).get("line", -1) == line_idx
+        ]
+        raw = ", ".join(
+            f"{_range_str(e.get('range', {}))} → {e.get('newText', '')!r}"
+            for e in line_edits
+        )
+        if before == after:
+            lines.append(f"  L{line_idx + 1}: {raw}")
+            continue
+        lines.extend([
+            f"  L{line_idx + 1}:",
+            f"    - {_compact_line(before)}",
+            f"    + {_compact_line(after)}",
+            f"    edit: {raw}",
+        ])
+    return lines
 
 
 def _apply_workspace_edit(edit: dict) -> list[str]:
