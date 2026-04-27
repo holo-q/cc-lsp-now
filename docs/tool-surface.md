@@ -31,9 +31,10 @@ Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations ->
 | `lsp_confirm` | Commit the currently staged edit transaction. |
 
 `lsp_grep`, `lsp_symbols_at`, `lsp_symbol`, `lsp_goto`, `lsp_refs`,
-`lsp_outline`, `lsp_calls`, and `lsp_session` are the implemented pieces of
-this surface today. The graph-aware tools preserve semantic graph context
-between calls, which is the pattern the rest of the tools should follow.
+`lsp_outline`, `lsp_calls`, `lsp_session`, and `lsp_fix` are the implemented
+pieces of this surface today. The graph-aware tools preserve semantic graph
+context between calls, which is the pattern the rest of the tools should
+follow.
 
 ## Raw Tool Cut Map
 
@@ -103,8 +104,9 @@ landing order is `outline → session → calls → fix`:
    propagation through call hierarchy edges, exercising the same nav-context
    recorder used by `lsp_grep` / `lsp_symbols_at`. Cuts both
    `lsp_call_hierarchy_incoming` and `lsp_call_hierarchy_outgoing`.
-4. `lsp_fix` — preview-and-stage mutation; depends on diagnostic-aware target
-   resolution and the `_pending` buffer used by `lsp_rename` / `lsp_move`.
+4. `lsp_fix` *(landed)* — preview-and-stage mutation; reuses diagnostic-aware
+   target resolution and the `_pending` buffer used by `lsp_rename` / `lsp_move`.
+   Cuts `lsp_code_actions` from the public registry.
 
 ### Public API shapes
 
@@ -166,7 +168,7 @@ async def lsp_fix(
 ```
 
 `lsp_fix` accepts the same target shapes as the rest of Wave 1/2, lists the
-line's diagnostics as `[d0]`, `[d1]`, ..., then numbers the edit-backed code
+line's diagnostics as `(d0)`, `(d1)`, ..., then numbers the edit-backed code
 actions as `[0]`, `[1]`, ... and stages them into `_pending` for `lsp_confirm(N)`.
 Command-only or no-edit actions render as `[-]` and are excluded from the index.
 The `kind` filter narrows by LSP `CodeActionKind` prefix so an agent can ask

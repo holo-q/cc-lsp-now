@@ -163,6 +163,28 @@ class WaveTwoSurfaceTests(unittest.TestCase):
             )
         self._assert_wave_two_tool("fix", ["code_actions"])
 
+    def test_fix_capability_is_code_action_provider(self) -> None:
+        # Self-activating: as soon as ``fix`` lands in TOOL_CAPABILITIES the
+        # value must specifically be ``codeActionProvider`` — the same
+        # provider the raw ``code_actions`` tool gated on. The generic
+        # _assert_wave_two_tool only checks for *presence* of a capability
+        # entry — a None or wrong-key value would slip through it and
+        # silently disable gating for the whole fix surface, so the value
+        # itself needs its own pin (mirrors the calls capability pin).
+        if "fix" not in TOOL_CAPABILITIES:
+            self.skipTest(
+                "MISSING SOURCE HOOK: lsp_fix capability not yet wired. "
+                "docs/tool-surface.md Raw Tool Cut Map binds `fix` to "
+                "`codeActionProvider`."
+            )
+        self.assertEqual(
+            TOOL_CAPABILITIES["fix"],
+            "codeActionProvider",
+            "fix must gate on codeActionProvider — anything else "
+            "(None, definitionProvider, etc.) silently breaks capability "
+            "gating for servers that don't advertise code actions.",
+        )
+
     def test_session_replaces_info_workspaces_add_workspace(self) -> None:
         if "session" not in _ALL_TOOLS:
             self.skipTest(

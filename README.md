@@ -17,6 +17,7 @@ The target public surface is documented in [docs/tool-surface.md](docs/tool-surf
 | `lsp_calls` | Walks incoming/outgoing call edges from a graph node via `direction=in\|out\|both`. |
 | `lsp_session` | Inspects, adds, warms, and restarts workspaces/LSP sessions via `action=status\|add\|warm\|restart`. |
 | `lsp_diagnostics` | Reports diagnostics as the main verifier surface. |
+| `lsp_fix` | Lists code actions on a semantic target with line diagnostics; stages edit-backed actions for `lsp_confirm`. |
 | `lsp_rename` | Previews and stages semantic renames before `lsp_confirm`. |
 | `lsp_move_file` / `lsp_move_files` | Preview file moves and import/update edits before `lsp_confirm`. |
 | `lsp_confirm` | Commits the currently staged edit transaction. |

@@ -79,7 +79,7 @@ _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
-# Several tools (rename, code_actions, move_file, ...) now emit previews instead of
+# Several tools (rename, fix, move_file, ...) now emit previews instead of
 # applying edits immediately. The preview populates a module-level buffer that
 # the agent can then commit via `lsp_confirm(index)`.
 #
@@ -2525,45 +2525,147 @@ async def lsp_prepare_rename(file_path: str, symbol: str = "", line: int = 0) ->
         return f"LSP error: {e}"
 
 
-async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> str:
-    """Get available code actions (quick fixes, refactorings). Pass symbol name or line number.
+def _diagnostic_sort_key(diagnostic: dict) -> tuple[int, int, str, str, str]:
+    rng = diagnostic.get("range", {})
+    start = rng.get("start", {}) if isinstance(rng, dict) else {}
+    return (
+        start.get("line", -1),
+        start.get("character", -1),
+        str(diagnostic.get("source", "")),
+        str(diagnostic.get("code", "")),
+        str(diagnostic.get("message", "")),
+    )
 
-    Also stages all returned actions into the module-level ``_pending`` buffer
-    so the agent can pick one by index via ``lsp_confirm(N)``. Each line in the
-    output is prefixed with ``[N]`` — that N is the index to pass to confirm.
+
+def _diagnostics_for_line(diagnostics: list[dict], line: int) -> list[dict]:
+    return sorted(
+        (
+            d for d in diagnostics
+            if d.get("range", {}).get("start", {}).get("line", -1) == line
+        ),
+        key=_diagnostic_sort_key,
+    )
+
+
+def _code_action_kind_matches(action_kind: str, kind_prefix: str) -> bool:
+    prefix = kind_prefix.strip()
+    return not prefix or action_kind.startswith(prefix)
+
+
+async def lsp_fix(
+    target: str = "",
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+    diagnostic_index: int = -1,
+    kind: str = "",
+) -> str:
+    """Surface code actions (quick fixes, refactorings) for one semantic target.
+
+    Workflow replacement for raw ``textDocument/codeAction`` (see
+    ``docs/tool-surface.md``). Resolves ``target`` via
+    ``_resolve_semantic_target`` (graph index ``[N]`` from the last semantic
+    result, bare ``Lxx`` from the last ``lsp_grep`` graph, ``file:Lx``, or
+    ``file_path``+``symbol``/``line``).
+
+    Diagnostics on the resolved line are read from the primary LSP client
+    and rendered as ``(d0)``, ``(d1)``, … so the agent can see the verifier
+    signal that motivates each fix. ``diagnostic_index`` selects which
+    diagnostic is forwarded as ``CodeActionContext.diagnostics`` (-1 = all
+    line diagnostics, the default). ``kind`` filters returned actions whose
+    ``CodeActionKind`` starts with the given prefix (e.g. ``quickfix``,
+    ``refactor.extract``).
+
+    Edit-backed actions are staged into the module-level ``_pending`` buffer
+    as ``CandidateKind.CODE_ACTION`` and numbered ``[0]``, ``[1]``, …; pick
+    one with ``lsp_confirm(N)`` to apply its WorkspaceEdit. Command-only or
+    no-edit actions render with a ``[-]`` marker and are not stageable —
+    they require a server-side execute that this surface deliberately does
+    not perform. If no edit-backed actions remain after filtering, any
+    previously staged buffer is cleared.
     """
+    resolved = await _resolve_semantic_target(target, file_path, symbol, line)
+    if isinstance(resolved, str):
+        return resolved
+
     try:
-        uri, pos = await _resolve(file_path, symbol, line)
         primary = await _get_client(0)
-        stored = primary.diagnostics.get(uri, [])
-        target_line = pos.get("line", 0)
-        range_diagnostics = [
-            d for d in stored
-            if d.get("range", {}).get("start", {}).get("line", -1) == target_line
-        ]
+        stored = primary.diagnostics.get(resolved.uri, [])
+        target_line = resolved.pos.get("line", 0)
+        line_diagnostics = _diagnostics_for_line(stored, target_line)
+
+        if diagnostic_index >= 0:
+            if diagnostic_index >= len(line_diagnostics):
+                _clear_pending()
+                return (
+                    f"diagnostic_index (d{diagnostic_index}) out of range; "
+                    f"line has {len(line_diagnostics)} diagnostic(s)."
+                )
+            ctx_diagnostics = [line_diagnostics[diagnostic_index]]
+        else:
+            ctx_diagnostics = line_diagnostics
+
+        sections: list[str] = []
+        head = f"Fix at {resolved.path}:L{resolved.line}"
+        if resolved.name:
+            head = f"{head} ({resolved.name})"
+        sections.append(head)
+
+        if line_diagnostics:
+            sections.append("diagnostics:")
+            for di, d in enumerate(line_diagnostics):
+                sev = _severity_label(d.get("severity", 0))
+                msg = d.get("message", "")
+                source = d.get("source", "")
+                code = d.get("code", "")
+                tag = f"[{source} {code}]" if source else (f"[{code}]" if code else "")
+                marker = "*" if (diagnostic_index == di or diagnostic_index < 0) else " "
+                sections.append(_compact_line(
+                    f"  (d{di}){marker} {sev}  {msg}  {tag}".rstrip(),
+                    240,
+                ))
+        else:
+            sections.append("diagnostics: (none on target line)")
+
+        request_range = {"start": resolved.pos, "end": resolved.pos}
+        if diagnostic_index >= 0 and ctx_diagnostics:
+            diag_range = ctx_diagnostics[0].get("range")
+            if isinstance(diag_range, dict) and "start" in diag_range and "end" in diag_range:
+                request_range = diag_range
+
+        context: dict[str, Any] = {"diagnostics": ctx_diagnostics}
+        kind_prefix = kind.strip()
+        if kind_prefix:
+            context["only"] = [kind_prefix]
 
         result = await _request("textDocument/codeAction", {
-            "textDocument": {"uri": uri},
-            "range": {"start": pos, "end": pos},
-            "context": {"diagnostics": range_diagnostics},
-        }, uri=uri)
+            "textDocument": {"uri": resolved.uri},
+            "range": request_range,
+            "context": context,
+        }, uri=resolved.uri)
+
         if not result:
             _clear_pending()
-            return "No code actions available."
+            sections.append("actions: (none)")
+            return "\n".join(sections)
 
-        lines = []
         action_candidates: list[Candidate] = []
+        action_lines: list[str] = []
+        filtered_out = 0
         for action in result:
+            action_kind = action.get("kind", "")
+            if not _code_action_kind_matches(action_kind, kind_prefix):
+                filtered_out += 1
+                continue
             title = action.get("title", "")
-            kind = action.get("kind", "")
             edit = action.get("edit")
             if edit:
                 idx = len(action_candidates)
-                parts = [f"[{idx}] {title}"]
+                parts = [f"  [{idx}] {title}"]
             else:
-                parts = [f"[-] {title}"]
-            if kind:
-                parts.append(f"[{kind}]")
+                parts = [f"  [-] {title}"]
+            if action_kind:
+                parts.append(f"[{action_kind}]")
             if edit:
                 n = len(edit.get("changes", {})) + len(edit.get("documentChanges", []))
                 parts.append(f"({n} file(s))")
@@ -2576,24 +2678,32 @@ async def lsp_code_actions(file_path: str, symbol: str = "", line: int = 0) -> s
                 parts.append("(command-only; not staged)")
             else:
                 parts.append("(no edit; not staged)")
-            lines.append(" ".join(parts))
+            action_lines.append(" ".join(parts))
+
+        sections.append("actions:")
+        if action_lines:
+            sections.extend(action_lines)
+        else:
+            sections.append("  (none matching filters)")
+        if kind_prefix and filtered_out:
+            sections.append(f"  ({filtered_out} hidden by kind={kind_prefix!r})")
 
         if action_candidates:
             _set_pending(
-                "code_action",
+                "fix",
                 action_candidates,
-                f"{len(action_candidates)} code action(s) at {_uri_to_path(uri)}:{target_line + 1}",
+                f"{len(action_candidates)} code action(s) at {resolved.path}:L{resolved.line}",
             )
-            lines.append("")
-            lines.append(f"Staged {len(action_candidates)} edit action(s). Call lsp_confirm(N) to apply.")
+            sections.append("")
+            sections.append(
+                f"Staged {len(action_candidates)} edit action(s). Call lsp_confirm(N) to apply."
+            )
         else:
             _clear_pending()
-            lines.append("")
-            lines.append("No edit-backed actions to stage.")
-        return "\n".join(lines)
-    except AmbiguousSymbol as e:
-        return _ambiguous_msg(e)
-    except (LspError, ValueError) as e:
+            sections.append("")
+            sections.append("No edit-backed actions to stage.")
+        return "\n".join(sections)
+    except (LspError, ValueError, RuntimeError) as e:
         return f"LSP error: {e}"
 
 
@@ -2826,7 +2936,7 @@ async def _session_restart(server: str) -> str:
 async def lsp_confirm(index: int = 0) -> str:
     """Apply one staged candidate from the preview buffer.
 
-    Companion to tools that stage previews (currently ``lsp_code_actions``
+    Companion to tools that stage previews (currently ``lsp_fix``,
     ``lsp_rename``, and ``lsp_move_file``). Index into the ``candidates`` list
     shown by the most recent preview. Clears ``_pending`` on success so the buffer is
     single-shot — a stale preview can't be re-committed after context drifts.
@@ -3898,7 +4008,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "rename": (lsp_rename, "textDocument/rename"),
     "prepare_rename": (lsp_prepare_rename, "textDocument/prepareRename"),
     "move_file": (lsp_move_file, "workspace/willRenameFiles"),
-    "code_actions": (lsp_code_actions, "textDocument/codeAction"),
+    "fix": (lsp_fix, "cc-lsp-now/fix"),
     "calls": (lsp_calls, "cc-lsp-now/calls"),
     "type_hierarchy_supertypes": (lsp_type_hierarchy_supertypes, "typeHierarchy/supertypes"),
     "type_hierarchy_subtypes": (lsp_type_hierarchy_subtypes, "typeHierarchy/subtypes"),
@@ -3953,7 +4063,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "formatting": "documentFormattingProvider",
     "rename": "renameProvider",
     "prepare_rename": "renameProvider",
-    "code_actions": "codeActionProvider",
+    "fix": "codeActionProvider",
     "calls": "callHierarchyProvider",
     "move_file": "workspace.fileOperations.willRename",
     "type_hierarchy_supertypes": "typeHierarchyProvider",
