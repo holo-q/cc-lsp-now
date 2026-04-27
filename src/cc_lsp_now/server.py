@@ -77,7 +77,7 @@ _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
-# Several tools (code_actions, move_file, ...) now emit previews instead of
+# Several tools (rename, code_actions, move_file, ...) now emit previews instead of
 # applying edits immediately. The preview populates a module-level buffer that
 # the agent can then commit via `lsp_confirm(index)`.
 #
@@ -1221,7 +1221,11 @@ async def lsp_formatting(file_path: str, tab_size: int = 4, insert_spaces: bool 
 
 
 async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int = 0) -> str:
-    """Rename a symbol across the workspace. Pass symbol name or line number."""
+    """Preview a symbol rename across the workspace. Pass symbol name or line number.
+
+    Stages the returned WorkspaceEdit under ``_pending``. Call ``lsp_confirm(0)``
+    to apply it.
+    """
     try:
         uri, pos = await _resolve(file_path, symbol, line)
         try:
@@ -1248,22 +1252,26 @@ async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int 
             )
             return f"No rename edits returned.\n\n{trace}"
 
+        edit_files = _collect_edit_files(result)
+        total_edits = sum(len(edits) for _, edits in edit_files)
+
         lines: list[str] = []
-        for change_uri, edits in result.get("changes", {}).items():
-            path = _uri_to_path(change_uri)
+        for path, edits in edit_files:
             lines.append(f"{path}: {len(edits)} edit(s)")
             for e in edits:
                 lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
 
-        for doc_change in result.get("documentChanges", []):
-            change_uri = doc_change.get("textDocument", {}).get("uri", "")
-            path = _uri_to_path(change_uri)
-            edits = doc_change.get("edits", [])
-            lines.append(f"{path}: {len(edits)} edit(s)")
-            for e in edits:
-                lines.append(f"  {_range_str(e.get('range', {}))} → {e.get('newText', '')!r}")
-
-        return "\n".join(lines) if lines else "No changes."
+        title = f"rename {symbol or f'line {line}'} → {new_name} ({len(edit_files)} file(s), {total_edits} edit(s))"
+        _set_pending(
+            CandidateKind.SYMBOL_RENAME.value,
+            [Candidate(kind=CandidateKind.SYMBOL_RENAME, title=title, edit=result)],
+            title,
+        )
+        lines.insert(
+            0,
+            f"Preview: {len(edit_files)} file(s), {total_edits} edit(s). Call lsp_confirm(0) to commit the rename.",
+        )
+        return "\n".join(lines)
     except AmbiguousSymbol as e:
         return _ambiguous_msg(e)
     except (LspError, ValueError) as e:
@@ -1273,29 +1281,46 @@ async def lsp_rename(file_path: str, new_name: str, symbol: str = "", line: int 
 def _apply_text_edits(text: str, edits: list[dict]) -> str:
     """Apply LSP TextEdits to a string. Edits are applied end-to-start to keep offsets valid.
 
+    LSP ``character`` offsets are UTF-16 code units, not Python string indexes.
+    Convert the line-relative UTF-16 position before slicing, or edits after
+    astral Unicode characters land in the wrong place.
+
     LSP allows a position with line == total_lines (one past the last line) to
     mean "end of file" — this is how pylance encodes full-document replacements
     for rename-driven edits. Previously we rejected such edits as out-of-range,
     silently dropping every import-rewrite in a move. Now we treat lines past
     the array as EOF.
     """
-    # Precompute line start offsets. Append a sentinel at len(text) so positions
-    # with line == len(line_starts) resolve to EOF (standard LSP semantics).
     line_starts = [0]
     for i, ch in enumerate(text):
         if ch == "\n":
             line_starts.append(i + 1)
-    line_starts.append(len(text))  # EOF sentinel
+
+    def _utf16_to_py_index(line_text: str, utf16_units: int) -> int:
+        if utf16_units <= 0:
+            return 0
+        consumed = 0
+        for idx, ch in enumerate(line_text):
+            next_consumed = consumed + len(ch.encode("utf-16-le")) // 2
+            if next_consumed > utf16_units:
+                return idx
+            consumed = next_consumed
+            if consumed == utf16_units:
+                return idx + 1
+        return len(line_text)
 
     def _offset(pos: dict) -> int | None:
         line = pos["line"]
         char = pos["character"]
-        if line < 0 or line >= len(line_starts):
+        if line < 0 or line > len(line_starts):
             return None
+        if line == len(line_starts):
+            return len(text)
         start = line_starts[line]
-        # Clamp character to end of this line (or len(text) for the sentinel).
         next_start = line_starts[line + 1] if line + 1 < len(line_starts) else len(text)
-        return min(start + char, next_start)
+        line_end = next_start - 1 if next_start > start and text[next_start - 1] == "\n" else next_start
+        line_text = text[start:line_end]
+        return start + _utf16_to_py_index(line_text, char)
 
     sorted_edits = sorted(
         edits,
@@ -1810,8 +1835,8 @@ async def lsp_confirm(index: int = 0) -> str:
     """Apply one staged candidate from the preview buffer.
 
     Companion to tools that stage previews (currently ``lsp_code_actions``
-    and ``lsp_move_file``). Index into the ``candidates`` list shown by the
-    most recent preview. Clears ``_pending`` on success so the buffer is
+    ``lsp_rename``, and ``lsp_move_file``). Index into the ``candidates`` list
+    shown by the most recent preview. Clears ``_pending`` on success so the buffer is
     single-shot — a stale preview can't be re-committed after context drifts.
     """
     global _pending
