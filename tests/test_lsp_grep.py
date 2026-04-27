@@ -6,6 +6,9 @@ from cc_lsp_now.server import (
     SemanticGrepHit,
     _context_breadcrumb,
     _format_semantic_grep_group,
+    _identifier_hits_on_line,
+    _record_semantic_nav_context,
+    _resolve_line_target,
     _semantic_grep_text_hits,
     _semantic_kind_and_type,
 )
@@ -110,6 +113,56 @@ class LspGrepTests(unittest.TestCase):
         self.assertEqual(
             line,
             "[3] arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 4 — def L44 — samples L44,L57,L69,...",
+        )
+
+    def test_identifier_hits_on_line_include_function_args(self) -> None:
+        fixture = Path("tmp/test_lsp_symbols_at_fixture.cs")
+        fixture.parent.mkdir(exist_ok=True)
+        fixture.write_text(
+            "public void Render(RenderContext ctx, int count) { } // ctx comment\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: fixture.unlink(missing_ok=True))
+
+        hits = _identifier_hits_on_line(str(fixture), 1)
+
+        self.assertEqual([name for name, _hit in hits], ["Render", "RenderContext", "ctx", "int", "count"])
+
+    def test_text_hits_ignore_comment_tails(self) -> None:
+        fixture = Path("tmp/test_lsp_grep_comment_fixture.py")
+        fixture.parent.mkdir(exist_ok=True)
+        fixture.write_text("query = 1  # query in comment\n# query only comment\n", encoding="utf-8")
+        self.addCleanup(lambda: fixture.unlink(missing_ok=True))
+
+        hits = _semantic_grep_text_hits([str(fixture)], "query", 10)
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].line, 0)
+
+    def test_bare_line_target_resolves_through_last_semantic_context(self) -> None:
+        hit = SemanticGrepHit(
+            path="/repo/src/ComfyNodeRenderer.cs",
+            line=77,
+            character=8,
+            line_text="ctx.Draw();",
+            uri="file:///repo/src/ComfyNodeRenderer.cs",
+            pos={"line": 77, "character": 8},
+        )
+        group = SemanticGrepGroup(
+            key="k",
+            name="ctx",
+            kind="arg",
+            type_text="RenderContext",
+            definition_path="/repo/src/ComfyNodeRenderer.cs",
+            definition_line=44,
+            definition_character=12,
+            hits=[hit],
+        )
+        _record_semantic_nav_context("ctx", [group])
+
+        self.assertEqual(
+            _resolve_line_target("L78"),
+            ("/repo/src/ComfyNodeRenderer.cs", 78),
         )
 
 

@@ -39,3 +39,25 @@ The first implementation is intentionally disk-backed and exact:
 This is the local version of the semantic-grep direction recorded in
 `docs/broker.md`. A broker can later make the same operation faster by reusing
 warm sessions and indexes across agents.
+
+## Bouncing From Samples
+
+`lsp_grep` records the reference graph it just showed. `lsp_symbols_at` can use
+that graph as context, so a bare line target works when it was present in the
+last refs/samples:
+
+```text
+lsp_symbols_at("L78")
+```
+
+Explicit targets do not need context:
+
+```text
+lsp_symbols_at("HistoryUI.cs:L78")
+lsp_symbols_at("/repo/src/HistoryUI.cs:L78")
+```
+
+The output is the same one-line semantic-bucket shape, but for every identifier
+on that source line. On a function declaration this intentionally includes the
+function name and all arguments, so the model can hop from a sample line into the
+local symbol graph without first doing a separate text search.

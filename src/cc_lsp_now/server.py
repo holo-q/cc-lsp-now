@@ -87,6 +87,11 @@ _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 # This matches the preview→confirm-or-replace flow the agent drives.
 _pending: PendingBuffer | None = None
 
+# Last semantic-grep graph, used by lsp_symbols_at("L78") to bounce from a
+# compact samples field into the referenced line without repeating the path.
+_last_semantic_nav: list["SemanticNavEntry"] = []
+_last_semantic_nav_query: str = ""
+
 
 @dataclass
 class WorkspaceApplyResult:
@@ -124,6 +129,16 @@ class SemanticGrepGroup:
     hits: list[SemanticGrepHit] = field(default_factory=list)
     reference_locs: list[dict] = field(default_factory=list)
     context_symbols: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class SemanticNavEntry:
+    path: str
+    line: int
+    character: int
+    group_index: int
+    name: str
+    kind: str
 
 
 def _set_pending(kind: str, candidates: list[Candidate], description: str) -> None:
@@ -1162,7 +1177,8 @@ def _semantic_grep_text_hits(paths: list[str], query: str, max_hits: int) -> lis
             continue
         uri = file_uri(path)
         for line_idx, line_text in enumerate(text.splitlines()):
-            for match in pattern.finditer(line_text):
+            search_text = _identifier_search_region(line_text)
+            for match in pattern.finditer(search_text):
                 character = _py_index_to_utf16_units(line_text, match.start())
                 hits.append(SemanticGrepHit(
                     path=path,
@@ -1175,6 +1191,14 @@ def _semantic_grep_text_hits(paths: list[str], query: str, max_hits: int) -> lis
                 if len(hits) >= max_hits:
                     return hits
     return hits
+
+
+def _identifier_search_region(line_text: str) -> str:
+    """Drop obvious line-comment tails before text→semantic token scanning."""
+    markers = [idx for marker in ("//", "#") if (idx := line_text.find(marker)) >= 0]
+    if not markers:
+        return line_text
+    return line_text[:min(markers)]
 
 
 def _location_from_lsp_item(item: dict) -> dict | None:
@@ -1369,6 +1393,130 @@ def _format_semantic_grep_group(index: int, group: SemanticGrepGroup) -> str:
         f"[{index}] {group.kind} {group.name}{type_suffix} — {scope} — refs {ref_count} — def {def_label} — samples {samples}",
         240,
     )
+
+
+def _record_semantic_nav_context(query: str, groups: list[SemanticGrepGroup]) -> None:
+    """Remember the last semantic graph so a later bare ``L78`` has context."""
+    global _last_semantic_nav_query
+    _last_semantic_nav.clear()
+    _last_semantic_nav_query = query
+    seen: set[tuple[str, int, int, int]] = set()
+    for group_index, group in enumerate(groups):
+        if group.reference_locs:
+            for loc in group.reference_locs:
+                path = _uri_to_path(loc.get("uri", ""))
+                start = loc.get("range", {}).get("start", {})
+                line = start.get("line", 0) + 1
+                character = start.get("character", 0)
+                key = (path, line, character, group_index)
+                if key in seen:
+                    continue
+                seen.add(key)
+                _last_semantic_nav.append(SemanticNavEntry(
+                    path=path,
+                    line=line,
+                    character=character,
+                    group_index=group_index,
+                    name=group.name,
+                    kind=group.kind,
+                ))
+        else:
+            for hit in group.hits:
+                key = (hit.path, hit.line + 1, hit.character, group_index)
+                if key in seen:
+                    continue
+                seen.add(key)
+                _last_semantic_nav.append(SemanticNavEntry(
+                    path=hit.path,
+                    line=hit.line + 1,
+                    character=hit.character,
+                    group_index=group_index,
+                    name=group.name,
+                    kind=group.kind,
+                ))
+
+
+def _nav_context_summary(entries: list[SemanticNavEntry]) -> str:
+    lines = ["Ambiguous line in last semantic graph — pass file:Lline:"]
+    for entry in entries[:20]:
+        lines.append(
+            f"  [{entry.group_index}] {Path(entry.path).name}:L{entry.line}  {entry.kind} {entry.name}  {entry.path}"
+        )
+    if len(entries) > 20:
+        lines.append(f"  ... {len(entries) - 20} more")
+    return "\n".join(lines)
+
+
+def _resolve_path_hint(path_hint: str) -> str | None:
+    path_hint = path_hint.strip()
+    if not path_hint:
+        return None
+    direct = Path(path_hint).expanduser()
+    if direct.exists():
+        return str(direct.resolve())
+    matches = [entry.path for entry in _last_semantic_nav if entry.path == path_hint or Path(entry.path).name == path_hint]
+    if len(set(matches)) == 1:
+        return matches[0]
+    suffix_matches = [entry.path for entry in _last_semantic_nav if entry.path.endswith(path_hint)]
+    if len(set(suffix_matches)) == 1:
+        return suffix_matches[0]
+    return str(direct.resolve()) if not direct.is_absolute() else str(direct)
+
+
+def _resolve_line_target(target: str, file_path: str = "", line: int = 0) -> tuple[str, int] | str:
+    if file_path and line > 0:
+        return str(Path(file_path).expanduser().resolve()), line
+
+    target = target.strip()
+    if not target:
+        return "Provide target like 'L78', 'path:L78', or file_path+line."
+
+    line_only = re.fullmatch(r"L?(\d+)", target)
+    if line_only:
+        target_line = int(line_only.group(1))
+        matches = [entry for entry in _last_semantic_nav if entry.line == target_line]
+        paths = sorted({entry.path for entry in matches})
+        if len(paths) == 1:
+            return paths[0], target_line
+        if matches:
+            return _nav_context_summary(matches)
+        if not _last_semantic_nav:
+            return "No previous lsp_grep context. Pass an explicit file:Lline target."
+        return f"L{target_line} was not in the last lsp_grep graph for {_last_semantic_nav_query!r}."
+
+    explicit = re.fullmatch(r"(.+?):L?(\d+)", target)
+    if explicit:
+        path = _resolve_path_hint(explicit.group(1))
+        if path is None:
+            return f"Could not resolve path in target {target!r}."
+        return path, int(explicit.group(2))
+
+    return "Provide target like 'L78', 'path:L78', or file_path+line."
+
+
+def _identifier_hits_on_line(path: str, line: int) -> list[tuple[str, SemanticGrepHit]]:
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        line_text = text.splitlines()[line - 1]
+    except (OSError, IndexError):
+        return []
+    uri = file_uri(path)
+    hits: list[tuple[str, SemanticGrepHit]] = []
+    search_text = _identifier_search_region(line_text)
+    for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", search_text):
+        name = match.group(0)
+        if name in _LINE_POSITION_SKIP_WORDS:
+            continue
+        character = _py_index_to_utf16_units(line_text, match.start())
+        hits.append((name, SemanticGrepHit(
+            path=path,
+            line=line - 1,
+            character=character,
+            line_text=line_text.strip(),
+            uri=uri,
+            pos={"line": line - 1, "character": character},
+        )))
+    return hits
 
 
 def _resolve_paths(file_path: str, pattern: str) -> list[str] | str:
@@ -2521,6 +2669,95 @@ async def lsp_references(file_path: str, symbol: str = "", symbols: str = "", li
     return await _batch(file_path, symbol, symbols, line, _do)
 
 
+async def _semantic_doc_symbols(path: str, uri: str, cache: dict[str, list[dict]]) -> list[dict]:
+    if path in cache:
+        return cache[path]
+    try:
+        symbols = await _request("textDocument/documentSymbol", {
+            "textDocument": {"uri": uri},
+        }, uri=uri)
+    except LspError:
+        symbols = []
+    cache[path] = symbols or []
+    return cache[path]
+
+
+async def _semantic_definition_locs(hit: SemanticGrepHit, name: str) -> list[dict]:
+    try:
+        result = await _request("textDocument/definition", {
+            "textDocument": {"uri": hit.uri},
+            "position": hit.pos,
+        }, uri=hit.uri)
+        locs = _locations_from_lsp(result)
+        if locs:
+            return locs
+    except LspError:
+        pass
+    try:
+        result = await _request("textDocument/declaration", {
+            "textDocument": {"uri": hit.uri},
+            "position": hit.pos,
+        }, uri=hit.uri)
+        locs = _locations_from_lsp(result)
+        if locs:
+            return locs
+    except LspError:
+        pass
+    return [{
+        "uri": hit.uri,
+        "range": {
+            "start": hit.pos,
+            "end": {"line": hit.line, "character": hit.character + _py_index_to_utf16_units(name, len(name))},
+        },
+    }]
+
+
+async def _semantic_group_for_hit(
+    name: str,
+    hit: SemanticGrepHit,
+    symbols_by_path: dict[str, list[dict]],
+) -> SemanticGrepGroup:
+    loc = (await _semantic_definition_locs(hit, name))[0]
+    def_uri = loc.get("uri", hit.uri)
+    def_path = _uri_to_path(def_uri)
+    def_start = loc.get("range", {}).get("start", {})
+    def_line = def_start.get("line", hit.line) + 1
+    def_character = def_start.get("character", hit.character)
+    try:
+        hover = await _request("textDocument/hover", {
+            "textDocument": {"uri": hit.uri},
+            "position": hit.pos,
+        }, uri=hit.uri)
+    except LspError:
+        hover = None
+    kind, type_text = _semantic_kind_and_type(name, hover)
+    symbols = await _semantic_doc_symbols(def_path, def_uri, symbols_by_path)
+    return SemanticGrepGroup(
+        key=_semantic_location_key(loc),
+        name=name,
+        kind=kind,
+        type_text=type_text,
+        definition_path=def_path,
+        definition_line=def_line,
+        definition_character=def_character,
+        hits=[hit],
+        context_symbols=symbols,
+    )
+
+
+async def _fill_reference_locs(group: SemanticGrepGroup) -> None:
+    hit = group.hits[0]
+    try:
+        refs = await _request("textDocument/references", {
+            "textDocument": {"uri": hit.uri},
+            "position": hit.pos,
+            "context": {"includeDeclaration": True},
+        }, uri=hit.uri)
+        group.reference_locs = _locations_from_lsp(refs)
+    except LspError:
+        group.reference_locs = []
+
+
 async def lsp_grep(
     query: str,
     file_path: str = "",
@@ -2551,92 +2788,21 @@ async def lsp_grep(
         groups: dict[str, SemanticGrepGroup] = {}
         symbols_by_path: dict[str, list[dict]] = {}
 
-        async def _doc_symbols(path: str, uri: str) -> list[dict]:
-            if path in symbols_by_path:
-                return symbols_by_path[path]
-            try:
-                symbols = await _request("textDocument/documentSymbol", {
-                    "textDocument": {"uri": uri},
-                }, uri=uri)
-            except LspError:
-                symbols = []
-            symbols_by_path[path] = symbols or []
-            return symbols_by_path[path]
-
-        async def _definition_locs(hit: SemanticGrepHit) -> list[dict]:
-            try:
-                result = await _request("textDocument/definition", {
-                    "textDocument": {"uri": hit.uri},
-                    "position": hit.pos,
-                }, uri=hit.uri)
-                locs = _locations_from_lsp(result)
-                if locs:
-                    return locs
-            except LspError:
-                pass
-            try:
-                result = await _request("textDocument/declaration", {
-                    "textDocument": {"uri": hit.uri},
-                    "position": hit.pos,
-                }, uri=hit.uri)
-                locs = _locations_from_lsp(result)
-                if locs:
-                    return locs
-            except LspError:
-                pass
-            return [{
-                "uri": hit.uri,
-                "range": {
-                    "start": hit.pos,
-                    "end": {"line": hit.line, "character": hit.character + _py_index_to_utf16_units(query, len(query))},
-                },
-            }]
-
         for hit in hits:
-            loc = (await _definition_locs(hit))[0]
-            key = _semantic_location_key(loc)
+            group_for_hit = await _semantic_group_for_hit(query, hit, symbols_by_path)
+            key = group_for_hit.key
             group = groups.get(key)
             if group is None:
-                def_uri = loc.get("uri", hit.uri)
-                def_path = _uri_to_path(def_uri)
-                def_start = loc.get("range", {}).get("start", {})
-                def_line = def_start.get("line", hit.line) + 1
-                def_character = def_start.get("character", hit.character)
-                try:
-                    hover = await _request("textDocument/hover", {
-                        "textDocument": {"uri": hit.uri},
-                        "position": hit.pos,
-                    }, uri=hit.uri)
-                except LspError:
-                    hover = None
-                kind, type_text = _semantic_kind_and_type(query, hover)
-                symbols = await _doc_symbols(def_path, def_uri)
-                group = SemanticGrepGroup(
-                    key=key,
-                    name=query,
-                    kind=kind,
-                    type_text=type_text,
-                    definition_path=def_path,
-                    definition_line=def_line,
-                    definition_character=def_character,
-                    context_symbols=symbols,
-                )
+                group = group_for_hit
                 groups[key] = group
-            group.hits.append(hit)
+            elif hit not in group.hits:
+                group.hits.append(hit)
 
         for group in groups.values():
-            hit = group.hits[0]
-            try:
-                refs = await _request("textDocument/references", {
-                    "textDocument": {"uri": hit.uri},
-                    "position": hit.pos,
-                    "context": {"includeDeclaration": True},
-                }, uri=hit.uri)
-                group.reference_locs = _locations_from_lsp(refs)
-            except LspError:
-                group.reference_locs = []
+            await _fill_reference_locs(group)
 
         ordered = list(groups.values())
+        _record_semantic_nav_context(query, ordered)
         lines = [
             _format_semantic_grep_group(i, group)
             for i, group in enumerate(ordered[:max_groups])
@@ -2648,6 +2814,52 @@ async def lsp_grep(
         return "\n".join(lines)
     except (LspError, ValueError, RuntimeError) as e:
         return f"LSP error: {e}"
+
+
+async def lsp_symbols_at(target: str = "", file_path: str = "", line: int = 0) -> str:
+    """List semantic symbols on a source line.
+
+    Accepts explicit ``path:L78`` or, after ``lsp_grep``, a bare ``L78`` from
+    the previous graph's refs/samples. Returns one-line symbol buckets for
+    every identifier on the line, including function declaration arguments.
+    """
+    resolved = _resolve_line_target(target, file_path, line)
+    if isinstance(resolved, str):
+        return resolved
+    path, target_line = resolved
+    if not Path(path).exists():
+        return f"File not found: {path}"
+
+    uri = file_uri(path)
+    try:
+        await _request("textDocument/documentSymbol", {"textDocument": {"uri": uri}}, uri=uri)
+    except LspError:
+        pass
+
+    hits = _identifier_hits_on_line(path, target_line)
+    if not hits:
+        return f"No identifier tokens found at {path}:L{target_line}."
+
+    symbols_by_path: dict[str, list[dict]] = {}
+    groups: dict[str, SemanticGrepGroup] = {}
+    for name, hit in hits:
+        group_for_hit = await _semantic_group_for_hit(name, hit, symbols_by_path)
+        if group_for_hit.key not in groups:
+            groups[group_for_hit.key] = group_for_hit
+
+    ordered = list(groups.values())
+    for group in ordered:
+        await _fill_reference_locs(group)
+    _record_semantic_nav_context(f"{Path(path).name}:L{target_line}", ordered)
+
+    lines = [f"Target: {path}:L{target_line}"]
+    try:
+        line_text = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[target_line - 1]
+        lines.append(f"  {line_text.strip()}")
+    except (OSError, IndexError):
+        pass
+    lines.extend(_format_semantic_grep_group(i, group) for i, group in enumerate(ordered))
+    return "\n".join(lines)
 
 
 async def lsp_implementation(file_path: str, symbol: str = "", line: int = 0) -> str:
@@ -3022,6 +3234,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "definition": (lsp_definition, "textDocument/definition"),
     "references": (lsp_references, "textDocument/references"),
     "grep": (lsp_grep, "cc-lsp-now/grep"),
+    "symbols_at": (lsp_symbols_at, "cc-lsp-now/symbols_at"),
     "workspace_symbols": (lsp_workspace_symbols, "workspace/symbol"),
     "type_definition": (lsp_type_definition, "textDocument/typeDefinition"),
     "completion": (lsp_completion, "textDocument/completion"),
@@ -3085,6 +3298,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "definition": "definitionProvider",
     "references": "referencesProvider",
     "grep": "definitionProvider",
+    "symbols_at": "definitionProvider",
     "workspace_symbols": "workspaceSymbolProvider",
     "type_definition": "typeDefinitionProvider",
     "completion": "completionProvider",

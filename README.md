@@ -11,6 +11,7 @@ A **standalone MCP server** that bridges the Language Server Protocol into Claud
 | `lsp_definition` | `textDocument/definition` |
 | `lsp_references` | `textDocument/references` |
 | `lsp_grep` | text scan + `textDocument/definition`/`references` |
+| `lsp_symbols_at` | line scan + `textDocument/definition`/`references` |
 | `lsp_type_definition` | `textDocument/typeDefinition` |
 | `lsp_completion` | `textDocument/completion` |
 | `lsp_signature_help` | `textDocument/signatureHelp` |
@@ -23,7 +24,7 @@ A **standalone MCP server** that bridges the Language Server Protocol into Claud
 | `lsp_call_hierarchy_outgoing` | `callHierarchy/outgoingCalls` |
 | `lsp_workspace_symbols` | `workspace/symbol` |
 
-Plus `lsp_move_file`, `lsp_create_file`, `lsp_delete_file`, `lsp_implementation`, `lsp_declaration`, `lsp_type_hierarchy_supertypes`, `lsp_type_hierarchy_subtypes`, `lsp_inlay_hint`, `lsp_folding_range`, `lsp_range_formatting`, `lsp_code_lens`, `lsp_confirm` — full LSP surface. Tools are capability-gated at startup: if no server in the chain advertises the capability, the tool isn't registered, saving context tokens. `lsp_grep` is the bridge between `rg ctx` and semantic references: it finds identifier text candidates, asks the LSP what each occurrence binds to, then emits one-line buckets such as `arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 9 — def L44`.
+Plus `lsp_move_file`, `lsp_create_file`, `lsp_delete_file`, `lsp_implementation`, `lsp_declaration`, `lsp_type_hierarchy_supertypes`, `lsp_type_hierarchy_subtypes`, `lsp_inlay_hint`, `lsp_folding_range`, `lsp_range_formatting`, `lsp_code_lens`, `lsp_confirm` — full LSP surface. Tools are capability-gated at startup: if no server in the chain advertises the capability, the tool isn't registered, saving context tokens. `lsp_grep` is the bridge between `rg ctx` and semantic references: it finds identifier text candidates, asks the LSP what each occurrence binds to, then emits one-line buckets such as `arg ctx: RenderContext — ComfyNodeRenderer:44::Render::ctx — refs 9 — def L44`. `lsp_symbols_at("L78")` can then bounce from that graph's last `samples`/refs, or use explicit `path:L78`, and expands all semantic symbols on that line.
 
 ## Known LSP Plugins using cc-lsp-now
 
