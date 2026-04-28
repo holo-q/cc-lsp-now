@@ -30,7 +30,7 @@ connects two known semantic anchors through one explicit edge family.
 | `lsp_goto` | Resolve destinations for a node: definition, declaration, type definition, implementation. |
 | `lsp_refs` | Expand references for a known node or graph index. |
 | `lsp_outline` | Show compact file/workspace breadcrumbs. |
-| `lsp_calls` | Show incoming and/or outgoing call graph edges. |
+| `lsp_calls` | Show incoming and/or outgoing call graph edges; same-file symbol ambiguity may fan out across all matches for read-only graph inspection. |
 | `lsp_types` | Show super and/or sub type hierarchy edges. |
 | `lsp_path` | Find bounded witness paths between two known anchors. |
 | `lsp_diagnostics` | Report diagnostics as the primary verifier surface. |

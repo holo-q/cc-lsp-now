@@ -62,6 +62,7 @@ import inspect
 import unittest
 from collections.abc import Coroutine
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from cc_lsp_now import server as _server
 from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES
@@ -359,6 +360,68 @@ class LspCallsGraphIndexTests(unittest.TestCase):
             "same self-correction path used by lsp_symbol/lsp_goto/lsp_refs; "
             f"got: {result!r}",
         )
+
+
+class LspCallsMultiTargetTests(unittest.TestCase):
+    def test_file_symbol_ambiguity_expands_all_matches_for_read_only_call_graph(self) -> None:
+        if not _has_calls():
+            self.skipTest(_CALLS_HOOK_MSG)
+        targets = [
+            _server.SemanticTarget(
+                uri="file:///repo/src/Workspace.cs",
+                pos={"line": 10, "character": 4},
+                path="/repo/src/Workspace.cs",
+                line=11,
+                character=4,
+                name="SelectArtifact",
+            ),
+            _server.SemanticTarget(
+                uri="file:///repo/src/Workspace.cs",
+                pos={"line": 20, "character": 4},
+                path="/repo/src/Workspace.cs",
+                line=21,
+                character=4,
+                name="SelectArtifactRelative",
+            ),
+        ]
+        edge_group = _server.SemanticGrepGroup(
+            key="k",
+            name="Caller",
+            kind="method",
+            type_text="",
+            definition_path="/repo/src/Caller.cs",
+            definition_line=5,
+            definition_character=4,
+            hits=[],
+        )
+
+        async def fake_sections(
+            resolved: _server.SemanticTarget,
+            _direction_key: str,
+            _max_depth: int,
+            _max_edges: int,
+            *,
+            heading_prefix: str = "Calls for",
+        ) -> tuple[list[str], list[_server.SemanticGrepGroup]]:
+            return (
+                [
+                    f"{heading_prefix} {resolved.name} ({resolved.path}:L{resolved.line})",
+                    "in:",
+                    "  [0] Caller.cs:L5::Caller — method — 1 site",
+                ],
+                [edge_group],
+            )
+
+        with patch.object(_server, "_resolve_symbol_targets", AsyncMock(return_value=targets)):
+            with patch.object(_server, "_call_graph_sections_for_target", side_effect=fake_sections):
+                result = _run(_calls_attr()(file_path="Workspace.cs", symbol="SelectArtifact", direction="in"))
+
+        self.assertIn("Calls for 2 matches of 'SelectArtifact'", result)
+        self.assertIn("match 0 SelectArtifact", result)
+        self.assertIn("match 1 SelectArtifactRelative", result)
+        self.assertIn("  [0] Caller.cs:L5::Caller", result)
+        self.assertIn("  [1] Caller.cs:L5::Caller", result)
+        self.assertNotIn("Multiple matches — pass line=", result)
 
 
 class CallItemToGroupTests(unittest.TestCase):

@@ -1450,6 +1450,51 @@ async def _resolve(
     raise ValueError(f"Symbol {symbol!r} not found in {file_path}")
 
 
+async def _resolve_symbol_targets(file_path: str, symbol: str) -> list[SemanticTarget]:
+    """Resolve every same-file symbol match for read-only fan-out tools.
+
+    Most target-taking tools need exactly one semantic node, so
+    ``_resolve_semantic_target`` should keep returning a disambiguation error
+    on multiple matches. Graph inspection is different: when an agent asks for
+    ``SelectArtifact`` in a file, the overloads / wrappers / relative helpers
+    are often one cognitive function. Read-only tools such as ``lsp_calls`` can
+    expand all concrete matches and show the whole local neighborhood instead
+    of forcing a manual line-by-line retry loop.
+    """
+    resolved_path = _resolve_file_path(file_path)
+    uri = file_uri(resolved_path)
+    await _request("textDocument/documentSymbol", {"textDocument": {"uri": uri}}, uri=uri)
+    try:
+        doc_symbols = await _request("textDocument/documentSymbol", {
+            "textDocument": {"uri": uri},
+        })
+    except LspError:
+        doc_symbols = None
+
+    targets: list[SemanticTarget] = []
+    if doc_symbols:
+        seen: set[tuple[int, int, str]] = set()
+        for line0, pos, _kind, name in _search_symbol_tree(doc_symbols, symbol):
+            refined = _refine_column(resolved_path, pos, symbol)
+            key = (refined.get("line", line0), refined.get("character", 0), name)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(_target_from_resolved_uri(uri, refined, name))
+        if targets:
+            return targets
+
+    text = Path(resolved_path).read_text(encoding="utf-8", errors="replace")
+    pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
+    for i, file_line in enumerate(text.splitlines()):
+        m = pattern.search(file_line)
+        if not m:
+            continue
+        pos = {"line": i, "character": m.start()}
+        targets.append(_target_from_resolved_uri(uri, pos, symbol))
+    return targets
+
+
 def _search_symbol_tree(
     symbols: list[dict], query: str
 ) -> list[tuple[int, dict, str, str]]:
@@ -3492,6 +3537,79 @@ async def _walk_call_edges(
     return edges
 
 
+async def _call_graph_sections_for_target(
+    resolved: SemanticTarget,
+    direction_key: str,
+    max_depth: int,
+    max_edges: int,
+    *,
+    heading_prefix: str = "Calls for",
+) -> tuple[list[str], list[SemanticGrepGroup]]:
+    items = await _request("textDocument/prepareCallHierarchy", {
+        "textDocument": {"uri": resolved.uri},
+        "position": resolved.pos,
+    }, uri=resolved.uri)
+    anchor_name = resolved.name or (items[0].get("name", "") if items else "")
+    head = f"{heading_prefix} {anchor_name} ({resolved.path}:L{resolved.line})" if anchor_name \
+        else f"{heading_prefix} {resolved.path}:L{resolved.line}"
+    if not items:
+        return [head, "No call hierarchy item at this position."], []
+
+    directions = ["in", "out"] if direction_key == "both" else [direction_key]
+    edges_by_dir: dict[str, list[tuple[dict, int]]] = {}
+    for d in directions:
+        edges_by_dir[d] = await _walk_call_edges(d, items[0], max_depth, max_edges)
+
+    total = sum(len(v) for v in edges_by_dir.values())
+    groups: list[SemanticGrepGroup] = []
+    sections = [head]
+
+    if total == 0:
+        sections.append("No calls.")
+        return sections, groups
+
+    for d in directions:
+        edges = edges_by_dir.get(d, [])
+        if not edges:
+            sections.append(f"{d}: (none)")
+            continue
+        target_key = "from" if d == "in" else "to"
+        sections.append(f"{d}:")
+        for call, depth in edges:
+            target_item = call.get(target_key, {})
+            n_sites = max(1, len(call.get("fromRanges", [])))
+            group = _call_item_to_group(target_item)
+            idx = len(groups)
+            groups.append(group)
+            site_label = f"{n_sites} site{'s' if n_sites != 1 else ''}"
+            depth_label = f" — depth {depth}" if depth > 1 else ""
+            sections.append(_compact_line(
+                f"  [{idx}] {Path(group.definition_path).name}:L{group.definition_line}"
+                f"::{group.name} — {group.kind} — {site_label}{depth_label}",
+                240,
+            ))
+        if len(edges) >= max_edges:
+            sections.append(f"  ... stopped at {max_edges} {d} edge(s); raise max_edges to unfold.")
+    return sections, groups
+
+
+def _renumber_graph_rows(lines: list[str], offset: int) -> list[str]:
+    """Shift ``[N]`` row handles after concatenating multiple graph sections."""
+    if offset <= 0:
+        return list(lines)
+    renumbered: list[str] = []
+    for line in lines:
+        renumbered.append(
+            re.sub(
+                r"^(\s+)\[(\d+)\]",
+                lambda m: f"{m.group(1)}[{int(m.group(2)) + offset}]",
+                line,
+                count=1,
+            )
+        )
+    return renumbered
+
+
 async def lsp_calls(
     target: str = "",
     direction: str = "both",
@@ -3518,6 +3636,35 @@ async def lsp_calls(
     if direction_key not in {"in", "out", "both"}:
         return "direction must be one of: in, out, both."
 
+    if not target.strip() and file_path and symbol and line <= 0:
+        try:
+            targets = await _resolve_symbol_targets(file_path, symbol)
+        except (LspError, ValueError, RuntimeError) as e:
+            return f"LSP error: {e}"
+        if len(targets) > 1:
+            max_depth = max(1, min(max_depth, 5))
+            max_edges = max(1, min(max_edges, 500))
+            all_sections: list[str] = [
+                f"Calls for {len(targets)} matches of {symbol!r} in {targets[0].path}:"
+            ]
+            all_groups: list[SemanticGrepGroup] = []
+            try:
+                for idx, candidate in enumerate(targets):
+                    sections, groups = await _call_graph_sections_for_target(
+                        candidate,
+                        direction_key,
+                        max_depth,
+                        max_edges,
+                        heading_prefix=f"match {idx}",
+                    )
+                    offset = len(all_groups)
+                    all_groups.extend(groups)
+                    all_sections.extend(_renumber_graph_rows(sections, offset))
+                _record_semantic_nav_context(f"calls:{symbol}:multi", all_groups)
+                return "\n".join(all_sections)
+            except (LspError, ValueError, RuntimeError) as e:
+                return f"LSP error: {e}"
+
     resolved = await _resolve_semantic_target(target, file_path, symbol, line)
     if isinstance(resolved, str):
         return resolved
@@ -3526,55 +3673,14 @@ async def lsp_calls(
     max_edges = max(1, min(max_edges, 500))
 
     try:
-        items = await _request("textDocument/prepareCallHierarchy", {
-            "textDocument": {"uri": resolved.uri},
-            "position": resolved.pos,
-        }, uri=resolved.uri)
-        if not items:
-            return "No call hierarchy item at this position."
+        sections, groups = await _call_graph_sections_for_target(
+            resolved,
+            direction_key,
+            max_depth,
+            max_edges,
+        )
 
-        directions = ["in", "out"] if direction_key == "both" else [direction_key]
-        edges_by_dir: dict[str, list[tuple[dict, int]]] = {}
-        for d in directions:
-            edges = await _walk_call_edges(d, items[0], max_depth, max_edges)
-            edges_by_dir[d] = edges
-
-        total = sum(len(v) for v in edges_by_dir.values())
-        groups: list[SemanticGrepGroup] = []
-        sections: list[str] = []
-
-        anchor_name = resolved.name or items[0].get("name", "")
-        head = f"Calls for {anchor_name} ({resolved.path}:L{resolved.line})" if anchor_name \
-            else f"Calls for {resolved.path}:L{resolved.line}"
-        sections.append(head)
-
-        if total == 0:
-            sections.append("No calls.")
-        else:
-            for d in directions:
-                edges = edges_by_dir.get(d, [])
-                if not edges:
-                    sections.append(f"{d}: (none)")
-                    continue
-                target_key = "from" if d == "in" else "to"
-                sections.append(f"{d}:")
-                for call, depth in edges:
-                    target_item = call.get(target_key, {})
-                    n_sites = max(1, len(call.get("fromRanges", [])))
-                    group = _call_item_to_group(target_item)
-                    idx = len(groups)
-                    groups.append(group)
-                    site_label = f"{n_sites} site{'s' if n_sites != 1 else ''}"
-                    depth_label = f" — depth {depth}" if depth > 1 else ""
-                    sections.append(_compact_line(
-                        f"  [{idx}] {Path(group.definition_path).name}:L{group.definition_line}"
-                        f"::{group.name} — {group.kind} — {site_label}{depth_label}",
-                        240,
-                    ))
-                if len(edges) >= max_edges:
-                    sections.append(f"  ... stopped at {max_edges} {d} edge(s); raise max_edges to unfold.")
-
-        nav_query = f"calls:{anchor_name or resolved.path}:L{resolved.line}"
+        nav_query = f"calls:{resolved.name or resolved.path}:L{resolved.line}"
         _record_semantic_nav_context(nav_query, groups)
         return "\n".join(sections)
     except (LspError, ValueError, RuntimeError) as e:
