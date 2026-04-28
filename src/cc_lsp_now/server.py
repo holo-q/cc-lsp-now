@@ -2039,6 +2039,29 @@ def _target_from_resolved_uri(uri: str, pos: dict, name: str = "") -> SemanticTa
     )
 
 
+def _semantic_group_from_target(target: SemanticTarget, kind: str = "root") -> SemanticGrepGroup:
+    """Wrap a resolved target as a graph row so root anchors are navigable."""
+    line0 = max(target.line - 1, 0)
+    hit = SemanticGrepHit(
+        path=target.path,
+        line=line0,
+        character=target.character,
+        line_text=_line_text(target.path, target.line),
+        uri=target.uri,
+        pos=target.pos,
+    )
+    return SemanticGrepGroup(
+        key=f"{target.path}:{line0}:{target.character}:{target.name}",
+        name=target.name or _identifier_at_position(target.path, target.pos),
+        kind=kind,
+        type_text="",
+        definition_path=target.path,
+        definition_line=target.line,
+        definition_character=target.character,
+        hits=[hit],
+    )
+
+
 async def _resolve_semantic_target(
     target: str = "",
     file_path: str = "",
@@ -3650,6 +3673,14 @@ async def lsp_calls(
             all_groups: list[SemanticGrepGroup] = []
             try:
                 for idx, candidate in enumerate(targets):
+                    root_group = _semantic_group_from_target(candidate)
+                    root_idx = len(all_groups)
+                    all_groups.append(root_group)
+                    all_sections.append(_compact_line(
+                        f"[{root_idx}] root {Path(candidate.path).name}:L{candidate.line}"
+                        f"::{root_group.name} — {root_group.kind}",
+                        240,
+                    ))
                     sections, groups = await _call_graph_sections_for_target(
                         candidate,
                         direction_key,
@@ -4130,35 +4161,80 @@ async def lsp_refs(
     max_refs: int = 100,
 ) -> str:
     """Expand references for a known semantic node or graph index."""
+    max_refs = max(1, min(max_refs, 500))
+    if not target.strip() and file_path and symbol and line <= 0:
+        try:
+            targets = await _resolve_symbol_targets(file_path, symbol)
+        except (LspError, ValueError, RuntimeError) as e:
+            return f"LSP error: {e}"
+        if len(targets) > 1:
+            lines = [
+                f"References for {len(targets)} matches of {symbol!r} in {targets[0].path}:"
+            ]
+            groups: list[SemanticGrepGroup] = []
+            try:
+                for idx, candidate in enumerate(targets):
+                    section, group = await _reference_section_for_target(
+                        candidate,
+                        include_declaration,
+                        max_refs,
+                        heading=f"match {idx} {candidate.name or 'symbol'} ({candidate.path}:L{candidate.line})",
+                    )
+                    lines.extend(section)
+                    if group is not None:
+                        groups.append(group)
+                    else:
+                        groups.append(_semantic_group_from_target(candidate))
+                _record_semantic_nav_context(f"refs:{symbol}:multi", groups)
+                return "\n".join(lines)
+            except (LspError, ValueError, RuntimeError) as e:
+                return f"LSP error: {e}"
+
     resolved = await _resolve_semantic_target(target, file_path, symbol, line)
     if isinstance(resolved, str):
         return resolved
-    max_refs = max(1, min(max_refs, 500))
     try:
-        result = await _request("textDocument/references", {
-            "textDocument": {"uri": resolved.uri},
-            "position": resolved.pos,
-            "context": {"includeDeclaration": include_declaration},
-        }, uri=resolved.uri)
-        locs = _locations_from_lsp(result)
-        if not locs:
+        lines, _group = await _reference_section_for_target(
+            resolved,
+            include_declaration,
+            max_refs,
+        )
+        if not lines:
             return "No references found."
-
-        group = await _semantic_group_for_target(resolved)
-        if group is not None:
-            group.reference_locs = locs
-            label = f"{group.kind} {group.name}"
-        else:
-            label = resolved.name or "symbol"
-
-        lines = [f"References for {label}: {len(locs)}"]
-        for loc in locs[:max_refs]:
-            lines.append(f"  {_format_location_with_context(loc)}")
-        if len(locs) > max_refs:
-            lines.append(f"... {len(locs) - max_refs} more; raise max_refs to unfold.")
         return "\n".join(lines)
     except (LspError, ValueError, RuntimeError) as e:
         return f"LSP error: {e}"
+
+
+async def _reference_section_for_target(
+    resolved: SemanticTarget,
+    include_declaration: bool,
+    max_refs: int,
+    *,
+    heading: str = "",
+) -> tuple[list[str], SemanticGrepGroup | None]:
+    result = await _request("textDocument/references", {
+        "textDocument": {"uri": resolved.uri},
+        "position": resolved.pos,
+        "context": {"includeDeclaration": include_declaration},
+    }, uri=resolved.uri)
+    locs = _locations_from_lsp(result)
+    if not locs:
+        return ([f"{heading}: 0"] if heading else []), None
+
+    group = await _semantic_group_for_target(resolved)
+    if group is not None:
+        group.reference_locs = locs
+        label = f"{group.kind} {group.name}"
+    else:
+        label = resolved.name or "symbol"
+
+    lines = [f"{heading}: {len(locs)}" if heading else f"References for {label}: {len(locs)}"]
+    for loc in locs[:max_refs]:
+        lines.append(f"  {_format_location_with_context(loc)}")
+    if len(locs) > max_refs:
+        lines.append(f"... {len(locs) - max_refs} more; raise max_refs to unfold.")
+    return lines, group
 
 
 async def _semantic_doc_symbols(path: str, uri: str, cache: dict[str, list[dict]]) -> list[dict]:

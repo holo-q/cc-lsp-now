@@ -417,10 +417,12 @@ class LspCallsMultiTargetTests(unittest.TestCase):
                 result = _run(_calls_attr()(file_path="Workspace.cs", symbol="SelectArtifact", direction="in"))
 
         self.assertIn("Calls for 2 matches of 'SelectArtifact'", result)
+        self.assertIn("[0] root Workspace.cs:L11::SelectArtifact", result)
         self.assertIn("match 0 SelectArtifact", result)
-        self.assertIn("match 1 SelectArtifactRelative", result)
-        self.assertIn("  [0] Caller.cs:L5::Caller", result)
         self.assertIn("  [1] Caller.cs:L5::Caller", result)
+        self.assertIn("[2] root Workspace.cs:L21::SelectArtifactRelative", result)
+        self.assertIn("match 1 SelectArtifactRelative", result)
+        self.assertIn("  [3] Caller.cs:L5::Caller", result)
         self.assertNotIn("Multiple matches — pass line=", result)
 
 
