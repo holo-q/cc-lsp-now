@@ -42,6 +42,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
+from cc_lsp_now.agent_bus import AgentBus
 from cc_lsp_now.alias_coordinator import (
     alias_identity_from_wire,
     alias_record_to_wire,
@@ -67,6 +68,11 @@ DEFAULT_SOCKET_NAME = "cc-lsp-broker.sock"
 SOCKET_ENV_OVERRIDE = "CC_LSP_BROKER_SOCKET"
 LOG_ENV_OVERRIDE = "CC_LSP_BROKER_LOG"
 IDLE_TTL_ENV = "CC_LSP_BROKER_IDLE_TTL_SECONDS"
+DEVTOOLS_ENV = "CC_LSP_DEVTOOLS"
+DEVTOOLS_APP_ID_ENV = "CC_LSP_DEVTOOLS_APP_ID"
+DEVTOOLS_HOST_ENV = "CC_LSP_DEVTOOLS_HOST"
+DEVTOOLS_PORT_ENV = "CC_LSP_DEVTOOLS_PORT"
+DEVTOOLS_READONLY_ENV = "CC_LSP_DEVTOOLS_READONLY"
 DEFAULT_IDLE_TTL_SECONDS = 4 * 60 * 60
 
 
@@ -195,7 +201,9 @@ class BrokerDaemon:
     def __init__(self) -> None:
         self.registry = SessionRegistry()
         self.lsp = BrokerLspManager(self.registry)
+        self.bus = AgentBus()
         self.started_at: float = time.time()
+        self.devtools = _maybe_start_devtools(self)
         # Set when a `shutdown` request is processed.  `serve_unix` waits
         # on this to break out of `serve_forever`.
         self._shutdown = asyncio.Event()
@@ -270,8 +278,36 @@ class BrokerDaemon:
             return await self._render_reset_client(params)
         if method == "render.reset_session":
             return await self._render_reset_session(params)
+        if method == "bus.status":
+            return self.bus.status()
+        if method == "bus.event" or method == "bus.append":
+            try:
+                return self.bus.event(params)
+            except ValueError as e:
+                raise BrokerError("invalid_params", str(e)) from None
+        if method == "bus.note":
+            return self.bus.note(params)
+        if method == "bus.ask":
+            return self.bus.ask(params)
+        if method == "bus.reply":
+            try:
+                return self.bus.reply(params)
+            except ValueError as e:
+                raise BrokerError("invalid_params", str(e)) from None
+        if method == "bus.recent":
+            return self.bus.recent(params)
+        if method == "bus.settle":
+            return self.bus.settle(params)
+        if method == "bus.precommit":
+            return self.bus.precommit(params)
+        if method == "bus.postcommit":
+            return self.bus.postcommit(params)
+        if method == "bus.weather":
+            return self.bus.weather(params)
         if method == "shutdown":
             await self.lsp.stop_all()
+            if self.devtools is not None:
+                self.devtools.stop()
             self._shutdown.set()
             return {"shutting_down": True}
         raise BrokerError("unknown_method", f"unknown method: {method}")
@@ -289,6 +325,8 @@ class BrokerDaemon:
             "uptime": now - self.started_at,
             "session_count": len(self.registry),
             "sessions": [session_to_dict(s) for s in self.registry.all_sessions()],
+            "bus": self.bus.status(),
+            "devtools": _devtools_status(self.devtools),
         }
 
     def _lsp_status(self) -> dict[str, object]:
@@ -301,6 +339,8 @@ class BrokerDaemon:
                 "started_at": self.started_at,
                 "uptime": time.time() - self.started_at,
                 "idle_ttl_seconds": _idle_ttl_seconds(),
+                "bus": self.bus.status(),
+                "devtools": _devtools_status(self.devtools),
             }
         )
         return status
@@ -483,6 +523,75 @@ def _idle_ttl_seconds() -> float:
         return float(DEFAULT_IDLE_TTL_SECONDS)
 
 
+def _env_enabled(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _devtools_port() -> int:
+    raw = os.environ.get(DEVTOOLS_PORT_ENV, "0").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def _maybe_start_devtools(daemon: BrokerDaemon):
+    """Expose the live broker over python-devtools when explicitly requested.
+
+    This intentionally stays opt-in and import-optional. Production broker
+    sessions should not grow a runtime-inspection surface unless the caller sets
+    ``CC_LSP_DEVTOOLS=1``. When enabled, agents can attach through the
+    ``python-devtools`` MCP bridge using the stable app id
+    ``cc-lsp-now-broker`` and inspect ``broker``, ``bus``, ``registry``, and
+    ``lsp``.
+    """
+    if not _env_enabled(DEVTOOLS_ENV):
+        return None
+    try:
+        import python_devtools as devtools
+    except Exception as e:
+        log.warning("CC_LSP_DEVTOOLS requested but python_devtools import failed: %r", e)
+        return None
+
+    app_id = os.environ.get(DEVTOOLS_APP_ID_ENV, "cc-lsp-now-broker")
+    host = os.environ.get(DEVTOOLS_HOST_ENV, "localhost")
+    readonly = _env_enabled(DEVTOOLS_READONLY_ENV, default=True)
+    devtools.register("broker", daemon)
+    devtools.register("bus", daemon.bus)
+    devtools.register("registry", daemon.registry)
+    devtools.register("lsp", daemon.lsp)
+    devtools.start(
+        host=host,
+        port=_devtools_port(),
+        app_id=app_id,
+        readonly=readonly,
+    )
+    log.info(
+        "broker devtools enabled: app_id=%s readonly=%s running=%s",
+        app_id,
+        readonly,
+        devtools.running,
+    )
+    return devtools
+
+
+def _devtools_status(devtools: object | None) -> dict[str, object]:
+    if devtools is None:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "running": bool(getattr(devtools, "running", False)),
+        "readonly": bool(getattr(devtools, "readonly", False)),
+        "app_id": getattr(devtools, "app_id", None),
+        "n_clients": getattr(devtools, "n_clients", 0),
+        "n_commands": getattr(devtools, "n_commands", 0),
+        "last_command_time": getattr(devtools, "last_command_time", 0.0),
+    }
+
+
 # --- Socket server -----------------------------------------------------------
 
 
@@ -612,6 +721,11 @@ __all__ = [
     "BrokerError",
     "DEFAULT_SOCKET_NAME",
     "DEFAULT_IDLE_TTL_SECONDS",
+    "DEVTOOLS_APP_ID_ENV",
+    "DEVTOOLS_ENV",
+    "DEVTOOLS_HOST_ENV",
+    "DEVTOOLS_PORT_ENV",
+    "DEVTOOLS_READONLY_ENV",
     "IDLE_TTL_ENV",
     "LOG_ENV_OVERRIDE",
     "SOCKET_ENV_OVERRIDE",

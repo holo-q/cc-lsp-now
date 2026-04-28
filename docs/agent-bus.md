@@ -248,11 +248,77 @@ to that recipient.
 
 ## First Slice
 
-1. Add a workspace-scoped append-only event log.
-2. Implement `lsp_log(action="event|note|ask|reply|recent|settle|precommit|postcommit|weather")`.
-3. Add warn-only hook output for session start, edits, tests, and commits.
-4. Render timed bus questions and closed digests.
-5. Keep all coordination advisory: no claims, no leases, no denial path.
+The initial implementation is now broker-backed and intentionally advisory:
+
+1. `src/cc_lsp_now/bus_event.py` owns the strict event/scope wire schema.
+2. `src/cc_lsp_now/agent_bus.py` owns in-memory state, timed questions,
+   append-only JSONL persistence at `tmp/cc-lsp-now-bus.jsonl`, and compact
+   digest queries.
+3. `BrokerDaemon` exposes `bus.event`, `bus.note`, `bus.ask`, `bus.reply`,
+   `bus.recent`, `bus.settle`, `bus.precommit`, `bus.postcommit`,
+   `bus.weather`, and `bus.status`.
+4. The MCP surface is `lsp_log(action="event|note|ask|reply|recent|settle|precommit|postcommit|weather")`.
+5. `CC_LSP_DEVTOOLS=1` registers the live broker, bus, registry, and LSP
+   manager with `python-devtools` under app id `cc-lsp-now-broker` by default,
+   so agents can inspect daemon state without adding bespoke debug endpoints.
+6. Coordination remains warn-only: no claims, no leases, no denial path.
+
+Hook output is the next slice. The current bus already has the broker methods
+and rendering helpers needed for session-start, edit, test, and commit hooks to
+call into the same substrate.
+
+## Implementation Notes
+
+These are the load-bearing decisions Wave 1 has settled on. They are narrow
+enough to be implementation detail, but durable enough that agents and broker
+code can rely on them without re-litigating. Cross-cutting acceptance lives in
+`tests/test_agent_bus_contract.py`.
+
+### Workspace Auto-Detection
+
+`workspace_root` is the only sharding key. It is auto-detected from `$LSP_ROOT`
+if set, otherwise from the agent's current working directory (resolved via
+`os.path.abspath`). `workspace_id` is a short SHA-1 digest of the resolved root
+so the broker, JSONL log, and digest-frontier state all agree without depending
+on path normalization elsewhere.
+
+LSP `config_hash` deliberately does **not** shard the bus. Two agents running
+different chains in the same repo (e.g. one with `ty` only, another with
+`ty;basedpyright`) share recent events; otherwise the weather report would
+split per chain config and lose exactly the cross-chain visibility the bus is
+for.
+
+### User Prompt Hook And Prompt Count
+
+`user.prompt` is the canonical event for "the user spoke to this agent." Hooks
+should append one `user.prompt` event per turn; the event's
+`metadata.prompt_count` is the running count for that `agent_id`. The bus uses
+this count to distinguish ambient context agents from the user's main
+conversation thread:
+
+- `prompt_count >= 2` pins the agent visible in presence output even past the
+  prune threshold. The pin survives because the user has actively chosen to
+  keep talking to this thread; pruning it would lose exactly the agent the
+  human is steering.
+- `prompt_count <= 1` is treated as a single-shot or warm-up agent and follows
+  the normal active/asleep/pruned decay below.
+
+### Presence Decay
+
+Presence is decided by the time since each agent's last bus event
+(`agent.started`, `user.prompt`, or any other event with a non-empty
+`agent_id`):
+
+| State | Threshold | Visibility |
+|-------|-----------|------------|
+| `active` | `< 60s` | shown prominently in `weather` and `recent`. |
+| `asleep` | `>= 60s` | shown dimmed; the agent has gone quiet. |
+| `pruned` | `>= 600s` | hidden by default; only surfaces when explicitly listed. |
+
+`prompt_count >= 2` overrides pruning for that agent — the main thread stays
+visible regardless of how long it has been silent. These thresholds are cheap
+to revisit; the durable contract is the *shape* (three bands monotonic by
+recency, plus the prompt-count pin), not the exact second counts.
 
 ## Later Work
 

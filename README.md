@@ -22,6 +22,7 @@ The target public surface is documented in [docs/tool-surface.md](docs/tool-surf
 | `lsp_rename` | Previews and stages semantic renames before `lsp_confirm`. |
 | `lsp_move` | Previews file moves (single or batched) and import/update edits before `lsp_confirm`. |
 | `lsp_confirm` | Commits the currently staged edit transaction. |
+| `lsp_log` | Appends agent-bus events, notes, timed questions, replies, and workspace weather through the broker. |
 
 The remaining protocol-shaped tools are transitional. The cut direction is one-way: as each workflow tool lands (`lsp_outline`, `lsp_calls`, `lsp_fix`, `lsp_session`, `lsp_move`), the corresponding raw LSP command wrapper is removed from the public registry — no aliases. Formatting is deliberately not exposed to agents; use editor/save hooks, pre-commit hooks, CI, or a direct formatter run instead. See [docs/tool-surface.md](docs/tool-surface.md) for the full raw → workflow cut map.
 
@@ -127,6 +128,9 @@ Set in the `env` block of your `mcpServers` entry:
 | `CC_LSP_BROKER_SOCKET` | No | Override the user-scoped Unix socket. Useful for isolated tests or separate broker pools. |
 | `CC_LSP_BROKER_LOG` | No | Override the broker log path. Default: `$XDG_STATE_HOME/cc-lsp-now/broker.log` or `~/.local/state/cc-lsp-now/broker.log`. |
 | `CC_LSP_BROKER_IDLE_TTL_SECONDS` | No | Idle broker session TTL. Default 14400 seconds. Set `0` to disable automatic idle eviction. |
+| `CC_LSP_DEVTOOLS` | No | Set `1`/`true`/`on` to expose the live broker to `python-devtools` for runtime introspection. Registers `broker`, `bus`, `registry`, and `lsp` under app id `cc-lsp-now-broker` by default. |
+| `CC_LSP_DEVTOOLS_APP_ID` | No | Override the devtools app id. Default: `cc-lsp-now-broker`. |
+| `CC_LSP_DEVTOOLS_READONLY` | No | Devtools readonly mode. Default: enabled, so agents can inspect broker state without mutation tools. |
 | `CC_LSP_PROBE_CAPABILITIES` | No | Opt into startup capability probing (`1`/`true`/`on`). Default off so MCP startup never launches heavy language servers before the initialize handshake. Runtime fallback still handles unsupported methods. |
 | `LSP_PROJECT_MARKERS` | No | Comma-separated filenames that mark a project root (e.g. `pyproject.toml,setup.py,.git`). When a file outside the current workspace folders is accessed, the bridge walks up looking for these markers and adds the found root to the LSP's workspace via `workspace/didChangeWorkspaceFolders`. Plugins contribute their language's markers — Python plugins list `pyproject.toml`, Rust plugins list `Cargo.toml`, etc. Default: `.git`. |
 | `LSP_WARMUP_PATTERNS` | No | Comma-separated glob patterns (e.g. `*.py,*.pyi` for Python, `*.rs` for Rust). When a workspace folder is added (initial spawn or via auto-detection), the bridge bulk-emits `textDocument/didOpen` for matching files so the LSP eagerly indexes them. Prevents the "cold index" failure mode where `willRenameFiles` returns 0 edits because nothing has been indexed yet. No warmup if unset. |
@@ -164,9 +168,14 @@ cc-lsp-now-broker
 - Broker mode is default when an LSP chain is configured. Multiple agents reuse
   the same broker-owned LSP chain for the same root/config hash, reducing CPU
   and keeping method routing, diagnostics, and future alias memory aligned.
-- The broker roadmap also includes the agent bus: a warn-only coordination log
-  with timed questions, board notes, and hook-fed weather reports for parallel
-  agents. See [docs/agent-bus.md](docs/agent-bus.md).
+- The broker owns the first agent-bus slice: `lsp_log` appends durable
+  workspace events to `tmp/cc-lsp-now-bus.jsonl`, opens timed questions,
+  records replies, settles closed windows, and renders compact weather. The bus
+  is advisory only: no claims, leases, or edit denial. See
+  [docs/agent-bus.md](docs/agent-bus.md).
+- With `CC_LSP_DEVTOOLS=1`, the broker starts `python-devtools` and registers
+  live `broker`, `bus`, `registry`, and `lsp` objects so agents can attach via
+  the `python-devtools` MCP bridge and inspect daemon state directly.
 - Primary and fallback are both lazy-spawned — no LSP processes start until the
   first semantic tool call that needs them.
 - Method-level negative capability cache avoids repeated primary round-trips for operations the primary doesn't implement.

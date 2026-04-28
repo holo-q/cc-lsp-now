@@ -83,10 +83,12 @@ class HandlerTests(unittest.TestCase):
         self.assertIn("result", resp)
         result = _as_dict(resp["result"])
         self.assertEqual(set(result.keys()), {
-            "pid", "started_at", "uptime", "session_count", "sessions",
+            "pid", "started_at", "uptime", "session_count", "sessions", "bus", "devtools",
         })
         self.assertEqual(result["session_count"], 0)
         self.assertEqual(result["sessions"], [])
+        self.assertEqual(_as_dict(result["bus"])["event_count"], 0)
+        self.assertFalse(_as_dict(result["devtools"])["enabled"])
 
     def test_unknown_method_returns_error_frame(self) -> None:
         d = BrokerDaemon()

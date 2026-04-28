@@ -243,6 +243,15 @@ not blocking edits; it is shifting agents with fresh context before they commit
 or duplicate work. If hard claims or leases are added later, they should be
 explicit policy on top of the bus rather than the core coordination model.
 
+Current slice: `BrokerDaemon` owns an `AgentBus` instance and exposes it over
+the JSONL protocol with `bus.*` methods. `lsp_log` is the MCP-facing workflow
+tool, and every append is also persisted under the workspace's
+`tmp/cc-lsp-now-bus.jsonl` for replay/debugging. When `CC_LSP_DEVTOOLS=1` is
+set, the broker also registers `broker`, `bus`, `registry`, and `lsp` with
+`python-devtools` (`app_id=cc-lsp-now-broker` unless overridden), which gives
+agents direct runtime introspection of daemon state without making devtools a
+hard dependency.
+
 ## Relationship To cc-lsp-now
 
 `cc-lsp-now` should remain useful without a broker.

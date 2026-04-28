@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from mcp.server.fastmcp import FastMCP
 
+from cc_lsp_now.agent_bus import AgentBus
 from cc_lsp_now.agent_log import agent_log, drain_agent_messages
 from cc_lsp_now.alias_coordinator import (
     AliasCoordinator,
@@ -659,6 +660,346 @@ def _notify_broker_workspace_changes_sync(
         if _broker_mode() == "on":
             raise
         agent_log(f"broker notify_files failed ({e.code}: {e})")
+
+
+def _broker_bus_call_sync(method: str, params: dict[str, object]) -> object:
+    with BrokerClient() as client:
+        client.connect_or_start()
+        return client.request(method, params)
+
+
+async def _broker_bus_call(method: str, params: dict[str, object]) -> object:
+    return await asyncio.to_thread(_broker_bus_call_sync, method, params)
+
+
+# Public action set for `lsp_log`. Order is the rendered "Unknown action" hint
+# so an agent can self-correct without reading the source.
+_BUS_ACTIONS: tuple[str, ...] = (
+    "event",
+    "note",
+    "ask",
+    "reply",
+    "recent",
+    "settle",
+    "precommit",
+    "postcommit",
+    "weather",
+    "status",
+)
+
+# Reference list of canonical event kinds — used as documentation and to
+# default `event_type` for the `event` action. Free-form `kind` values are
+# still accepted; this set just names the hook-friendly ones from
+# docs/agent-bus.md so the surface is self-describing for agents.
+_BUS_KINDS: tuple[str, ...] = (
+    "agent.started",
+    "task.intent",
+    "file.touched",
+    "symbol.touched",
+    "test.ran",
+    "commit.created",
+    "note.posted",
+    "bus.ask",
+    "bus.reply",
+    "bus.closed",
+)
+
+# Local fallback bus used when broker mode is "off" or unreachable. The
+# broker owns the durable bus when it is alive; this in-process AgentBus
+# keeps lsp_log functional for solo agents and broker-down recoveries so
+# the public surface stays useful even before the agent-bus harness ships.
+_local_bus: AgentBus | None = None
+
+
+def _get_local_bus() -> AgentBus:
+    global _local_bus
+    if _local_bus is None:
+        _local_bus = AgentBus()
+    return _local_bus
+
+
+def _parse_bus_scope(value: str) -> list[str]:
+    """Split a comma- or whitespace-separated agent-supplied scope list."""
+    return [part.strip() for part in value.replace(",", " ").split() if part.strip()]
+
+
+def _parse_bus_duration(value: str, *, default: float = 180.0) -> float | str:
+    """Parse a "30s", "3m", "1h" timeout. Returns seconds or an error string.
+
+    The string variant lets ``lsp_log`` surface a parse error inline instead
+    of raising into the MCP transport — agents read the error and self-correct.
+    Empty input falls back to ``default`` (180s, matching the Wave 1 spec).
+    """
+    raw = ("" if value is None else str(value)).strip().lower()
+    if not raw:
+        return default
+    scale = 1.0
+    body = raw
+    if raw.endswith("ms"):
+        scale = 0.001
+        body = raw[:-2]
+    elif raw.endswith("s"):
+        body = raw[:-1]
+    elif raw.endswith("m"):
+        scale = 60.0
+        body = raw[:-1]
+    elif raw.endswith("h"):
+        scale = 3600.0
+        body = raw[:-1]
+    try:
+        seconds = float(body) * scale
+    except ValueError:
+        return f"timeout {value!r} not parseable; expected forms like 30s, 3m, 1h."
+    if seconds < 0:
+        return f"timeout {value!r} must be non-negative."
+    return seconds
+
+
+def _bus_params(
+    *,
+    message: str,
+    kind: str = "",
+    event_type: str = "",
+    files: str,
+    symbols: str,
+    aliases: str,
+    question_id: str,
+    timeout: str,
+    status: str,
+    targets: str,
+    commit: str = "",
+    action: str = "",
+    metadata: str = "",
+) -> dict[str, object]:
+    """Build the workspace-stamped payload for any ``bus.*`` method.
+
+    ``kind`` / ``event_type`` is the canonical event label
+    (``file.touched``, ``test.ran``, …). For ``action="event"`` it becomes the stored
+    ``event_type``; for the other actions it lives under ``metadata.kind``
+    so digests and recent activity can still group by hook source.
+    ``commit`` similarly lands in ``metadata.commit`` so post-commit
+    digests can name the SHA without inflating the top-level shape.
+    """
+    payload: dict[str, object] = {
+        "workspace_root": os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd())),
+        "agent_id": os.environ.get("CC_LSP_AGENT_ID", _client_id),
+        "session_id": _client_id,
+        "message": message,
+        "files": _parse_bus_scope(files),
+        "symbols": _parse_bus_scope(symbols),
+        "aliases": _parse_bus_scope(aliases),
+    }
+    chosen_kind = kind or event_type
+    if chosen_kind and action == "event":
+        payload["event_type"] = chosen_kind
+    if question_id:
+        payload["id"] = question_id
+        payload["question_id"] = question_id
+    if timeout:
+        payload["timeout"] = timeout
+    meta: dict[str, object] = _parse_bus_metadata(metadata)
+    if chosen_kind and action != "event":
+        meta["kind"] = chosen_kind
+    if status:
+        meta["status"] = status
+    if targets:
+        meta["targets"] = _parse_bus_scope(targets)
+    if commit:
+        meta["commit"] = commit
+    if meta:
+        payload["metadata"] = meta
+    return payload
+
+
+def _parse_bus_metadata(value: str) -> dict[str, object]:
+    text = value.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {"text": text}
+    return cast(dict[str, object], parsed) if isinstance(parsed, dict) else {"value": parsed}
+
+
+def _local_bus_dispatch(action: str, params: dict[str, object]) -> dict[str, object] | str:
+    """Run an action against the in-process AgentBus.
+
+    Returns the bus result dict on success, or a string error so the MCP
+    surface can stay defensive (no exception bubbles out of lsp_log).
+    """
+    bus = _get_local_bus()
+    try:
+        if action == "event":
+            return bus.event(params)
+        if action == "note":
+            return bus.note(params)
+        if action == "ask":
+            return bus.ask(params)
+        if action == "reply":
+            return bus.reply(params)
+        if action == "recent":
+            return bus.recent(params)
+        if action == "settle":
+            return bus.settle(params)
+        if action == "precommit":
+            return bus.precommit(params)
+        if action == "postcommit":
+            return bus.postcommit(params)
+        if action == "weather":
+            return bus.weather(params)
+        if action == "status":
+            return bus.status()
+    except ValueError as e:
+        return f"bus {action} failed: {e}"
+    return f"local bus has no handler for action: {action!r}"
+
+
+def _render_bus_result(action: str, result: dict[str, object]) -> str:
+    if action == "status":
+        return _render_bus_status(result)
+    if action == "weather":
+        return _render_bus_weather(result)
+    if action == "recent":
+        return _render_bus_recent(result)
+    if action == "settle":
+        return _render_bus_settle(result)
+    if action == "precommit":
+        return _render_bus_precommit(result)
+    if action in {"event", "note", "postcommit"}:
+        event = _wire_dict(result, "event")
+        return _render_logged_event(event) if event else "logged event"
+    if action == "ask":
+        question = _wire_dict(result, "question")
+        event = _wire_dict(result, "event")
+        if question:
+            qid = question.get("question_id", "")
+            left = float(question.get("seconds_left", 0.0) or 0.0)
+            msg = question.get("message", "")
+            scope = _render_bus_scope(question)
+            return "\n".join([
+                f"opened {qid} ({left:.0f}s)",
+                f"question: {msg}",
+                scope,
+                "reply: lsp_log(action='reply', id='%s', message='...')" % qid,
+            ]).strip()
+        return _render_logged_event(event) if event else "opened question"
+    if action == "reply":
+        event = _wire_dict(result, "event")
+        question = _wire_dict(result, "question")
+        qid = question.get("question_id", "") if question else ""
+        return f"reply recorded for {qid}: {_event_label(event)}"
+    return json.dumps(result, indent=2, sort_keys=True)
+
+
+def _render_bus_status(result: dict[str, object]) -> str:
+    last = str(result.get("last_event_id", ""))
+    if last and not last.startswith("E"):
+        last = f"E{last}"
+    return (
+        f"bus events={result.get('event_count', 0)} "
+        f"last={last or 'E0'} "
+        f"open_questions={result.get('open_question_count', 0)}"
+    )
+
+
+def _render_bus_weather(result: dict[str, object]) -> str:
+    lines = [f"workspace: {result.get('workspace_root', '')}"]
+    questions = _wire_list(result, "open_questions")
+    lines.append(f"open questions: {len(questions)}")
+    for q_obj in questions[:5]:
+        if isinstance(q_obj, dict):
+            q = cast(dict[str, object], q_obj)
+            lines.append(
+                f"  {q.get('question_id', '')} {float(q.get('seconds_left', 0.0) or 0.0):.0f}s "
+                f"{q.get('message', '')}"
+            )
+    recent = _wire_list(result, "recent")
+    lines.append(f"recent: {len(recent)}")
+    for e_obj in recent[-5:]:
+        if isinstance(e_obj, dict):
+            lines.append(f"  {_event_label(cast(dict[str, object], e_obj))}")
+    return "\n".join(lines)
+
+
+def _render_bus_recent(result: dict[str, object]) -> str:
+    events = _wire_list(result, "events")
+    if not events:
+        return "recent: (none)"
+    lines = ["recent:"]
+    for e_obj in events:
+        if isinstance(e_obj, dict):
+            lines.append(f"  {_event_label(cast(dict[str, object], e_obj))}")
+    if result.get("truncated"):
+        lines.append("  ... truncated; narrow scope or raise limit")
+    return "\n".join(lines)
+
+
+def _render_bus_settle(result: dict[str, object]) -> str:
+    closed = _wire_list(result, "closed")
+    if not closed:
+        return "settle: no expired questions"
+    lines = ["closed questions:"]
+    for d_obj in closed:
+        if not isinstance(d_obj, dict):
+            continue
+        digest = cast(dict[str, object], d_obj)
+        question = _wire_dict(digest, "question") or {}
+        lines.append(f"  {question.get('question_id', '')}: {question.get('message', '')}")
+        for e_obj in _wire_list(digest, "events")[-5:]:
+            if isinstance(e_obj, dict):
+                lines.append(f"    {_event_label(cast(dict[str, object], e_obj))}")
+    return "\n".join(lines)
+
+
+def _render_bus_precommit(result: dict[str, object]) -> str:
+    recent = _wire_list(result, "recent")
+    suggested = _wire_list(result, "suggested")
+    lines = ["precommit weather:"]
+    if recent:
+        for e_obj in recent[-8:]:
+            if isinstance(e_obj, dict):
+                lines.append(f"  {_event_label(cast(dict[str, object], e_obj))}")
+    else:
+        lines.append("  (no related recent bus activity)")
+    if suggested:
+        lines.append("suggested checks:")
+        for item in suggested:
+            lines.append(f"  {item}")
+    return "\n".join(lines)
+
+
+def _render_logged_event(event: dict[str, object] | None) -> str:
+    if not event:
+        return "logged event"
+    return f"logged {_event_label(event)}"
+
+
+def _event_label(event: dict[str, object] | None) -> str:
+    if not event:
+        return "(unknown event)"
+    eid = event.get("event_id", "")
+    event_type = event.get("event_type", "") or event.get("kind", "")
+    message = event.get("message", "")
+    scope = _render_bus_scope(event)
+    event_id = str(eid)
+    if event_id and not event_id.startswith("E"):
+        event_id = f"E{event_id}"
+    head = f"{event_id} {event_type}".strip()
+    if message:
+        head += f" {message}"
+    if scope:
+        head += f" [{scope}]"
+    return _compact_line(head, 220)
+
+
+def _render_bus_scope(item: dict[str, object]) -> str:
+    parts: list[str] = []
+    for key in ("files", "symbols", "aliases"):
+        values = item.get(key, [])
+        if isinstance(values, list) and values:
+            parts.append(f"{key}=" + ",".join(str(v) for v in values[:5]))
+    return " ".join(parts)
 
 
 # Project-root detection. Plugins contribute markers via LSP_PROJECT_MARKERS.
@@ -3020,6 +3361,102 @@ async def lsp_session(action: str = "status", path: str = "", server: str = "") 
     return f"Unknown action: {action!r}. Valid: status, add, warm, restart, stop."
 
 
+async def lsp_log(
+    action: str = "weather",
+    message: str = "",
+    files: str = "",
+    symbols: str = "",
+    aliases: str = "",
+    id: str = "",
+    timeout: str = "3m",
+    kind: str = "",
+    status: str = "",
+    targets: str = "",
+    commit: str = "",
+) -> str:
+    """Record and inspect agent-bus coordination events (Wave 1 surface).
+
+    The bus is warn-only shared context for parallel agents. It appends
+    workspace-scoped events, opens timed questions, records replies, and
+    renders compact weather at natural boundaries; it does not claim files
+    or deny edits.
+
+    Actions (default ``weather``):
+
+    - ``event``: append a structured event. ``kind`` becomes the stored
+      ``event_type`` (e.g. ``post_edit``, ``test``).
+    - ``note``: post a durable, scoped note without a timeout.
+    - ``ask``: open a timed coordination question. ``timeout`` accepts
+      ``30s``, ``3m``, ``1h``; default is ``3m``. ``message`` is required.
+    - ``reply``: attach a reply to an open question via ``id="Q<n>"``.
+    - ``recent``: show recent related bus activity (or empty-state line).
+    - ``settle``: close expired questions and emit their digests.
+    - ``precommit``: summarize related activity and suggest checks.
+    - ``postcommit``: record a commit; ``commit`` lands in metadata.
+    - ``weather``: compact workspace status — open questions + recent.
+
+    Routing mirrors the render/lsp broker fallback policy:
+
+    - When the broker is enabled (``CC_LSP_BROKER`` not ``off`` and an
+      LSP chain is configured), call ``bus.<action>`` against the broker
+      with workspace-stamped params.
+    - On ``CC_LSP_BROKER=on`` any broker failure surfaces as an inline
+      error string so the agent sees the misconfiguration.
+    - In ``auto`` (or ``off``) mode, an unreachable broker falls back to
+      the in-process :class:`AgentBus` so coordination still works for
+      solo agents and broker-down recoveries.
+    """
+    act = (action or "weather").strip().lower()
+    if act not in _BUS_ACTIONS:
+        return f"Unknown action: {action!r}. Valid: {', '.join(_BUS_ACTIONS)}."
+
+    if act == "ask" and not message.strip():
+        return 'action="ask" requires message="..." (the question to open).'
+    if act == "reply" and not id.strip():
+        return 'action="reply" requires id="Q<n>" (the open question id).'
+
+    timeout_seconds = _parse_bus_duration(timeout)
+    if isinstance(timeout_seconds, str):
+        return timeout_seconds
+
+    params = _bus_params(
+        message=message,
+        kind=kind,
+        files=files,
+        symbols=symbols,
+        aliases=aliases,
+        question_id=id,
+        timeout=timeout,
+        status=status,
+        targets=targets,
+        commit=commit,
+        action=act,
+    )
+
+    method = f"bus.{act}"
+    if _broker_enabled():
+        wire = _broker_base_params()
+        wire.update(params)
+        try:
+            result = await _broker_bus_call(method, wire)
+        except BrokerError as e:
+            if _broker_mode() == "on" or not _broker_unavailable(e):
+                return f"broker {method} failed: {e.code}: {e}"
+            agent_log(f"broker {method} unreachable ({e.code}); using local bus")
+            local = _local_bus_dispatch(act, params)
+            if isinstance(local, str):
+                return local
+            return _render_bus_result(act, local)
+        if not isinstance(result, dict):
+            return f"broker {method} returned {type(result).__name__}: {result!r}"
+        return _render_bus_result(act, cast(dict[str, object], result))
+
+    local = _local_bus_dispatch(act, params)
+    if isinstance(local, str):
+        return local
+    return _render_bus_result(act, local)
+
+
 async def lsp_memory(action: str = "status", target: str = "", mode: str = "") -> str:
     """Inspect and manage render-memory aliases.
 
@@ -4646,6 +5083,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "path": (lsp_path, "cc-lsp-now/path"),
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
     "session": (lsp_session, "cc-lsp-now/session"),
+    "log": (lsp_log, "cc-lsp-now/log"),
     "memory": (lsp_memory, "cc-lsp-now/memory"),
 }
 
@@ -4693,6 +5131,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "move": "workspace.fileOperations.willRename",
     "confirm": None,
     "session": None,
+    "log": None,
     "memory": None,
 }
 
