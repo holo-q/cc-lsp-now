@@ -83,6 +83,8 @@ _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 
 _BROKER_DISABLED = {"0", "false", "no", "off", "disabled"}
 _BROKER_REQUIRED = {"1", "true", "yes", "on", "required", "force"}
+_CAPABILITY_PROBE_ENABLED = {"1", "true", "yes", "on", "enabled", "force"}
+CAPABILITY_PROBE_ENV = "CC_LSP_PROBE_CAPABILITIES"
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
@@ -4709,10 +4711,17 @@ def _has_capability(caps: dict, path: str | None) -> bool:
 def _sync_probe_chain_caps() -> list[dict]:
     """Spawn each server briefly, read its advertised capabilities, then shut it down.
 
-    Runs at module load. Failure is non-fatal — a server that refuses to probe
-    is treated as supporting everything (no gating applied against it).
+    This is intentionally opt-in. Running it at MCP module import starts the
+    configured language server before the MCP initialize handshake, which makes
+    heavy servers such as csharp-ls exceed the client's startup timeout. Runtime
+    negative capability caching already handles unsupported methods; this probe
+    is only a context-pruning optimization for users who explicitly request it.
     """
     import asyncio as _asyncio
+
+    raw = os.environ.get(CAPABILITY_PROBE_ENV, "").strip().lower()
+    if raw not in _CAPABILITY_PROBE_ENABLED:
+        return []
 
     try:
         chain = _parse_chain()

@@ -1,7 +1,13 @@
 import unittest
 
 from cc_lsp_now import server as _server
-from cc_lsp_now.server import _ALL_TOOLS, DISABLED_BY_DEFAULT, TOOL_CAPABILITIES
+from cc_lsp_now.server import (
+    CAPABILITY_PROBE_ENV,
+    _ALL_TOOLS,
+    DISABLED_BY_DEFAULT,
+    TOOL_CAPABILITIES,
+    _sync_probe_chain_caps,
+)
 
 
 # Wave 1 of the agent-first tool surface (see docs/tool-surface.md).
@@ -115,6 +121,19 @@ class ToolSurfaceTests(unittest.TestCase):
         # silently no-op the subtraction in the registration block.
         for name in DISABLED_BY_DEFAULT:
             self.assertIn(name, _ALL_TOOLS)
+
+    def test_startup_capability_probe_is_opt_in(self) -> None:
+        # Import-time probing starts the configured LSP before the MCP
+        # initialize handshake. Heavy servers such as csharp-ls can then exceed
+        # Codex/Claude's MCP startup timeout before the MCP server is even
+        # ready. The default must stay no-probe; runtime method fallback handles
+        # unsupported operations.
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"LSP_SERVERS": "definitely-not-a-real-lsp"}, clear=False):
+            os.environ.pop(CAPABILITY_PROBE_ENV, None)
+            self.assertEqual(_sync_probe_chain_caps(), [])
 
     def test_formatting_tools_are_not_agent_facing(self) -> None:
         # Formatting is intentionally outside the agent-facing surface. It is
