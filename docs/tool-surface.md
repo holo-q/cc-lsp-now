@@ -18,7 +18,9 @@ planned reversible alias/compression layer over repeated semantic nodes. See
 `docs/agent-tool-roadmap.md` for the pending-edit, what-if, witness,
 multi-agent, and verifier tool roadmap that extends this surface beyond raw LSP
 orchestration. See `docs/lsp-path.md` for the bounded pathfinding operator that
-connects two known semantic anchors through one explicit edge family.
+connects two known semantic anchors through one explicit edge family. See
+`docs/agent-bus.md` for the planned multi-agent event log and hook-fed bus
+digests.
 
 ## Target Tools
 
@@ -45,6 +47,16 @@ connects two known semantic anchors through one explicit edge family.
 `lsp_rename`, and `lsp_move` are the implemented pieces of this surface today.
 The graph-aware tools preserve semantic graph context between calls, which is
 the pattern the rest of the tools should follow.
+
+Planned coordination surface:
+
+| Tool | Purpose |
+|------|---------|
+| `lsp_log` | Append agent events, notes, timed bus questions, replies, and hook digests. |
+
+`lsp_log` is not a raw LSP verb. It belongs to the broker-shaped agent layer:
+weather reports for parallel work, not file locks. The first implementation
+should be warn-only and should print nothing when there is no useful signal.
 
 ## Raw Tool Cut Map
 

@@ -215,6 +215,34 @@ applies a staged edit and reports before/after diagnostics, references, and
 other verifier signals. `predict_conflict` compares staged edits across callers
 and belongs naturally in the broker once it can see multiple clients.
 
+## Agent Bus And Hooks
+
+The broker should also own the agent bus described in `docs/agent-bus.md`.
+Parallel agents do not need a file-claiming bureaucracy by default; they need
+short, reliable weather reports at the boundaries where they are already about
+to act.
+
+Broker-owned bus state:
+
+- append-only workspace event log,
+- open timed questions,
+- replies and notes,
+- per-agent digest frontiers,
+- hook-visible recent activity,
+- file, symbol, and alias scope indexes.
+
+The bus turns hooks into coordination points. Session start, edit hooks,
+`lsp_confirm`, test runs, and git commit hooks can ask the broker for a compact
+notice and print nothing when there is no useful signal. A question such as "I am
+about to split `lsp_refs`; anyone touching `server.py`?" opens a timed window.
+During the timeout, related events and replies are collected. At timeout, the
+next hook output prints the digest.
+
+This should stay warn-only for the first implementation. The useful dynamic is
+not blocking edits; it is shifting agents with fresh context before they commit
+or duplicate work. If hard claims or leases are added later, they should be
+explicit policy on top of the bus rather than the core coordination model.
+
 ## Relationship To cc-lsp-now
 
 `cc-lsp-now` should remain useful without a broker.
@@ -227,7 +255,9 @@ The migration path was:
 4. Teach MCP plugins to try the broker first and fall back to direct mode.
 5. Move render-memory alias coordination into broker session state: one master
    alias book per workspace, with a per-client introduction frontier.
-6. Add broker-only tools once the lifecycle is stable.
+6. Add the broker-backed agent bus: durable events, timed questions, hook
+   notices, and per-agent digest frontiers.
+7. Add broker-only tools once the lifecycle is stable.
 
 That keeps adoption reversible and avoids turning an architecture experiment
 into a hard runtime dependency.

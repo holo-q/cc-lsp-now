@@ -163,6 +163,9 @@ cc-lsp-now-broker
 - Broker mode is default when an LSP chain is configured. Multiple agents reuse
   the same broker-owned LSP chain for the same root/config hash, reducing CPU
   and keeping method routing, diagnostics, and future alias memory aligned.
+- The broker roadmap also includes the agent bus: a warn-only coordination log
+  with timed questions, board notes, and hook-fed weather reports for parallel
+  agents. See [docs/agent-bus.md](docs/agent-bus.md).
 - Primary and fallback are both lazy-spawned — no LSP processes start until the
   first semantic tool call that needs them.
 - Method-level negative capability cache avoids repeated primary round-trips for operations the primary doesn't implement.

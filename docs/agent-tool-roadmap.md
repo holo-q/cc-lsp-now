@@ -149,6 +149,11 @@ work is safe:
 - `_last_semantic_groups`: one global semantic group set.
 - process-local logs and warm state with no durable trace.
 
+The coordination layer should be ambient first. Agents need a compressed signal
+when they catch the next bus, not a permission fight before every edit. See
+`docs/agent-bus.md` for the bus-window design: append-only events, timed
+questions, hook-fed notices, and warn-only digests.
+
 Planned primitives:
 
 - `lsp_stage`: list, name, drop, and confirm staged edits.
@@ -159,17 +164,23 @@ Planned primitives:
 - `lsp_journal` / `lsp_revert`: append every confirmed mutation and allow
   safe inverse edits when touched content has not drifted.
 - `lsp_trace`: write JSONL request/response summaries for debugging and replay.
+- `lsp_log`: append coordination events, notes, timed questions, replies, and
+  hook digests.
 
 Broker-era primitives:
 
-- `lsp_lease`: symbol/path edit leases with TTL.
+- broker-backed event log: one workspace journal shared across agents.
+- bus windows: timed questions with scoped event/reply aggregation.
+- hook weather: session/edit/test/commit notices that print only when useful.
 - `lsp_predict_conflict`: compare staged edits across callers.
-- `lsp_who`: active sessions, callers, stages, leases, recent confirms.
-- `lsp_subscribe`: long-poll diagnostics, confirms, leases, and file changes.
+- `lsp_who`: active sessions, callers, stages, open questions, recent confirms.
+- `lsp_subscribe`: long-poll diagnostics, confirms, bus events, and file changes.
 
 The direct MCP server can implement named buffers, pins, snapshots, journals,
-and traces first. Leases and conflict prediction become much more useful once a
-broker owns multiple callers.
+traces, and a local `lsp_log` first. Claims and leases are not the primary
+model; if they ever exist, they should be opt-in hard policy layered behind the
+warn-only bus. Conflict prediction becomes much more useful once a broker owns
+multiple callers.
 
 ## High-Leverage Tool Ideas
 
