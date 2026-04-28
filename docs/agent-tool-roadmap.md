@@ -248,6 +248,13 @@ This makes default changes and signature migrations evidence-driven.
 One-call blast radius graph: refs, calls, and type edges from a target out to N
 hops, capped and indexed.
 
+### `lsp_path`
+
+Bounded bridge search between two known semantic anchors over one explicit edge
+family. This is the hop-collapser for "how does A reach B?" without turning the
+entire codebase into a vague mixed graph. See `docs/lsp-path.md` for the public
+contract, rendering shape, guardrails, and implementation slice.
+
 ### `lsp_assert`
 
 Small semantic guardrail predicates:
@@ -285,10 +292,11 @@ provenance that belongs in logs and test artifacts.
 2. `lsp_move` / `lsp_fix` preview parity with rename.
 3. `lsp_grep` lineage honesty: `refs` versus `hits (unresolved)`.
 4. Named pending buffers and graph pins.
-5. Snapshot stamps and mutation journal.
-6. `lsp_what_if` overlays.
-7. `lsp_witness` and diagnostic baselines.
-8. `lsp_root_cause`, `lsp_impact`, and `lsp_test_targets`.
+5. `lsp_path` calls-only bridge search and path rendering.
+6. Snapshot stamps and mutation journal.
+7. `lsp_what_if` overlays.
+8. `lsp_witness` and diagnostic baselines.
+9. `lsp_root_cause`, `lsp_impact`, and `lsp_test_targets`.
 
 This order stabilizes the visible interface first, then makes staged state
 safe, then adds prediction and verification tools on top.
