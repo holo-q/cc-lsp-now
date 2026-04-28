@@ -27,6 +27,7 @@ from typing import cast
 
 from cc_lsp_now.broker import (
     BrokerError,
+    broker_log_path,
     decode_message,
     encode_message,
     socket_path,
@@ -196,19 +197,24 @@ def start_broker_subprocess() -> subprocess.Popen[bytes]:
     """Spawn a detached `python -m cc_lsp_now.broker` process.
 
     Detached so it survives the calling MCP session.  stdout/stderr are
-    routed to `/dev/null` for now; once the broker grows logging hooks
-    they should land under `$XDG_STATE_HOME/cc-lsp-now/broker.log`.
+    appended to the same broker log as structured Python logging, so
+    startup crashes and runtime traces land in one place.
     """
-    devnull = subprocess.DEVNULL
-    return subprocess.Popen(
-        [sys.executable, "-m", "cc_lsp_now.broker"],
-        stdin=devnull,
-        stdout=devnull,
-        stderr=devnull,
-        start_new_session=True,
-        close_fds=True,
-        env=os.environ.copy(),
-    )
+    log_file = broker_log_path()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_file.open("ab")
+    try:
+        return subprocess.Popen(
+            [sys.executable, "-m", "cc_lsp_now.broker"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=os.environ.copy(),
+        )
+    finally:
+        log_handle.close()
 
 
 # --- Helpers ----------------------------------------------------------------

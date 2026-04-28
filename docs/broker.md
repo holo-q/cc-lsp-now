@@ -99,6 +99,9 @@ Runtime switches:
 - `CC_LSP_BROKER=on`: require broker mode; broker transport errors surface.
 - `CC_LSP_BROKER=off`: keep the old direct in-process lifecycle.
 - `CC_LSP_BROKER_SOCKET=/path/to.sock`: isolate or override the broker socket.
+- `CC_LSP_BROKER_LOG=/path/to.log`: isolate or override the broker log.
+- `CC_LSP_BROKER_IDLE_TTL_SECONDS=14400`: evict idle sessions after this many
+  seconds; `0` disables eviction.
 
 ## Session Model
 
@@ -113,13 +116,12 @@ A broker session owns:
 - file watcher state,
 - pending server lifecycle state.
 
-Clients connect to the broker and borrow a session. The broker reference-counts
-active clients and keeps idle sessions alive for a configurable TTL.
+Clients connect to the broker and borrow a session. The broker keeps idle
+sessions alive for a configurable TTL and stops them when they age out.
 
 Current implementation note: the registry stores session records, and
-`BrokerLspSession` owns the live `LspClient` chain. Reference counting and idle
-eviction are still future work; sessions live until explicitly stopped or until
-the broker exits.
+`BrokerLspSession` owns the live `LspClient` chain. Reference counting is still
+future work; idle eviction and explicit root/config stop are implemented.
 
 Session identity should be explicit and debuggable:
 

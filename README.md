@@ -123,6 +123,10 @@ Set in the `env` block of your `mcpServers` entry:
 | `LSP_REPLACE` | No | Post-filter command substitution: `old=new,old=new`. Applied to `LSP_SERVERS` entries and `LSP_PREFER` targets so a user can swap a binary without rewriting the whole config. Example: `basedpyright-langserver=pylance-language-server` replaces basedpyright everywhere the plugin mentions it. |
 | `LSP_TOOLS` | No | Which tools to register. `all` = every public tool. Comma list = explicit opt-in. Default = all public tools. |
 | `LSP_EXCLUDE` | No | Comma-separated tools to exclude from the enabled set. (Legacy name: `LSP_DISABLED_TOOLS` — still accepted.) |
+| `CC_LSP_BROKER` | No | Broker mode: `auto` (default) shares one warm LSP chain across agents and falls back to direct mode if the broker is unreachable; `on` requires the broker; `off` restores one LSP chain per MCP process. |
+| `CC_LSP_BROKER_SOCKET` | No | Override the user-scoped Unix socket. Useful for isolated tests or separate broker pools. |
+| `CC_LSP_BROKER_LOG` | No | Override the broker log path. Default: `$XDG_STATE_HOME/cc-lsp-now/broker.log` or `~/.local/state/cc-lsp-now/broker.log`. |
+| `CC_LSP_BROKER_IDLE_TTL_SECONDS` | No | Idle broker session TTL. Default 14400 seconds. Set `0` to disable automatic idle eviction. |
 | `LSP_PROJECT_MARKERS` | No | Comma-separated filenames that mark a project root (e.g. `pyproject.toml,setup.py,.git`). When a file outside the current workspace folders is accessed, the bridge walks up looking for these markers and adds the found root to the LSP's workspace via `workspace/didChangeWorkspaceFolders`. Plugins contribute their language's markers — Python plugins list `pyproject.toml`, Rust plugins list `Cargo.toml`, etc. Default: `.git`. |
 | `LSP_WARMUP_PATTERNS` | No | Comma-separated glob patterns (e.g. `*.py,*.pyi` for Python, `*.rs` for Rust). When a workspace folder is added (initial spawn or via auto-detection), the bridge bulk-emits `textDocument/didOpen` for matching files so the LSP eagerly indexes them. Prevents the "cold index" failure mode where `willRenameFiles` returns 0 edits because nothing has been indexed yet. No warmup if unset. |
 | `LSP_WARMUP_MAX_FILES` | No | Cap on how many files to warm per workspace folder. Default 500. |
@@ -149,14 +153,24 @@ The MCP server speaks stdio — useful for testing or for non-plugin MCP clients
 Claude Code
     ↕ MCP (stdio)
 cc-lsp-now (mcp_server.py)
+    ↕ JSONL / Unix socket  [broker mode, default]
+cc-lsp-now-broker
     ↕ JSON-RPC / LSP (stdio)
 ┌─── Primary LSP (ty, rust-analyzer, ...)
 └─── Fallback LSP  (basedpyright, pyright, ...)  [lazy-spawned]
 ```
 
-- Primary and fallback are both lazy-spawned — no processes started until first tool call.
+- Broker mode is default when an LSP chain is configured. Multiple agents reuse
+  the same broker-owned LSP chain for the same root/config hash, reducing CPU
+  and keeping method routing, diagnostics, and future alias memory aligned.
+- Primary and fallback are both lazy-spawned — no LSP processes start until the
+  first semantic tool call that needs them.
 - Method-level negative capability cache avoids repeated primary round-trips for operations the primary doesn't implement.
 - Document sync reads from disk on each tool call (no in-memory tracking of user edits — the files on disk are the source of truth).
+- `lsp_session(action="status")` reports broker PID, socket, log path, live
+  sessions, client PIDs, open documents, cached method routes, and request
+  counts. `action="restart"` stops the matching broker session so the next
+  request respawns it; `action="stop"` stops without respawn.
 
 ## Context
 

@@ -427,14 +427,20 @@ Broker mode should move render memory from process globals to session state:
 
 ```text
 WorkspaceSession
-  shared_alias_book
-  per_client_alias_books
+  master_alias_book          # stable identity -> canonical alias
+  client_frontiers           # client id -> aliases already introduced to that agent
+  client_render_windows      # client id -> local compression/recentness state
 ```
 
 Policy:
 
-- anonymous aliases belong to the current client;
-- named/pinned aliases can be promoted to shared workspace memory;
+- the broker allocates canonical aliases so agents converge on one legend;
+- each client tracks an "introduced aliases" frontier, so output never compresses
+  to an alias that has not been shown in that agent's own context;
+- renderers may fall back to a fuller row for one client while emitting dense
+  aliases for another client that has already seen the legend;
+- named/pinned aliases can be promoted to shared workspace memory, but the
+  introduction frontier still gates compression per client;
 - pending edit aliases remain per-client unless explicitly shared;
 - aliases carry snapshot stamps so stale resolution is deterministic.
 

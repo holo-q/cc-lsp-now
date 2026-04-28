@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from cc_lsp_now.lsp import LspClient, LspError
 
 
 ClientFactory = Callable[[list[str], str], LspClient]
+log = logging.getLogger(__name__)
 
 _SLOW_METHODS: set[str] = {
     "workspace/willRenameFiles",
@@ -140,6 +142,11 @@ class BrokerLspSession:
         self.lock = asyncio.Lock()
         self.client_factory = client_factory or (lambda command, root_path: LspClient(command, root_path))
         self.last_used_at = time.time()
+        self.request_count = 0
+        self.last_method = ""
+        self.last_server_label = ""
+        self.last_duration_ms = 0
+        self.client_request_counts: list[int] = [0] * len(chain)
 
     async def stop(self) -> None:
         async with self.lock:
@@ -203,9 +210,12 @@ class BrokerLspSession:
     ) -> BrokerRequestResult:
         async with self.lock:
             self.last_used_at = time.time()
+            self.request_count += 1
+            self.last_method = method
             started: list[str] = []
             workspaces_added: list[str] = []
             timeout = _timeout_for(method)
+            started_at = time.monotonic()
 
             async def get_client(idx: int) -> LspClient:
                 if self.clients[idx] is None:
@@ -238,6 +248,16 @@ class BrokerLspSession:
                 client = await prepare_client(idx)
                 try:
                     result = await client.request(method, params, timeout=timeout)
+                    self.client_request_counts[idx] += 1
+                    self.last_server_label = self.chain[idx].label
+                    self.last_duration_ms = int((time.monotonic() - started_at) * 1000)
+                    log.info(
+                        "lsp.request root=%s method=%s server=%s duration_ms=%s cached=true",
+                        self.root,
+                        method,
+                        self.chain[idx].label,
+                        self.last_duration_ms,
+                    )
                     return BrokerRequestResult(result, self.chain[idx].label, started, workspaces_added)
                 except asyncio.TimeoutError:
                     agent_log(f"{self.chain[idx].label} timed out on {method} (broker cached), invalidating")
@@ -250,6 +270,7 @@ class BrokerLspSession:
                 client = await prepare_client(idx)
                 try:
                     result = await client.request(method, params, timeout=timeout)
+                    self.client_request_counts[idx] += 1
                 except asyncio.TimeoutError:
                     agent_log(f"{self.chain[idx].label} timed out on {method} in broker, trying next")
                     continue
@@ -266,10 +287,28 @@ class BrokerLspSession:
                     continue
 
                 self.method_handler[method] = idx
+                self.last_server_label = self.chain[idx].label
+                self.last_duration_ms = int((time.monotonic() - started_at) * 1000)
+                log.info(
+                    "lsp.request root=%s method=%s server=%s duration_ms=%s cached=false",
+                    self.root,
+                    method,
+                    self.chain[idx].label,
+                    self.last_duration_ms,
+                )
                 return BrokerRequestResult(result, self.chain[idx].label, started, workspaces_added)
 
             if last_empty_idx is not None:
                 self.method_handler[method] = last_empty_idx
+                self.last_server_label = self.chain[last_empty_idx].label
+                self.last_duration_ms = int((time.monotonic() - started_at) * 1000)
+                log.info(
+                    "lsp.request root=%s method=%s server=%s duration_ms=%s empty_fallback=true",
+                    self.root,
+                    method,
+                    self.chain[last_empty_idx].label,
+                    self.last_duration_ms,
+                )
                 return BrokerRequestResult(last_empty, self.chain[last_empty_idx].label, started, workspaces_added)
 
             if last_err is not None:
@@ -300,11 +339,18 @@ class BrokerLspSession:
                     "state": "live" if client is not None else "not spawned",
                     "folders": sorted(client.workspace_folders) if client is not None else [],
                     "capabilities": sorted(client.capabilities.keys()) if client is not None else [],
+                    "open_documents": len(getattr(client, "_open_documents", {})) if client is not None else 0,
+                    "pid": getattr(getattr(client, "_process", None), "pid", None) if client is not None else None,
+                    "request_count": self.client_request_counts[idx],
                 }
             )
         return {
             "root": self.root,
             "last_used_at": self.last_used_at,
+            "request_count": self.request_count,
+            "last_method": self.last_method,
+            "last_server_label": self.last_server_label,
+            "last_duration_ms": self.last_duration_ms,
             "clients": clients,
             "method_handlers": {
                 method: (self.chain[idx].label if idx is not None else None)
@@ -355,6 +401,30 @@ class BrokerLspManager:
         if lsp_session is not None:
             await lsp_session.stop()
         return self.registry.stop(session_id) or lsp_session is not None
+
+    async def stop_matching(self, *, root: str, config_hash_value: str) -> list[str]:
+        root = os.path.abspath(root)
+        stopped: list[str] = []
+        for session in list(self.registry.all_sessions()):
+            if session.key.root != root or session.key.config_hash != config_hash_value:
+                continue
+            if await self.stop_session(session.session_id):
+                stopped.append(session.session_id)
+        return stopped
+
+    async def evict_idle(self, *, ttl_seconds: float, now: float | None = None) -> list[str]:
+        if ttl_seconds <= 0:
+            return []
+        current = now if now is not None else time.time()
+        evicted: list[str] = []
+        for session in list(self.registry.all_sessions()):
+            live = self.sessions.get(session.session_id)
+            last_used = live.last_used_at if live is not None else session.last_used_at
+            if current - last_used < ttl_seconds:
+                continue
+            if await self.stop_session(session.session_id):
+                evicted.append(session.session_id)
+        return evicted
 
     async def stop_all(self) -> None:
         for sid in list(self.sessions.keys()):

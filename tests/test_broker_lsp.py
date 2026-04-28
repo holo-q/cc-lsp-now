@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from cc_lsp_now.broker_session import SessionRegistry
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from cc_lsp_now import server
-from cc_lsp_now.broker_lsp import BrokerLspSession, chain_config_hash, chain_from_wire, chain_to_wire
+from cc_lsp_now.broker import BrokerDaemon
+from cc_lsp_now.broker_lsp import BrokerLspManager, BrokerLspSession, chain_config_hash, chain_from_wire, chain_to_wire
 from cc_lsp_now.chain_server import ChainServer
 from cc_lsp_now.lsp import LspClient
 
@@ -23,6 +25,7 @@ class FakeLspClient:
         self.workspace_folders: set[str] = {root}
         self.capabilities: dict[str, object] = {"definitionProvider": True}
         self.diagnostics: dict[str, list] = {}
+        self._open_documents: dict[str, int] = {}
 
     async def start(self) -> None:
         self.started += 1
@@ -36,6 +39,7 @@ class FakeLspClient:
 
     async def ensure_document(self, uri: str) -> None:
         self.ensured.append(uri)
+        self._open_documents[uri] = self._open_documents.get(uri, -1) + 1
 
     async def resync_open_documents(self) -> int:
         self.resynced += 1
@@ -104,6 +108,109 @@ class BrokerLspSessionTests(unittest.IsolatedAsyncioTestCase):
         await session.request("workspace/symbol", {}, uri=None, empty_fallback_methods=set())
 
         self.assertEqual(clients[0].workspace_folders, {"/repo", "/repo/sub"})
+
+    async def test_status_reports_load_bearing_runtime_counters(self) -> None:
+        def factory(command: list[str], root: str) -> LspClient:
+            return cast(LspClient, FakeLspClient(command, root))
+
+        chain = [ChainServer(command="fake-ls", args=[], name="fake", label="fake")]
+        session = BrokerLspSession("/repo", chain, client_factory=factory)
+
+        await session.request("textDocument/definition", {}, uri="file:///repo/a.cs", empty_fallback_methods=set())
+
+        status = session.status()
+        self.assertEqual(status["request_count"], 1)
+        self.assertEqual(status["last_method"], "textDocument/definition")
+        self.assertEqual(status["last_server_label"], "fake")
+        client = cast(list[dict[str, object]], status["clients"])[0]
+        self.assertEqual(client["state"], "live")
+        self.assertEqual(client["open_documents"], 1)
+        self.assertEqual(client["request_count"], 1)
+
+
+class BrokerLspManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_matching_uses_root_and_config_hash(self) -> None:
+        registry = SessionRegistry()
+        manager = BrokerLspManager(registry)
+        chain = [ChainServer(command="fake-ls", args=[], name="fake", label="fake")]
+        sid, _session = manager.get_or_create(
+            root="/repo",
+            config_hash_value="h1",
+            chain=chain,
+            server_label="fake",
+        )
+        manager.get_or_create(
+            root="/other",
+            config_hash_value="h1",
+            chain=chain,
+            server_label="fake",
+        )
+
+        stopped = await manager.stop_matching(root="/repo", config_hash_value="h1")
+
+        self.assertEqual(stopped, [sid])
+        self.assertEqual(len(registry), 1)
+
+    async def test_idle_eviction_stops_sessions_past_ttl(self) -> None:
+        registry = SessionRegistry()
+        manager = BrokerLspManager(registry)
+        chain = [ChainServer(command="fake-ls", args=[], name="fake", label="fake")]
+        old_sid, old = manager.get_or_create(
+            root="/old",
+            config_hash_value="h",
+            chain=chain,
+            server_label="fake",
+        )
+        _new_sid, new = manager.get_or_create(
+            root="/new",
+            config_hash_value="h",
+            chain=chain,
+            server_label="fake",
+        )
+        old.last_used_at = 10.0
+        new.last_used_at = 95.0
+
+        evicted = await manager.evict_idle(ttl_seconds=50.0, now=100.0)
+
+        self.assertEqual(evicted, [old_sid])
+        self.assertEqual(len(registry), 1)
+
+
+class BrokerDaemonLspForwardingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_lsp_requests_share_one_broker_owned_client(self) -> None:
+        clients: list[FakeLspClient] = []
+
+        def factory(command: list[str], root: str) -> LspClient:
+            client = FakeLspClient(command, root)
+            clients.append(client)
+            return cast(LspClient, client)
+
+        daemon = BrokerDaemon()
+        daemon.lsp = BrokerLspManager(daemon.registry, client_factory=factory)
+        params: dict[str, object] = {
+            "root": "/repo",
+            "config_hash": "h1",
+            "server_label": "fake",
+            "chain": chain_to_wire([ChainServer(command="fake-ls", args=[], name="fake", label="fake")]),
+            "lsp_method": "textDocument/definition",
+            "lsp_params": {},
+            "uri": "file:///repo/a.cs",
+            "empty_fallback_methods": [],
+        }
+
+        first = await daemon.handle_request({"id": "1", "method": "lsp.request", "params": params})
+        second = await daemon.handle_request({"id": "2", "method": "lsp.request", "params": params})
+        status = await daemon.handle_request({"id": "3", "method": "lsp.status", "params": {}})
+
+        self.assertIn("result", first)
+        self.assertIn("result", second)
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0].started, 1)
+        result = cast(dict[str, object], status["result"])
+        self.assertEqual(result["session_count"], 1)
+        session = cast(list[dict[str, object]], result["sessions"])[0]
+        lsp = cast(dict[str, object], session["lsp"])
+        self.assertEqual(lsp["request_count"], 2)
 
 
 class BrokerWireShapeTests(unittest.TestCase):

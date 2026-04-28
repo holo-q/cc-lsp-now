@@ -42,6 +42,7 @@ import inspect
 import unittest
 from collections.abc import Coroutine
 from typing import Any, cast
+from unittest.mock import AsyncMock, patch
 
 from cc_lsp_now import server as _server
 from cc_lsp_now.chain_server import ChainServer
@@ -332,6 +333,68 @@ class LspSessionLifecycleHelperTests(unittest.TestCase):
 
         self.assertIn("restored 1 workspace folder", result)
         self.assertIn("/repo/extra", new_client.workspace_folders)
+
+    def test_broker_status_renders_process_and_session_load(self) -> None:
+        _server._chain_configs[:] = [ChainServer(command="fake-ls", args=[], name="fake", label="fake")]
+        _server._chain_clients[:] = [None]
+        broker_status: dict[str, object] = {
+            "pid": 123,
+            "socket": "/run/user/1/cc-lsp-broker.sock",
+            "log_path": "/state/cc-lsp-now/broker.log",
+            "idle_ttl_seconds": 14400.0,
+            "sessions": [
+                {
+                    "session_id": "s1",
+                    "root": "/repo",
+                    "config_hash": "abc",
+                    "client_count": 0,
+                    "lsp": {
+                        "request_count": 3,
+                        "last_method": "textDocument/definition",
+                        "last_server_label": "fake",
+                        "last_duration_ms": 7,
+                        "method_handlers": {"textDocument/definition": "fake"},
+                        "clients": [
+                            {
+                                "label": "fake",
+                                "state": "live",
+                                "pid": 456,
+                                "open_documents": 2,
+                                "request_count": 3,
+                                "folders": ["/repo"],
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+        with patch.dict("os.environ", {"LSP_SERVERS": "fake-ls", "CC_LSP_BROKER": "on"}, clear=False):
+            with patch.object(_server, "_broker_lsp_status", AsyncMock(return_value=broker_status)):
+                result = _run(_server._session_status())
+
+        self.assertIn("broker: on (enabled)", result)
+        self.assertIn("broker pid: 123", result)
+        self.assertIn("broker socket: /run/user/1/cc-lsp-broker.sock", result)
+        self.assertIn("routes: textDocument/definition->fake", result)
+        self.assertIn("[fake] live pid=456 open=2 requests=3", result)
+
+    def test_broker_stop_uses_root_config_matching(self) -> None:
+        _server._chain_configs[:] = [ChainServer(command="fake-ls", args=[], name="fake", label="fake")]
+        _server._chain_clients[:] = [None]
+
+        with patch.dict("os.environ", {"LSP_SERVERS": "fake-ls", "CC_LSP_BROKER": "on"}, clear=False):
+            with patch.object(_server, "_broker_call", AsyncMock(return_value={"stopped": ["s1"]})) as call:
+                result = _run(_server._session_stop(""))
+
+        self.assertIn("[broker] stopped 1 session", result)
+        call.assert_awaited_once()
+        self.assertIsNotNone(call.await_args)
+        awaited = call.await_args
+        assert awaited is not None
+        method, params = awaited.args
+        self.assertEqual(method, "session.stop_matching")
+        self.assertEqual(params["root"], str(_server._broker_base_params()["root"]))
 
 
 if __name__ == "__main__":

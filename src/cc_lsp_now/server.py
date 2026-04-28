@@ -2848,6 +2848,7 @@ async def lsp_session(action: str = "status", path: str = "", server: str = "") 
       the LSP's view drifts.
     - ``restart``: stop and respawn LSP clients (filter via ``server``).
       Use when a server is wedged or its in-memory state is corrupt.
+    - ``stop``: stop matching live LSP clients/sessions without respawning.
     """
     act = (action or "status").lower()
     if act == "status":
@@ -2860,7 +2861,9 @@ async def lsp_session(action: str = "status", path: str = "", server: str = "") 
         return await _session_warm(path, server)
     if act == "restart":
         return await _session_restart(server)
-    return f"Unknown action: {action!r}. Valid: status, add, warm, restart."
+    if act == "stop":
+        return await _session_stop(server)
+    return f"Unknown action: {action!r}. Valid: status, add, warm, restart, stop."
 
 
 async def lsp_memory(action: str = "status", target: str = "", mode: str = "") -> str:
@@ -2960,9 +2963,14 @@ async def _session_status() -> str:
     except Exception:
         pass
 
-    lines.append(f"broker: {_broker_mode()}")
+    broker_state = "enabled" if _broker_enabled() else "disabled"
+    lines.append(f"broker: {_broker_mode()} ({broker_state})")
     broker_status = await _broker_lsp_status() if _broker_enabled() else None
     if broker_status:
+        lines.append(f"broker pid: {broker_status.get('pid')}")
+        lines.append(f"broker socket: {broker_status.get('socket')}")
+        lines.append(f"broker log: {broker_status.get('log_path')}")
+        lines.append(f"broker idle_ttl: {broker_status.get('idle_ttl_seconds')}s")
         lines.append("")
         lines.append("Broker sessions:")
         sessions = _wire_list(broker_status, "sessions")
@@ -2980,15 +2988,30 @@ async def _session_status() -> str:
             lsp = _wire_dict(session, "lsp")
             if lsp is None:
                 continue
+            lines.append(
+                "    "
+                f"requests={lsp.get('request_count', 0)} last={lsp.get('last_method') or '-'} "
+                f"via={lsp.get('last_server_label') or '-'} {lsp.get('last_duration_ms', 0)}ms"
+            )
+            handlers = lsp.get("method_handlers", {})
+            if isinstance(handlers, dict) and handlers:
+                rendered = ", ".join(f"{k}->{v}" for k, v in sorted(handlers.items()))
+                lines.append(f"    routes: {rendered}")
             for client_obj in _wire_list(lsp, "clients"):
                 if not isinstance(client_obj, dict):
                     continue
                 client = cast(dict[str, object], client_obj)
                 label = client.get("label", "server")
                 state = client.get("state", "unknown")
+                pid = client.get("pid") or "-"
+                open_docs = client.get("open_documents", 0)
+                req_count = client.get("request_count", 0)
                 folders = client.get("folders", [])
                 folder_text = ", ".join(str(f) for f in folders) if isinstance(folders, list) else ""
-                lines.append(f"    [{label}] {state}: {folder_text or '(no folders)'}")
+                lines.append(
+                    f"    [{label}] {state} pid={pid} open={open_docs} requests={req_count}: "
+                    f"{folder_text or '(no folders)'}"
+                )
 
     _ensure_chain_configs()
     now = time.time()
@@ -3118,26 +3141,7 @@ async def _session_warm(path: str, server: str) -> str:
 
 async def _session_restart(server: str) -> str:
     if _broker_enabled():
-        status = await _broker_lsp_status()
-        current = _broker_base_params()
-        if not status:
-            return "No broker status available."
-        stopped: list[str] = []
-        for session_obj in _wire_list(status, "sessions"):
-            if not isinstance(session_obj, dict):
-                continue
-            session = cast(dict[str, object], session_obj)
-            if session.get("root") != current["root"] or session.get("config_hash") != current["config_hash"]:
-                continue
-            sid = session.get("session_id")
-            if not isinstance(sid, str):
-                continue
-            try:
-                result = await _broker_call("session.stop", {"session_id": sid})
-            except BrokerError as e:
-                return f"broker restart failed stopping {sid}: {e.code}: {e}"
-            if isinstance(result, dict) and cast(dict[str, object], result).get("stopped"):
-                stopped.append(sid)
+        stopped = await _broker_stop_matching()
         return (
             f"[broker] stopped {len(stopped)} session(s); next request will spawn fresh"
             if stopped else
@@ -3188,6 +3192,63 @@ async def _session_restart(server: str) -> str:
             except Exception as e:
                 results.append(f"[{cfg.label}] respawn failed: {e}")
     return "\n".join(results) if results else "No servers to restart."
+
+
+async def _broker_stop_matching() -> list[str]:
+    current = _broker_base_params()
+    try:
+        result = await _broker_call(
+            "session.stop_matching",
+            {
+                "root": str(current["root"]),
+                "config_hash": str(current["config_hash"]),
+            },
+        )
+    except BrokerError as e:
+        raise RuntimeError(f"broker stop failed: {e.code}: {e}") from None
+    if isinstance(result, dict):
+        stopped = cast(dict[str, object], result).get("stopped", [])
+        if isinstance(stopped, list):
+            return [sid for sid in stopped if isinstance(sid, str)]
+    return []
+
+
+async def _session_stop(server: str) -> str:
+    if _broker_enabled():
+        try:
+            stopped = await _broker_stop_matching()
+        except RuntimeError as e:
+            return str(e)
+        return (
+            f"[broker] stopped {len(stopped)} session(s)"
+            if stopped else
+            "[broker] no matching live session to stop"
+        )
+
+    _ensure_chain_configs()
+    indices = _session_resolve_indices(server)
+    if isinstance(indices, str):
+        return indices
+
+    for method, handler_idx in list(_method_handler.items()):
+        if handler_idx is None or handler_idx in indices:
+            _method_handler.pop(method, None)
+
+    results: list[str] = []
+    for idx in indices:
+        cfg = _chain_configs[idx]
+        client = _chain_clients[idx]
+        if client is None:
+            results.append(f"[{cfg.label}] not running")
+            continue
+        try:
+            await client.stop()
+            results.append(f"[{cfg.label}] stopped")
+        except Exception as e:
+            results.append(f"[{cfg.label}] stop failed: {e}")
+        finally:
+            _chain_clients[idx] = None
+    return "\n".join(results) if results else "No servers to stop."
 
 
 async def lsp_confirm(index: int = 0, stage: str = "") -> str:

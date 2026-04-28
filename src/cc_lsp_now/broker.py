@@ -60,6 +60,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SOCKET_NAME = "cc-lsp-broker.sock"
 SOCKET_ENV_OVERRIDE = "CC_LSP_BROKER_SOCKET"
+LOG_ENV_OVERRIDE = "CC_LSP_BROKER_LOG"
+IDLE_TTL_ENV = "CC_LSP_BROKER_IDLE_TTL_SECONDS"
+DEFAULT_IDLE_TTL_SECONDS = 4 * 60 * 60
 
 
 def socket_path() -> Path:
@@ -101,6 +104,21 @@ def _safe_user() -> str:
         return getpass.getuser()
     except Exception:
         return ""
+
+
+def broker_log_path() -> Path:
+    """Return the broker log file path.
+
+    Logs belong in durable user state, not the project tree and not the
+    socket's runtime directory.  The override is intentionally one env var
+    so test harnesses and users can isolate broker traces when needed.
+    """
+    override = os.environ.get(LOG_ENV_OVERRIDE)
+    if override:
+        return Path(override)
+    state_home = os.environ.get("XDG_STATE_HOME")
+    base = Path(state_home) if state_home else Path.home() / ".local" / "state"
+    return base / "cc-lsp-now" / "broker.log"
 
 
 # --- Protocol framing --------------------------------------------------------
@@ -197,6 +215,7 @@ class BrokerDaemon:
             return _error_response(rid, "invalid_request", "params must be an object")
         params = cast(dict[str, object], params_obj)
         try:
+            await self._evict_idle_sessions()
             result = await self._dispatch(method, params)
         except BrokerError as e:
             return _error_response(rid, e.code, str(e))
@@ -219,8 +238,15 @@ class BrokerDaemon:
         if method == "session.stop":
             sid = _str_param(params, "session_id")
             return {"stopped": await self.lsp.stop_session(sid)}
+        if method == "session.stop_matching":
+            return {
+                "stopped": await self.lsp.stop_matching(
+                    root=_str_param(params, "root"),
+                    config_hash_value=_str_param(params, "config_hash"),
+                )
+            }
         if method == "lsp.status":
-            return self.lsp.lsp_status()
+            return self._lsp_status()
         if method == "lsp.request":
             return await self._lsp_request(params)
         if method == "lsp.add_workspace":
@@ -235,6 +261,11 @@ class BrokerDaemon:
             return {"shutting_down": True}
         raise BrokerError("unknown_method", f"unknown method: {method}")
 
+    async def _evict_idle_sessions(self) -> None:
+        evicted = await self.lsp.evict_idle(ttl_seconds=_idle_ttl_seconds())
+        if evicted:
+            log.info("evicted idle broker sessions: %s", ",".join(evicted))
+
     def _status(self) -> dict[str, object]:
         now = time.time()
         return {
@@ -244,6 +275,20 @@ class BrokerDaemon:
             "session_count": len(self.registry),
             "sessions": [session_to_dict(s) for s in self.registry.all_sessions()],
         }
+
+    def _lsp_status(self) -> dict[str, object]:
+        status = self.lsp.lsp_status()
+        status.update(
+            {
+                "pid": os.getpid(),
+                "socket": str(socket_path()),
+                "log_path": str(broker_log_path()),
+                "started_at": self.started_at,
+                "uptime": time.time() - self.started_at,
+                "idle_ttl_seconds": _idle_ttl_seconds(),
+            }
+        )
+        return status
 
     def _session_get_or_create(self, params: dict[str, object]) -> dict[str, object]:
         root = _str_param(params, "root")
@@ -369,6 +414,14 @@ def _prefer_param(params: dict[str, object]) -> dict[str, int]:
     return result
 
 
+def _idle_ttl_seconds() -> float:
+    raw = os.environ.get(IDLE_TTL_ENV, str(DEFAULT_IDLE_TTL_SECONDS)).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return float(DEFAULT_IDLE_TTL_SECONDS)
+
+
 # --- Socket server -----------------------------------------------------------
 
 
@@ -479,7 +532,13 @@ async def _main_async(path: Path) -> None:
 
 def main() -> None:
     """Entry point for `python -m cc_lsp_now.broker`."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    log_file = broker_log_path()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(log_file),
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     asyncio.run(_main_async(socket_path()))
 
 
@@ -491,7 +550,11 @@ __all__ = [
     "BrokerDaemon",
     "BrokerError",
     "DEFAULT_SOCKET_NAME",
+    "DEFAULT_IDLE_TTL_SECONDS",
+    "IDLE_TTL_ENV",
+    "LOG_ENV_OVERRIDE",
     "SOCKET_ENV_OVERRIDE",
+    "broker_log_path",
     "decode_message",
     "encode_message",
     "main",
