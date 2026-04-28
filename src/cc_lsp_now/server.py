@@ -22,7 +22,8 @@ from cc_lsp_now.candidate_kind import CandidateKind
 from cc_lsp_now.chain_server import ChainServer
 from cc_lsp_now.file_move import FileMove
 from cc_lsp_now.path_finder import PathDirection, PathEdge, PathNode, PathSearchResult, find_paths
-from cc_lsp_now.pending_buffer import PendingBuffer
+from cc_lsp_now.pending_buffer import DEFAULT_STAGE_HANDLE, PendingBook, PendingBuffer
+from cc_lsp_now.render_memory import AliasError, AliasIdentity, AliasKind, AliasRecord, RenderMemory
 from cc_lsp_now.warmup_stats import WarmupStats
 
 log = logging.getLogger(__name__)
@@ -71,12 +72,22 @@ _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
-# Several tools (rename, fix, move, ...) now emit previews instead of
-# applying edits immediately. The preview populates a module-level buffer that
-# the agent can then commit via `lsp_confirm(index)`.
+# Several tools (rename, fix, move, ...) emit previews instead of applying
+# edits immediately. The preview stages a `PendingBuffer` that the agent
+# then commits via `lsp_confirm(index)`.
 #
-# The buffer is single-slot — any new preview displaces the previous one.
-# This matches the preview→confirm-or-replace flow the agent drives.
+# Direct mode keeps a process-local `PendingBook` so multiple staged previews
+# can coexist under different handles. Single-agent flows that don't pick a
+# handle land on the `DEFAULT_STAGE_HANDLE` slot, which is exactly the
+# pre-multi-slot single-slot behavior. The most recently set stage is the
+# *active* stage; `lsp_confirm(0)` (no `stage` arg) commits against it so
+# legacy callers keep working untouched.
+#
+# `_pending` is kept as a module-level mirror of the active stage so existing
+# tests and call sites that read `_pending` directly stay valid. It is
+# refreshed by `_set_pending` / `_clear_pending`; reads should treat
+# `_pending_book` as canonical when the two could disagree.
+_pending_book: PendingBook = PendingBook()
 _pending: PendingBuffer | None = None
 
 # Last semantic-grep graph, used by lsp_symbols_at("L78") to bounce from a
@@ -84,6 +95,7 @@ _pending: PendingBuffer | None = None
 _last_semantic_nav: list["SemanticNavEntry"] = []
 _last_semantic_nav_query: str = ""
 _last_semantic_groups: list["SemanticGrepGroup"] = []
+_render_memory = RenderMemory()
 
 
 @dataclass
@@ -145,19 +157,50 @@ class SemanticTarget:
     group: SemanticGrepGroup | None = None
 
 
-def _set_pending(kind: str, candidates: list[Candidate], description: str) -> None:
-    """Stage a set of candidate WorkspaceEdits for later confirmation.
+def _set_pending(
+    kind: str,
+    candidates: list[Candidate],
+    description: str,
+    *,
+    handle: str = "",
+) -> PendingBuffer:
+    """Stage a set of candidate WorkspaceEdits under ``handle``.
 
-    Overwrites any previous pending state. The agent issues `lsp_confirm(index)`
-    to pick one candidate out of ``candidates`` and apply it.
+    The default ``handle`` ("") routes to ``DEFAULT_STAGE_HANDLE`` so legacy
+    single-slot callers keep their meaning: each new preview replaces the
+    previous *default* stage and becomes active. Named handles coexist —
+    setting ``handle="rename-history-ui"`` does not disturb the default slot
+    or any other named stage. The freshly set stage is always the active
+    stage afterwards.
+
+    The agent issues ``lsp_confirm(index)`` (or ``lsp_confirm(index, stage=...)``)
+    to pick one candidate and apply it.
     """
     global _pending
-    _pending = PendingBuffer(kind=kind, candidates=candidates, description=description)
+    buffer = PendingBuffer(
+        kind=kind,
+        candidates=candidates,
+        description=description,
+        handle=handle or DEFAULT_STAGE_HANDLE,
+    )
+    _pending_book.set(buffer)
+    _pending = _pending_book.active()
+    return buffer
 
 
-def _clear_pending() -> None:
+def _clear_pending(handle: str = "") -> None:
+    """Drop a staged preview. Empty ``handle`` clears the *active* stage.
+
+    Passing a specific handle drops only that stage and leaves the rest of
+    the book intact. After clearing, ``_pending`` is refreshed to whatever
+    is now active (or ``None`` if the book is empty).
+    """
     global _pending
-    _pending = None
+    if handle:
+        _pending_book.drop(handle)
+    else:
+        _pending_book.clear_active()
+    _pending = _pending_book.active()
 
 
 def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
@@ -1507,6 +1550,55 @@ def _format_semantic_grep_group(index: int, group: SemanticGrepGroup) -> str:
     )
 
 
+def _alias_identity_from_group(group: SemanticGrepGroup) -> AliasIdentity:
+    """Project a semantic group into render-memory's stable target identity."""
+    hit = group.hits[0] if group.hits else None
+    path = group.definition_path or (hit.path if hit is not None else "")
+    line = group.definition_line or (hit.line + 1 if hit is not None else 1)
+    character = group.definition_character if group.definition_character >= 0 else (hit.character if hit else 0)
+    container = Path(path).stem
+    if group.context_symbols:
+        stack = _symbol_stack_at(group.context_symbols, line - 1, character)
+        for sym in reversed(stack):
+            kind = _symbol_kind_label(sym.get("kind", 0))
+            if kind in {"Class", "Struct", "Interface", "Enum", "Module", "Namespace"}:
+                container = sym.get("name", "") or container
+                break
+    symbol_kind = group.kind
+    alias_kind = AliasKind.TYPE if symbol_kind in {"class", "struct", "interface", "enum", "type"} else AliasKind.SYMBOL
+    return AliasIdentity(
+        kind=alias_kind,
+        name=group.name,
+        path=path,
+        line=line,
+        character=character,
+        symbol_kind=symbol_kind,
+        bucket_key=container or path,
+        bucket_label=f"{Path(path).name}::{container}" if container else Path(path).name,
+    )
+
+
+def _target_from_alias_record(record: AliasRecord) -> SemanticTarget:
+    ident = record.identity
+    uri = file_uri(ident.path)
+    pos = {"line": max(ident.line - 1, 0), "character": max(ident.character, 0)}
+    return SemanticTarget(
+        uri=uri,
+        pos=pos,
+        path=ident.path,
+        line=ident.line,
+        character=ident.character,
+        name=ident.name,
+    )
+
+
+def _alias_looks_like_render_memory_target(target: str) -> bool:
+    raw = target.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1].strip()
+    return bool(re.fullmatch(r"[A-Z]+[0-9]+", raw)) and not raw.isdigit()
+
+
 def _record_semantic_nav_context(query: str, groups: list[SemanticGrepGroup]) -> None:
     """Remember the last semantic graph so a later bare ``L78`` has context."""
     global _last_semantic_nav_query
@@ -1516,6 +1608,8 @@ def _record_semantic_nav_context(query: str, groups: list[SemanticGrepGroup]) ->
     _last_semantic_nav_query = query
     seen: set[tuple[str, int, int, int]] = set()
     for group_index, group in enumerate(groups):
+        if group.hits:
+            _render_memory.touch(_alias_identity_from_group(group))
         if group.reference_locs:
             for loc in group.reference_locs:
                 path = _uri_to_path(loc.get("uri", ""))
@@ -1630,6 +1724,15 @@ async def _resolve_semantic_target(
 ) -> SemanticTarget | str:
     target = target.strip()
     if target:
+        alias_result = _render_memory.lookup(target)
+        if alias_result.ok and alias_result.record is not None:
+            return _target_from_alias_record(alias_result.record)
+        if (
+            alias_result.error is not AliasError.INVALID
+            and _alias_looks_like_render_memory_target(target)
+        ):
+            return alias_result.message
+
         graph_index = re.fullmatch(r"\[?(\d+)\]?", target)
         if graph_index:
             return _graph_target_from_index(graph_index.group(1))
@@ -2556,6 +2659,62 @@ async def lsp_session(action: str = "status", path: str = "", server: str = "") 
     return f"Unknown action: {action!r}. Valid: status, add, warm, restart."
 
 
+async def lsp_memory(action: str = "status", target: str = "", mode: str = "") -> str:
+    """Inspect and manage render-memory aliases.
+
+    Render memory is the persistent sidecar to the last-result graph handles:
+    ``[N]`` still means "row N from the latest graph", while aliases such as
+    ``A0`` / ``[A0]`` survive across graph-producing tool calls within the
+    current epoch and can be passed back as semantic targets.
+
+    Actions:
+    - ``status``: compact epoch/generation/count summary.
+    - ``legend``: decode active aliases. ``target`` may be a comma-separated
+      alias list; empty target prints the whole active table.
+    - ``recall``: substring search over alias/name/path.
+    - ``reset``: clear the active epoch.
+    """
+    act = (action or "status").strip().lower()
+    snapshot = _render_memory.snapshot()
+    records = list(snapshot.records)
+    if act == "status":
+        return (
+            f"render-memory epoch={snapshot.epoch_id} gen={snapshot.generation} "
+            f"aliases={len(records)} mode={mode or 'auto'}"
+        )
+    if act == "reset":
+        _render_memory.clear_epoch()
+        return f"render-memory reset: epoch={_render_memory.epoch_id} gen={_render_memory.generation}"
+    if act == "legend":
+        selected = records
+        if target.strip():
+            selected = []
+            for raw in target.split(","):
+                result = _render_memory.lookup(raw.strip())
+                if result.ok and result.record is not None:
+                    selected.append(result.record)
+        if not records:
+            return "No render-memory aliases."
+        return _render_memory.aliases_for_response(selected)
+    if act == "recall":
+        query = target.strip().lower()
+        if not query:
+            return "action=recall requires target"
+        matches: list[AliasRecord] = []
+        for record in records:
+            ident = record.identity
+            haystack = " ".join(
+                str(part)
+                for part in (record.alias, ident.name, ident.symbol_kind, ident.path, ident.bucket_label)
+            ).lower()
+            if query in haystack:
+                matches.append(record)
+        if not matches:
+            return f"No render-memory aliases match {target!r}."
+        return _render_memory.aliases_for_response(matches)
+    return "Unknown action: {!r}. Valid: status, legend, recall, reset.".format(action)
+
+
 def _session_resolve_indices(server: str) -> list[int] | str:
     """Map a server label/command/name filter to chain indices. Empty filter = all."""
     if not server:
@@ -2747,20 +2906,34 @@ async def _session_restart(server: str) -> str:
     return "\n".join(results) if results else "No servers to restart."
 
 
-async def lsp_confirm(index: int = 0) -> str:
-    """Apply one staged candidate from the preview buffer.
+async def lsp_confirm(index: int = 0, stage: str = "") -> str:
+    """Apply one staged candidate from a pending preview.
 
     Companion to tools that stage previews (currently ``lsp_fix``,
-    ``lsp_rename``, and ``lsp_move``). Index into the ``candidates`` list
-    shown by the most recent preview. Clears ``_pending`` on success so the buffer is
-    single-shot — a stale preview can't be re-committed after context drifts.
+    ``lsp_rename``, and ``lsp_move``). Without ``stage``, ``lsp_confirm(0)``
+    targets the *active* stage — the most recently staged preview — which is
+    the legacy single-slot behavior agents already rely on.
+
+    Pass ``stage="<handle>"`` to commit a specific named stage when multiple
+    previews coexist (parallel-agent / multi-stage flows; see
+    ``docs/agent-tool-roadmap.md``). The targeted stage is dropped on
+    successful apply, while every other stage in the pending book stays
+    intact.
     """
     global _pending
-    if _pending is None:
+    if stage:
+        target = _pending_book.get(stage)
+        if target is None:
+            handles = _pending_book.handles()
+            known = ", ".join(handles) if handles else "(none)"
+            return f"No pending stage named {stage!r}. Active stages: {known}."
+    else:
+        target = _pending_book.active()
+    if target is None:
         return "Nothing to confirm."
 
-    candidates = _pending.candidates
-    kind = _pending.kind
+    candidates = target.candidates
+    kind = target.kind
 
     if index < 0 or index >= len(candidates):
         return f"Invalid index {index}, only {len(candidates)} candidates available."
@@ -2771,7 +2944,8 @@ async def lsp_confirm(index: int = 0) -> str:
     except (OSError, ValueError, KeyError) as e:
         return f"Apply failed: {e}"
 
-    _pending = None
+    _pending_book.drop(target.handle)
+    _pending = _pending_book.active()
     return f"Applied [{kind} #{index}]: {candidate.title}. {file_count} file(s), {edit_count} edit(s)."
 
 
@@ -3834,6 +4008,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "path": (lsp_path, "cc-lsp-now/path"),
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
     "session": (lsp_session, "cc-lsp-now/session"),
+    "memory": (lsp_memory, "cc-lsp-now/memory"),
 }
 
 
@@ -3880,6 +4055,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "move": "workspace.fileOperations.willRename",
     "confirm": None,
     "session": None,
+    "memory": None,
 }
 
 

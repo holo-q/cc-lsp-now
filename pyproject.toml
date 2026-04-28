@@ -19,6 +19,7 @@ cc-lsp-now-csharp = "cc_lsp_now:main"
 cc-lsp-now-redirect-hook = "cc_lsp_now.redirect_hook:main"
 cc-lsp-now-redirect-hook-ty = "cc_lsp_now.redirect_hook:main"
 cc-lsp-now-redirect-hook-csharp = "cc_lsp_now.redirect_hook:main"
+cc-lsp-now-broker = "cc_lsp_now.broker:main"
 
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]

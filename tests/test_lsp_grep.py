@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 from pathlib import Path
 
 from cc_lsp_now.server import (
@@ -10,9 +11,12 @@ from cc_lsp_now.server import (
     _graph_target_from_index,
     _identifier_hits_on_line,
     _record_semantic_nav_context,
+    _render_memory,
     _resolve_line_target,
+    _resolve_semantic_target,
     _semantic_grep_text_hits,
     _semantic_kind_and_type,
+    lsp_memory,
 )
 
 
@@ -47,6 +51,7 @@ class LspGrepTests(unittest.TestCase):
         # Each test must start from an empty graph so that bare-line and
         # graph-index lookups can't leak state between cases.
         _record_semantic_nav_context("", [])
+        _render_memory.clear_epoch()
 
     def test_text_hits_use_identifier_boundaries_and_utf16_columns(self) -> None:
         fixture = Path("tmp/test_lsp_grep_fixture.cs")
@@ -507,6 +512,60 @@ class LspGrepTests(unittest.TestCase):
         if isinstance(target, str):
             self.fail(target)
         self.assertEqual(target.name, "beta")
+
+    def test_render_memory_alias_survives_graph_replacement(self) -> None:
+        first = SemanticGrepGroup(
+            key="k1",
+            name="alpha",
+            kind="arg",
+            type_text="",
+            definition_path="/repo/src/A.cs",
+            definition_line=10,
+            definition_character=3,
+            hits=[_make_hit(path="/repo/src/A.cs", line=9, character=3)],
+            reference_locs=[_make_ref("/repo/src/A.cs", 9, 3)],
+        )
+        _record_semantic_nav_context("alpha", [first])
+
+        second = SemanticGrepGroup(
+            key="k2",
+            name="beta",
+            kind="local",
+            type_text="",
+            definition_path="/repo/src/B.cs",
+            definition_line=5,
+            definition_character=4,
+            hits=[_make_hit(path="/repo/src/B.cs", line=4, character=4)],
+            reference_locs=[_make_ref("/repo/src/B.cs", 4, 4)],
+        )
+        _record_semantic_nav_context("beta", [second])
+
+        target = asyncio.run(_resolve_semantic_target("A1"))
+
+        if isinstance(target, str):
+            self.fail(target)
+        self.assertEqual(target.name, "alpha")
+        self.assertEqual(target.path, "/repo/src/A.cs")
+        self.assertEqual(target.line, 10)
+
+    def test_lsp_memory_legend_decodes_active_aliases(self) -> None:
+        group = SemanticGrepGroup(
+            key="k",
+            name="ctx",
+            kind="arg",
+            type_text="RenderContext",
+            definition_path="/repo/src/Renderer.cs",
+            definition_line=44,
+            definition_character=12,
+            hits=[_make_hit()],
+        )
+        _record_semantic_nav_context("ctx", [group])
+
+        result = asyncio.run(lsp_memory(action="legend"))
+
+        self.assertIn("legend gen=", result)
+        self.assertIn("A=Renderer.cs::Renderer", result)
+        self.assertIn("A1=ctx@L44", result)
 
     def test_bare_numeric_line_resolves_through_last_graph(self) -> None:
         group = SemanticGrepGroup(
