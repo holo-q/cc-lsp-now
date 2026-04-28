@@ -57,7 +57,7 @@ endpoints are known.
 
 | `via` | Meaning | First status |
 |-------|---------|--------------|
-| `calls` | Call hierarchy edges from `lsp_calls`. | Ship first. |
+| `calls` | Call hierarchy edges from `lsp_calls`. | First slice implemented. |
 | `types` | Type hierarchy edges from `lsp_types`. | Ship after the edge oracle is factored. |
 | `refs` | Reference edges from `lsp_refs`. | Ship after reference rows are graph-addressable. |
 
@@ -91,11 +91,11 @@ honest than pairwise paths and neighborhoods.
 The first implementation should be a lazy bounded search, not a prebuilt
 workspace index.
 
-Recommended v1:
+Implemented v1:
 
 1. Resolve both endpoints to semantic nodes.
-2. Use a typed edge oracle for one family, initially calls only.
-3. Run bidirectional BFS or Dijkstra with zero heuristic.
+2. Use a typed edge oracle for calls.
+3. Run bounded BFS with zero heuristic.
 4. Stop at `max_hops`, `max_edges`, and an internal branch cap.
 5. Return up to `max_paths` shortest witness paths.
 
@@ -198,10 +198,10 @@ Anti-goals:
 
 Build in layers:
 
-1. Document this contract and add renderer golden cases.
-2. Add a pure pathfinder over an `EdgeOracle` protocol and fake graphs.
-3. Implement calls-only `LspEdgeOracle` using call hierarchy expansion.
-4. Expose `lsp_path` with calls-only support and bounded rendering.
+1. Document this contract and add renderer golden cases. (Started.)
+2. Add a pure pathfinder over an `EdgeOracle` protocol and fake graphs. (Done.)
+3. Implement calls-only `LspEdgeOracle` using call hierarchy expansion. (Done.)
+4. Expose `lsp_path` with calls-only support and bounded rendering. (Done.)
 5. Factor `lsp_types` and `lsp_refs` into the same oracle once their rows seed
    graph context consistently.
 6. Add optional path handles, snapshots, and broker-backed caches later.

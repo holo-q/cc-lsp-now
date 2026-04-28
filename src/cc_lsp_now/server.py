@@ -10,7 +10,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from mcp.server.fastmcp import FastMCP
 
@@ -21,6 +21,7 @@ from cc_lsp_now.candidate import Candidate
 from cc_lsp_now.candidate_kind import CandidateKind
 from cc_lsp_now.chain_server import ChainServer
 from cc_lsp_now.file_move import FileMove
+from cc_lsp_now.path_finder import PathDirection, PathEdge, PathNode, PathSearchResult, find_paths
 from cc_lsp_now.pending_buffer import PendingBuffer
 from cc_lsp_now.warmup_stats import WarmupStats
 
@@ -2953,6 +2954,281 @@ async def lsp_calls(
         return f"LSP error: {e}"
 
 
+def _call_item_to_path_node(item: dict) -> PathNode:
+    name = item.get("name", "")
+    uri = item.get("uri", "")
+    path = _uri_to_path(uri)
+    sel_range = item.get("selectionRange") or item.get("range") or {}
+    sel_start = sel_range.get("start", {})
+    line0 = sel_start.get("line", 0)
+    char0 = sel_start.get("character", 0)
+    return PathNode(
+        key=f"{uri}:{line0}:{char0}",
+        name=name,
+        kind=_symbol_kind_label(item.get("kind", 0)).lower(),
+        path=path,
+        line=line0 + 1,
+        character=char0,
+    )
+
+
+async def _prepare_call_hierarchy_item(target: SemanticTarget, role: str) -> dict | str:
+    items = await _request("textDocument/prepareCallHierarchy", {
+        "textDocument": {"uri": target.uri},
+        "position": target.pos,
+    }, uri=target.uri)
+    if not items:
+        return f"No call hierarchy item at {role} endpoint {target.path}:L{target.line}."
+    return items[0]
+
+
+class _CallPathOracle:
+    def __init__(self, items: list[dict], exclude: str = ""):
+        self.items: dict[str, dict] = {}
+        self.exclude_terms = [part.strip().lower() for part in re.split(r"[,;\n]+", exclude) if part.strip()]
+        for item in items:
+            node = _call_item_to_path_node(item)
+            self.items[node.key] = item
+
+    def group_for(self, node: PathNode) -> SemanticGrepGroup | None:
+        item = self.items.get(node.key)
+        if item is None:
+            return None
+        return _call_item_to_group(item)
+
+    def _excluded(self, node: PathNode) -> bool:
+        if not self.exclude_terms:
+            return False
+        haystack = f"{node.key} {node.name} {node.kind} {node.path}".lower()
+        return any(term in haystack for term in self.exclude_terms)
+
+    async def expand(self, node: PathNode, direction: PathDirection, limit: int) -> list[PathEdge]:
+        item = self.items.get(node.key)
+        if item is None or limit <= 0:
+            return []
+        directions = ["out", "in"] if direction == "any" else [direction]
+        edges: list[PathEdge] = []
+        for edge_direction in directions:
+            method = (
+                "callHierarchy/incomingCalls" if edge_direction == "in"
+                else "callHierarchy/outgoingCalls"
+            )
+            target_key = "from" if edge_direction == "in" else "to"
+            try:
+                result = await _request(method, {"item": item})
+            except LspError:
+                continue
+            if not result:
+                continue
+            for call in result:
+                target_item = call.get(target_key, {})
+                target_node = _call_item_to_path_node(target_item)
+                if self._excluded(target_node):
+                    continue
+                self.items[target_node.key] = target_item
+                n_sites = max(1, len(call.get("fromRanges", [])))
+                label = f"{n_sites} site{'s' if n_sites != 1 else ''}"
+                edges.append(PathEdge(
+                    source=node,
+                    target=target_node,
+                    family="calls",
+                    direction=edge_direction,
+                    label=label,
+                    provenance=method,
+                ))
+                if len(edges) >= limit:
+                    return edges
+        return edges
+
+
+def _path_node_scope(node: PathNode) -> str:
+    if node.path:
+        return Path(node.path).stem
+    return ""
+
+
+def _path_node_label(node: PathNode) -> str:
+    scope = _path_node_scope(node)
+    if scope and node.name and node.line > 0:
+        return f"{scope}:L{node.line}::{node.name}"
+    if node.path and node.line > 0:
+        return f"{Path(node.path).name}:L{node.line}"
+    return node.name or node.key
+
+
+def _format_path_node_row(index: int, node: PathNode) -> str:
+    scope = _path_node_scope(node)
+    line_label = f"L{node.line}" if node.line > 0 else "L?"
+    scope_label = f" ::{scope}::" if scope else ""
+    kind_label = f" {node.kind}" if node.kind else ""
+    name_label = f" {node.name}" if node.name else ""
+    return _compact_line(f"[{index}] {line_label}{scope_label}{kind_label}{name_label}", 240)
+
+
+def _path_edge_arrow(edge: PathEdge) -> str:
+    if edge.family == "calls" and edge.direction == "in":
+        return "--called-by-->"
+    if edge.family == "calls":
+        return "--calls-->"
+    return f"--{edge.family}-{edge.direction}-->"
+
+
+def _path_stats_line(result: PathSearchResult) -> str:
+    stats = result.stats
+    bits = [f"Explored {stats.explored_edges} edges"]
+    if stats.pruned_hubs or stats.pruned_branches:
+        bits.append(f"pruned {stats.pruned_hubs} hubs")
+        bits.append(f"{stats.pruned_branches} branches")
+    if stats.budget_exhausted:
+        bits.append("budget exhausted")
+    return "; ".join(bits) + "."
+
+
+def _format_path_result(
+    result: PathSearchResult,
+    *,
+    via: str,
+    direction: str,
+    max_hops: int,
+    max_edges: int,
+    oracle: _CallPathOracle,
+) -> str:
+    node_order: list[PathNode] = [result.start]
+    seen = {result.start.key}
+    if not result.paths and result.goal.key not in seen:
+        node_order.append(result.goal)
+        seen.add(result.goal.key)
+    for path in result.paths:
+        for edge in path:
+            for node in (edge.source, edge.target):
+                if node.key in seen:
+                    continue
+                seen.add(node.key)
+                node_order.append(node)
+
+    groups: list[SemanticGrepGroup] = []
+    node_indices: dict[str, int] = {}
+    for node in node_order:
+        group = oracle.group_for(node)
+        if group is None:
+            continue
+        node_indices[node.key] = len(groups)
+        groups.append(group)
+
+    def idx(node: PathNode) -> int:
+        return node_indices.get(node.key, -1)
+
+    start_idx = idx(result.start)
+    goal_idx = idx(result.goal)
+    start_label = f"[{start_idx}] {_path_node_label(result.start)}" if start_idx >= 0 else _path_node_label(result.start)
+    goal_label = f"[{goal_idx}] {_path_node_label(result.goal)}" if goal_idx >= 0 else _path_node_label(result.goal)
+
+    lines: list[str] = []
+    if not result.paths:
+        lines.append(
+            f"No path from {start_label} to {goal_label} within "
+            f"max_hops={max_hops}, max_edges={max_edges} via {via}."
+        )
+        lines.append(f"{_path_stats_line(result)} This is not proof no runtime path exists.")
+        _record_semantic_nav_context(f"path:{via}:{direction}", groups)
+        return "\n".join(lines)
+
+    lines.append(f"Paths from {start_label} to {goal_label} via {via} direction={direction}")
+    for path_index, path in enumerate(result.paths):
+        lines.append(f"[P{path_index}] cost {len(path)} hops {len(path)} verified")
+        if not path:
+            lines.append(f"  {_format_path_node_row(idx(result.start), result.start)}")
+            continue
+        first = path[0].source
+        lines.append(f"  {_format_path_node_row(idx(first), first)}")
+        for edge in path:
+            target_idx = idx(edge.target)
+            label = f" {edge.label}" if edge.label else ""
+            lines.append(
+                f"   {_path_edge_arrow(edge)} {_format_path_node_row(target_idx, edge.target)}{label}"
+            )
+    stats_line = _path_stats_line(result)
+    if result.stats.pruned_hubs or result.stats.pruned_branches or result.stats.budget_exhausted:
+        stats_line += " Raise max_edges or max_hops to unfold."
+    lines.append(stats_line)
+    _record_semantic_nav_context(f"path:{via}:{direction}", groups)
+    return "\n".join(lines)
+
+
+async def lsp_path(
+    from_target: str = "",
+    to_target: str = "",
+    via: str = "calls",
+    direction: str = "out",
+    file_path: str = "",
+    symbol: str = "",
+    line: int = 0,
+    max_hops: int = 4,
+    max_edges: int = 200,
+    max_paths: int = 3,
+    exclude: str = "",
+) -> str:
+    """Find bounded witness paths between two semantic anchors.
+
+    First implementation slice from ``docs/lsp-path.md``: calls-only,
+    explicit direction, hard budgets, and no mixed graph search.
+    """
+    via_key = (via or "calls").strip().lower()
+    if via_key != "calls":
+        return "via must be 'calls' in this implementation slice. types/refs path search is not wired yet."
+
+    direction_key = (direction or "out").strip().lower()
+    if direction_key not in {"out", "in", "any"}:
+        return "direction must be one of: out, in, any."
+    path_direction = cast(PathDirection, direction_key)
+
+    if not to_target.strip():
+        return "Provide to_target; lsp_path needs both endpoints."
+
+    source = await _resolve_semantic_target(from_target, file_path, symbol, line)
+    if isinstance(source, str):
+        return source
+    destination = await _resolve_semantic_target(to_target)
+    if isinstance(destination, str):
+        return destination
+
+    max_hops = max(0, min(max_hops, 10))
+    max_edges = max(0, min(max_edges, 2000))
+    max_paths = max(1, min(max_paths, 10))
+
+    try:
+        source_item = await _prepare_call_hierarchy_item(source, "source")
+        if isinstance(source_item, str):
+            return source_item
+        destination_item = await _prepare_call_hierarchy_item(destination, "destination")
+        if isinstance(destination_item, str):
+            return destination_item
+
+        source_node = _call_item_to_path_node(source_item)
+        destination_node = _call_item_to_path_node(destination_item)
+        oracle = _CallPathOracle([source_item, destination_item], exclude=exclude)
+        result = await find_paths(
+            source_node,
+            destination_node,
+            oracle,
+            direction=path_direction,
+            max_hops=max_hops,
+            max_edges=max_edges,
+            max_paths=max_paths,
+            max_branch=min(50, max_edges if max_edges > 0 else 1),
+        )
+        return _format_path_result(
+            result,
+            via=via_key,
+            direction=direction_key,
+            max_hops=max_hops,
+            max_edges=max_edges,
+            oracle=oracle,
+        )
+    except (LspError, ValueError, RuntimeError) as e:
+        return f"LSP error: {e}"
+
+
 async def _diagnostics_single(file_path: str) -> str:
     """Get diagnostics for a single file. Returns formatted lines or '(clean)'."""
     file_path = _resolve_file_path(file_path)
@@ -3555,6 +3831,7 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "fix": (lsp_fix, "cc-lsp-now/fix"),
     "calls": (lsp_calls, "cc-lsp-now/calls"),
     "types": (lsp_types, "cc-lsp-now/types"),
+    "path": (lsp_path, "cc-lsp-now/path"),
     "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
     "session": (lsp_session, "cc-lsp-now/session"),
 }
@@ -3599,6 +3876,7 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "fix": "codeActionProvider",
     "calls": "callHierarchyProvider",
     "types": "typeHierarchyProvider",
+    "path": "callHierarchyProvider",
     "move": "workspace.fileOperations.willRename",
     "confirm": None,
     "session": None,

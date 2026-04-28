@@ -16,8 +16,8 @@ Renderer details are part of this public contract. See
 diagnostic repair flow, and preview rules. See `docs/agent-tool-roadmap.md` for
 the pending-edit, what-if, witness, multi-agent, and verifier tool roadmap that
 extends this surface beyond raw LSP orchestration. See `docs/lsp-path.md` for
-the planned bounded pathfinding operator that connects two known semantic
-anchors through one explicit edge family.
+the bounded pathfinding operator that connects two known semantic anchors
+through one explicit edge family.
 
 ## Target Tools
 
@@ -31,7 +31,7 @@ anchors through one explicit edge family.
 | `lsp_outline` | Show compact file/workspace breadcrumbs. |
 | `lsp_calls` | Show incoming and/or outgoing call graph edges. |
 | `lsp_types` | Show super and/or sub type hierarchy edges. |
-| `lsp_path` | Planned: find bounded witness paths between two known anchors. |
+| `lsp_path` | Find bounded witness paths between two known anchors. |
 | `lsp_diagnostics` | Report diagnostics as the primary verifier surface. |
 | `lsp_fix` | Preview and stage code actions/refactors for a location or diagnostic. |
 | `lsp_rename` | Preview symbol rename with final-line edits and confirmation. |
@@ -40,11 +40,10 @@ anchors through one explicit edge family.
 | `lsp_confirm` | Commit the currently staged edit transaction. |
 
 `lsp_grep`, `lsp_symbols_at`, `lsp_symbol`, `lsp_goto`, `lsp_refs`,
-`lsp_outline`, `lsp_calls`, `lsp_types`, `lsp_session`, `lsp_fix`,
+`lsp_outline`, `lsp_calls`, `lsp_types`, `lsp_path`, `lsp_session`, `lsp_fix`,
 `lsp_rename`, and `lsp_move` are the implemented pieces of this surface today.
 The graph-aware tools preserve semantic graph context between calls, which is
-the pattern the rest of the tools should follow. `lsp_path` is documented but
-not implemented yet.
+the pattern the rest of the tools should follow.
 
 ## Raw Tool Cut Map
 
