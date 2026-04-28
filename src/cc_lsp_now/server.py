@@ -521,6 +521,16 @@ def _wire_dict(container: dict[str, object], key: str) -> dict[str, object] | No
     return None
 
 
+def _wire_float(container: dict[str, object], key: str, default: float = 0.0) -> float:
+    value = container.get(key, default)
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
 def _broker_lsp_request_sync(method: str, params: dict | None, uri: str | None) -> dict[str, object]:
     wire = _broker_base_params()
     wire.update(
@@ -559,6 +569,7 @@ def _broker_render_lookup_sync(token: str) -> AliasRecord | str | None:
     result = _broker_call_sync("render.lookup", wire)
     if not isinstance(result, dict):
         raise BrokerError("invalid_response", "broker render.lookup returned a non-object")
+    result = cast(dict[str, object], result)
     if result.get("ok") is True:
         return alias_record_from_wire(result.get("record", {}))
     error = result.get("error", "")
@@ -874,7 +885,7 @@ def _render_bus_result(action: str, result: dict[str, object]) -> str:
         event = _wire_dict(result, "event")
         if question:
             qid = question.get("question_id", "")
-            left = float(question.get("seconds_left", 0.0) or 0.0)
+            left = _wire_float(question, "seconds_left")
             msg = question.get("message", "")
             scope = _render_bus_scope(question)
             return "\n".join([
@@ -911,7 +922,7 @@ def _render_bus_weather(result: dict[str, object]) -> str:
         if isinstance(q_obj, dict):
             q = cast(dict[str, object], q_obj)
             lines.append(
-                f"  {q.get('question_id', '')} {float(q.get('seconds_left', 0.0) or 0.0):.0f}s "
+                f"  {q.get('question_id', '')} {_wire_float(q, 'seconds_left'):.0f}s "
                 f"{q.get('message', '')}"
             )
     recent = _wire_list(result, "recent")
@@ -3479,16 +3490,18 @@ async def lsp_memory(action: str = "status", target: str = "", mode: str = "") -
             if act == "status":
                 status = await _broker_call("render.status", params)
                 if isinstance(status, dict):
+                    status = cast(dict[str, object], status)
                     return (
                         f"render-memory epoch={status.get('epoch', 0)} "
                         f"gen={status.get('generation', 0)} aliases={status.get('aliases', 0)} "
-                        f"clients={len(_wire_dict(cast(dict[str, object], status), 'clients') or {})} "
+                        f"clients={len(_wire_dict(status, 'clients') or {})} "
                         f"mode=broker"
                     )
             else:
                 params.update({"reason": "lsp_memory reset"})
                 status = await _broker_call("render.reset_session", params)
                 if isinstance(status, dict):
+                    status = cast(dict[str, object], status)
                     return (
                         f"render-memory reset: epoch={status.get('epoch', 0)} "
                         f"gen={status.get('generation', 0)} mode=broker"

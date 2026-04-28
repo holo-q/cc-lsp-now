@@ -528,5 +528,49 @@ class WaveFourSurfaceTests(unittest.TestCase):
             )
 
 
+# Wave 1 agent-bus surface per docs/agent-bus.md and docs/tool-surface.md.
+# `lsp_log` is the planned coordination tool that sits next to the semantic
+# graph operators. It is not a raw LSP verb — capability gating is `None`,
+# matching the other admin tools (`session`, `memory`, `confirm`).
+class LogSurfaceTests(unittest.TestCase):
+    """Pin the registry shape for the bus surface so a future ToolMap
+    sweep cannot quietly drop ``log`` or capability-gate it on a phantom
+    LSP method. Cross-cutting acceptance for behaviour lives in
+    tests/test_lsp_log.py.
+    """
+
+    def test_log_is_registered_in_all_tools(self) -> None:
+        self.assertIn(
+            "log",
+            _ALL_TOOLS,
+            "log not registered in _ALL_TOOLS — docs/agent-bus.md "
+            "expects lsp_log to be the public coordination surface",
+        )
+
+    def test_log_capability_is_none(self) -> None:
+        self.assertIn(
+            "log",
+            TOOL_CAPABILITIES,
+            "log missing TOOL_CAPABILITIES entry — capability gating "
+            "quietly skips tools without one",
+        )
+        self.assertIsNone(
+            TOOL_CAPABILITIES["log"],
+            "log has no single LSP capability to gate on; mirror the "
+            "session/memory/confirm admin tools which all use None",
+        )
+
+    def test_log_method_label_uses_cc_lsp_now_namespace(self) -> None:
+        _func, method = _ALL_TOOLS["log"]
+        # Other admin tools register as e.g. "cc-lsp-now/session"; staying
+        # in that namespace keeps the [header] line readable across the
+        # admin surface family.
+        self.assertEqual(
+            method,
+            "cc-lsp-now/log",
+            f"log method label drifted from cc-lsp-now/log: {method!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

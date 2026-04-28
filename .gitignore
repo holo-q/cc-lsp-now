@@ -3,3 +3,5 @@ __pycache__/
 tmp/foo/
 tmp/foo_run/
 tmp/csharp-fixtures/
+tmp/cc-lsp-bus/
+tmp/cc-lsp-now-bus.jsonl
