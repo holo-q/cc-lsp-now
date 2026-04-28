@@ -7,10 +7,12 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from cc_lsp_now import server
+from cc_lsp_now.alias_coordinator import alias_identity_to_wire
 from cc_lsp_now.broker import BrokerDaemon
 from cc_lsp_now.broker_lsp import BrokerLspManager, BrokerLspSession, chain_config_hash, chain_from_wire, chain_to_wire
 from cc_lsp_now.chain_server import ChainServer
 from cc_lsp_now.lsp import LspClient
+from cc_lsp_now.render_memory import AliasIdentity, AliasKind
 
 
 class FakeLspClient:
@@ -127,6 +129,30 @@ class BrokerLspSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client["open_documents"], 1)
         self.assertEqual(client["request_count"], 1)
 
+    async def test_render_touch_tracks_per_client_frontiers(self) -> None:
+        chain = [ChainServer(command="fake-ls", args=[], name="fake", label="fake")]
+        session = BrokerLspSession("/repo", chain)
+        identity = AliasIdentity(
+            kind=AliasKind.SYMBOL,
+            name="ctx",
+            path="/repo/src/Renderer.cs",
+            line=44,
+            character=12,
+            symbol_kind="arg",
+            bucket_key="Renderer",
+            bucket_label="Renderer.cs::Renderer",
+        )
+
+        first = await session.render_touch("agent-a", [identity])
+        second = await session.render_touch("agent-a", [identity])
+        third = await session.render_touch("agent-b", [identity])
+
+        self.assertEqual(first.records[0].alias, "A1")
+        self.assertFalse(second.decisions[0].introduced)
+        self.assertEqual(second.legend, "")
+        self.assertEqual(third.records[0].alias, "A1")
+        self.assertTrue(third.decisions[0].introduced)
+
 
 class BrokerLspManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_matching_uses_root_and_config_hash(self) -> None:
@@ -211,6 +237,51 @@ class BrokerDaemonLspForwardingTests(unittest.IsolatedAsyncioTestCase):
         session = cast(list[dict[str, object]], result["sessions"])[0]
         lsp = cast(dict[str, object], session["lsp"])
         self.assertEqual(lsp["request_count"], 2)
+
+    async def test_render_touch_wire_reuses_alias_but_reintroduces_per_client(self) -> None:
+        daemon = BrokerDaemon()
+        chain = chain_to_wire([ChainServer(command="fake-ls", args=[], name="fake", label="fake")])
+        identity = AliasIdentity(
+            kind=AliasKind.SYMBOL,
+            name="ctx",
+            path="/repo/src/Renderer.cs",
+            line=44,
+            character=12,
+            symbol_kind="arg",
+            bucket_key="Renderer",
+            bucket_label="Renderer.cs::Renderer",
+        )
+        params: dict[str, object] = {
+            "root": "/repo",
+            "config_hash": "h1",
+            "server_label": "fake",
+            "chain": chain,
+            "client_id": "agent-a",
+            "identities": [alias_identity_to_wire(identity)],
+        }
+
+        first = await daemon.handle_request({"id": "1", "method": "render.touch", "params": params})
+        second = await daemon.handle_request({"id": "2", "method": "render.touch", "params": params})
+        params_b = dict(params)
+        params_b["client_id"] = "agent-b"
+        third = await daemon.handle_request({"id": "3", "method": "render.touch", "params": params_b})
+
+        first_result = cast(dict[str, object], first["result"])
+        second_result = cast(dict[str, object], second["result"])
+        third_result = cast(dict[str, object], third["result"])
+        first_decision = cast(list[dict[str, object]], first_result["decisions"])[0]
+        second_decision = cast(list[dict[str, object]], second_result["decisions"])[0]
+        third_decision = cast(list[dict[str, object]], third_result["decisions"])[0]
+        first_record = cast(dict[str, object], first_decision["record"])
+        third_record = cast(dict[str, object], third_decision["record"])
+
+        self.assertEqual(first_record["alias"], "A1")
+        self.assertEqual(third_record["alias"], "A1")
+        self.assertTrue(first_decision["introduced"])
+        self.assertFalse(second_decision["introduced"])
+        self.assertTrue(third_decision["introduced"])
+        self.assertIn("A1=ctx@L44", cast(str, first_result["legend"]))
+        self.assertEqual(second_result["legend"], "")
 
 
 class BrokerWireShapeTests(unittest.TestCase):

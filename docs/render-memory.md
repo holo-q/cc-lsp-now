@@ -423,13 +423,17 @@ first slice. Those stay as the last-result graph. Render memory is a sidecar.
 
 ## Broker Mode
 
-Broker mode should move render memory from process globals to session state:
+Broker mode moves the canonical alias book from process globals to session
+state.  The first implemented slice is alias coordination: every workspace
+session owns one master alias book, while each MCP client has its own frontier
+of aliases that have already been introduced in that client's output.
 
 ```text
 WorkspaceSession
-  master_alias_book          # stable identity -> canonical alias
-  client_frontiers           # client id -> aliases already introduced to that agent
-  client_render_windows      # client id -> local compression/recentness state
+  AliasCoordinator
+    RenderMemory             # stable identity -> canonical alias
+    client_frontiers         # client id -> aliases already introduced to that agent
+  client_render_windows      # future: recency/compression level per client
 ```
 
 Policy:
@@ -442,10 +446,23 @@ Policy:
 - named/pinned aliases can be promoted to shared workspace memory, but the
   introduction frontier still gates compression per client;
 - pending edit aliases remain per-client unless explicitly shared;
-- aliases carry snapshot stamps so stale resolution is deterministic.
+- aliases carry snapshot stamps so stale resolution is deterministic;
+- direct mode uses the same coordinator locally, so the output grammar stays
+  identical whether the broker is present or unavailable.
 
-The direct-mode `RenderMemory` API should be designed so the broker can own it
-later without changing the output grammar.
+Wire surface:
+
+- `render.touch`: touch semantic identities and return canonical aliases plus
+  only the legend entries this client has not seen yet.
+- `render.lookup`: resolve aliases back to canonical semantic targets.
+- `render.status`: report epoch, generation, alias count, and client frontier
+  sizes.
+- `render.reset_client` / `render.reset_session`: clear one frontier or the
+  whole alias epoch.
+
+Render windows and progressive L2/L3 compression still live above this seam.
+The broker now supplies the shared legend; renderers still decide how dense a
+row should be.
 
 ## QA
 

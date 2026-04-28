@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -15,6 +16,13 @@ from typing import Any, cast
 from mcp.server.fastmcp import FastMCP
 
 from cc_lsp_now.agent_log import agent_log, drain_agent_messages
+from cc_lsp_now.alias_coordinator import (
+    AliasCoordinator,
+    AliasTouchResult,
+    alias_identity_to_wire,
+    alias_record_from_wire,
+    alias_touch_result_from_wire,
+)
 from cc_lsp_now.broker import BrokerError
 from cc_lsp_now.broker_client import BrokerClient
 from cc_lsp_now.broker_lsp import chain_config_hash, chain_to_wire
@@ -102,6 +110,8 @@ _last_semantic_nav: list["SemanticNavEntry"] = []
 _last_semantic_nav_query: str = ""
 _last_semantic_groups: list["SemanticGrepGroup"] = []
 _render_memory = RenderMemory()
+_client_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+_local_alias_coordinator = AliasCoordinator(_render_memory)
 
 
 @dataclass
@@ -140,6 +150,7 @@ class SemanticGrepGroup:
     hits: list[SemanticGrepHit] = field(default_factory=list)
     reference_locs: list[dict] = field(default_factory=list)
     context_symbols: list[dict] = field(default_factory=list)
+    alias: str = ""
 
 
 @dataclass
@@ -525,6 +536,37 @@ def _broker_lsp_request_sync(method: str, params: dict | None, uri: str | None) 
 
 async def _broker_lsp_request(method: str, params: dict | None, uri: str | None) -> dict[str, object]:
     return await asyncio.to_thread(_broker_lsp_request_sync, method, params, uri)
+
+
+def _broker_render_touch_sync(identities: list[AliasIdentity]) -> AliasTouchResult:
+    wire = _broker_base_params()
+    wire.update(
+        {
+            "client_id": _client_id,
+            "identities": [alias_identity_to_wire(identity) for identity in identities],
+        }
+    )
+    result = _broker_call_sync("render.touch", wire)
+    return alias_touch_result_from_wire(result)
+
+
+def _broker_render_lookup_sync(token: str) -> AliasRecord | str | None:
+    wire = _broker_base_params()
+    wire.update({"client_id": _client_id, "token": token})
+    result = _broker_call_sync("render.lookup", wire)
+    if not isinstance(result, dict):
+        raise BrokerError("invalid_response", "broker render.lookup returned a non-object")
+    if result.get("ok") is True:
+        return alias_record_from_wire(result.get("record", {}))
+    error = result.get("error", "")
+    message = result.get("message", "")
+    if error == AliasError.INVALID.value:
+        return None
+    return message if isinstance(message, str) and message else "Alias is not active in broker render memory."
+
+
+async def _broker_render_lookup(token: str) -> AliasRecord | str | None:
+    return await asyncio.to_thread(_broker_render_lookup_sync, token)
 
 
 async def _broker_lsp_status() -> dict[str, object] | None:
@@ -1742,6 +1784,7 @@ def _format_semantic_sample_locs(group: SemanticGrepGroup) -> str:
 def _format_semantic_grep_group(index: int, group: SemanticGrepGroup) -> str:
     ref_count = len(group.reference_locs) if group.reference_locs else len(group.hits)
     type_suffix = f": {group.type_text}" if group.type_text else ""
+    alias_prefix = f"{group.alias} " if group.alias else ""
     scope = _context_breadcrumb(
         group.definition_path or group.hits[0].path,
         group.definition_line or group.hits[0].line + 1,
@@ -1755,7 +1798,7 @@ def _format_semantic_grep_group(index: int, group: SemanticGrepGroup) -> str:
         def_label = f"L{group.definition_line or group.hits[0].line + 1}"
     samples = _format_semantic_sample_locs(group)
     return _compact_line(
-        f"[{index}] {group.kind} {group.name}{type_suffix} — {scope} — refs {ref_count} — def {def_label} — samples {samples}",
+        f"[{index}] {alias_prefix}{group.kind} {group.name}{type_suffix} — {scope} — refs {ref_count} — def {def_label} — samples {samples}",
         240,
     )
 
@@ -1809,17 +1852,36 @@ def _alias_looks_like_render_memory_target(target: str) -> bool:
     return bool(re.fullmatch(r"[A-Z]+[0-9]+", raw)) and not raw.isdigit()
 
 
-def _record_semantic_nav_context(query: str, groups: list[SemanticGrepGroup]) -> None:
+def _touch_alias_identities(identities: list[AliasIdentity]) -> AliasTouchResult:
+    if _broker_enabled():
+        try:
+            return _broker_render_touch_sync(identities)
+        except BrokerError as e:
+            if _broker_mode() == "on" or not _broker_unavailable(e):
+                raise RuntimeError(f"broker render touch failed: {e.code}: {e}") from None
+            agent_log(f"broker render touch unavailable ({e.code}: {e}); falling back to direct render memory")
+        except ValueError as e:
+            if _broker_mode() == "on":
+                raise RuntimeError(f"broker render touch returned invalid data: {e}") from None
+            agent_log(f"broker render touch returned invalid data ({e}); falling back to direct render memory")
+    return _local_alias_coordinator.touch(_client_id, identities)
+
+
+def _record_semantic_nav_context(query: str, groups: list[SemanticGrepGroup]) -> str:
     """Remember the last semantic graph so a later bare ``L78`` has context."""
     global _last_semantic_nav_query
     _last_semantic_groups.clear()
     _last_semantic_groups.extend(groups)
     _last_semantic_nav.clear()
     _last_semantic_nav_query = query
+    alias_group_indices: list[int] = []
+    alias_identities: list[AliasIdentity] = []
     seen: set[tuple[str, int, int, int]] = set()
     for group_index, group in enumerate(groups):
         if group.hits:
-            _render_memory.touch(_alias_identity_from_group(group))
+            group.alias = ""
+            alias_group_indices.append(group_index)
+            alias_identities.append(_alias_identity_from_group(group))
         if group.reference_locs:
             for loc in group.reference_locs:
                 path = _uri_to_path(loc.get("uri", ""))
@@ -1852,6 +1914,12 @@ def _record_semantic_nav_context(query: str, groups: list[SemanticGrepGroup]) ->
                     name=group.name,
                     kind=group.kind,
                 ))
+    if not alias_identities:
+        return ""
+    result = _touch_alias_identities(alias_identities)
+    for group_index, decision in zip(alias_group_indices, result.decisions, strict=False):
+        groups[group_index].alias = decision.record.alias
+    return result.legend
 
 
 def _nav_context_summary(entries: list[SemanticNavEntry]) -> str:
@@ -1934,6 +2002,22 @@ async def _resolve_semantic_target(
 ) -> SemanticTarget | str:
     target = target.strip()
     if target:
+        if _broker_enabled():
+            try:
+                broker_alias = await _broker_render_lookup(target)
+            except BrokerError as e:
+                if _broker_mode() == "on" or not _broker_unavailable(e):
+                    return f"broker render lookup failed: {e.code}: {e}"
+                broker_alias = None
+            except ValueError as e:
+                if _broker_mode() == "on":
+                    return f"broker render lookup returned invalid data: {e}"
+                broker_alias = None
+            if isinstance(broker_alias, AliasRecord):
+                return _target_from_alias_record(broker_alias)
+            if isinstance(broker_alias, str) and _alias_looks_like_render_memory_target(target):
+                return broker_alias
+
         alias_result = _render_memory.lookup(target)
         if alias_result.ok and alias_result.record is not None:
             return _target_from_alias_record(alias_result.record)
@@ -2882,6 +2966,30 @@ async def lsp_memory(action: str = "status", target: str = "", mode: str = "") -
     - ``reset``: clear the active epoch.
     """
     act = (action or "status").strip().lower()
+    if _broker_enabled() and act in {"status", "reset"}:
+        try:
+            params = _broker_base_params()
+            if act == "status":
+                status = await _broker_call("render.status", params)
+                if isinstance(status, dict):
+                    return (
+                        f"render-memory epoch={status.get('epoch', 0)} "
+                        f"gen={status.get('generation', 0)} aliases={status.get('aliases', 0)} "
+                        f"clients={len(_wire_dict(cast(dict[str, object], status), 'clients') or {})} "
+                        f"mode=broker"
+                    )
+            else:
+                params.update({"reason": "lsp_memory reset"})
+                status = await _broker_call("render.reset_session", params)
+                if isinstance(status, dict):
+                    return (
+                        f"render-memory reset: epoch={status.get('epoch', 0)} "
+                        f"gen={status.get('generation', 0)} mode=broker"
+                    )
+        except BrokerError as e:
+            if _broker_mode() == "on" or not _broker_unavailable(e):
+                return f"broker render-memory {act} failed: {e.code}: {e}"
+
     snapshot = _render_memory.snapshot()
     records = list(snapshot.records)
     if act == "status":
@@ -2890,7 +2998,7 @@ async def lsp_memory(action: str = "status", target: str = "", mode: str = "") -
             f"aliases={len(records)} mode={mode or 'auto'}"
         )
     if act == "reset":
-        _render_memory.clear_epoch()
+        _local_alias_coordinator.clear_epoch()
         return f"render-memory reset: epoch={_render_memory.epoch_id} gen={_render_memory.generation}"
     if act == "legend":
         selected = records
@@ -4128,11 +4236,13 @@ async def lsp_grep(
             await _fill_reference_locs(group)
 
         ordered = list(groups.values())
-        _record_semantic_nav_context(query, ordered)
+        legend = _record_semantic_nav_context(query, ordered)
         lines = [
             _format_semantic_grep_group(i, group)
             for i, group in enumerate(ordered[:max_groups])
         ]
+        if legend:
+            lines.append(legend)
         if len(ordered) > max_groups:
             lines.append(f"... {len(ordered) - max_groups} more group(s); raise max_groups to unfold.")
         if len(hits) >= max_hits:
@@ -4176,7 +4286,7 @@ async def lsp_symbols_at(target: str = "", file_path: str = "", line: int = 0) -
     ordered = list(groups.values())
     for group in ordered:
         await _fill_reference_locs(group)
-    _record_semantic_nav_context(f"{Path(path).name}:L{target_line}", ordered)
+    legend = _record_semantic_nav_context(f"{Path(path).name}:L{target_line}", ordered)
 
     lines = [f"Target: {path}:L{target_line}"]
     try:
@@ -4185,6 +4295,8 @@ async def lsp_symbols_at(target: str = "", file_path: str = "", line: int = 0) -
     except (OSError, IndexError):
         pass
     lines.extend(_format_semantic_grep_group(i, group) for i, group in enumerate(ordered))
+    if legend:
+        lines.append(legend)
     return "\n".join(lines)
 
 

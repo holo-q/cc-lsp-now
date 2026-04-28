@@ -10,8 +10,8 @@ from cc_lsp_now.server import (
     _format_semantic_sample_locs,
     _graph_target_from_index,
     _identifier_hits_on_line,
+    _local_alias_coordinator,
     _record_semantic_nav_context,
-    _render_memory,
     _resolve_line_target,
     _resolve_semantic_target,
     _semantic_grep_text_hits,
@@ -51,7 +51,7 @@ class LspGrepTests(unittest.TestCase):
         # Each test must start from an empty graph so that bare-line and
         # graph-index lookups can't leak state between cases.
         _record_semantic_nav_context("", [])
-        _render_memory.clear_epoch()
+        _local_alias_coordinator.clear_epoch()
 
     def test_text_hits_use_identifier_boundaries_and_utf16_columns(self) -> None:
         fixture = Path("tmp/test_lsp_grep_fixture.cs")

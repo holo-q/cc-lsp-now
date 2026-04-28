@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from cc_lsp_now.agent_log import agent_log
+from cc_lsp_now.alias_coordinator import AliasCoordinator, AliasTouchResult
 from cc_lsp_now.broker_session import SessionKey, SessionRegistry, config_hash, session_to_dict
 from cc_lsp_now.chain_server import ChainServer
 from cc_lsp_now.lsp import LspClient, LspError
+from cc_lsp_now.render_memory import AliasIdentity, AliasResolution
 
 
 ClientFactory = Callable[[list[str], str], LspClient]
@@ -147,6 +149,7 @@ class BrokerLspSession:
         self.last_server_label = ""
         self.last_duration_ms = 0
         self.client_request_counts: list[int] = [0] * len(chain)
+        self.aliases = AliasCoordinator()
 
     async def stop(self) -> None:
         async with self.lock:
@@ -199,6 +202,25 @@ class BrokerLspSession:
                 client.notify_files_deleted(deleted)
                 notified.append(self.chain[idx].label)
         return {"notified": notified}
+
+    async def render_touch(self, client_id: str, identities: list[AliasIdentity]) -> AliasTouchResult:
+        async with self.lock:
+            self.last_used_at = time.time()
+            return self.aliases.touch(client_id, identities)
+
+    async def render_lookup(self, token: str) -> AliasResolution:
+        async with self.lock:
+            self.last_used_at = time.time()
+            return self.aliases.lookup(token)
+
+    async def render_reset_client(self, client_id: str) -> dict[str, object]:
+        async with self.lock:
+            return {"reset": self.aliases.clear_client(client_id)}
+
+    async def render_reset_session(self, reason: str = "") -> dict[str, object]:
+        async with self.lock:
+            self.aliases.clear_epoch(reason)
+            return self.aliases.status()
 
     async def request(
         self,
@@ -357,6 +379,7 @@ class BrokerLspSession:
                 for method, idx in self.method_handler.items()
             },
             "pending_workspace_adds": list(self.pending_workspace_adds),
+            "render_memory": self.aliases.status(),
         }
 
 

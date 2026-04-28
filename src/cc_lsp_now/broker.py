@@ -42,6 +42,11 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
+from cc_lsp_now.alias_coordinator import (
+    alias_identity_from_wire,
+    alias_record_to_wire,
+    alias_touch_result_to_wire,
+)
 from cc_lsp_now.broker_session import (
     SessionKey,
     SessionRegistry,
@@ -255,6 +260,16 @@ class BrokerDaemon:
             return await self._lsp_diagnostics(params)
         if method == "lsp.notify_files":
             return await self._lsp_notify_files(params)
+        if method == "render.touch":
+            return await self._render_touch(params)
+        if method == "render.lookup":
+            return await self._render_lookup(params)
+        if method == "render.status":
+            return self._render_status(params)
+        if method == "render.reset_client":
+            return await self._render_reset_client(params)
+        if method == "render.reset_session":
+            return await self._render_reset_session(params)
         if method == "shutdown":
             await self.lsp.stop_all()
             self._shutdown.set()
@@ -357,6 +372,52 @@ class BrokerDaemon:
             created=created,
             deleted=deleted,
         )
+
+    async def _render_touch(self, params: dict[str, object]) -> object:
+        session = self._lsp_session_from_params(params)
+        client_id = _str_param(params, "client_id")
+        identities_obj = params.get("identities", [])
+        if not isinstance(identities_obj, list):
+            raise BrokerError("invalid_params", "identities must be a list")
+        try:
+            identities = [alias_identity_from_wire(item) for item in identities_obj]
+        except ValueError as e:
+            raise BrokerError("invalid_params", str(e)) from None
+        result = await session.render_touch(client_id, identities)
+        return alias_touch_result_to_wire(result)
+
+    async def _render_lookup(self, params: dict[str, object]) -> object:
+        session = self._lsp_session_from_params(params)
+        token = _str_param(params, "token")
+        result = await session.render_lookup(token)
+        if result.ok and result.record is not None:
+            return {"ok": True, "record": alias_record_to_wire(result.record), "message": ""}
+        return {
+            "ok": False,
+            "error": result.error.value if result.error is not None else "unknown",
+            "message": result.message,
+        }
+
+    def _render_status(self, params: dict[str, object]) -> object:
+        session = self._lsp_session_from_params(params)
+        status = session.aliases.status()
+        if bool(params.get("include_records", False)):
+            status["records"] = [
+                alias_record_to_wire(record)
+                for record in session.aliases.memory.snapshot().records
+            ]
+        return status
+
+    async def _render_reset_client(self, params: dict[str, object]) -> object:
+        session = self._lsp_session_from_params(params)
+        client_id = _str_param(params, "client_id")
+        return await session.render_reset_client(client_id)
+
+    async def _render_reset_session(self, params: dict[str, object]) -> object:
+        session = self._lsp_session_from_params(params)
+        reason_obj = params.get("reason", "")
+        reason = reason_obj if isinstance(reason_obj, str) else ""
+        return await session.render_reset_session(reason)
 
 
 def _error_response(

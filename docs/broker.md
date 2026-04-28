@@ -225,7 +225,9 @@ The migration path was:
 2. Keep the existing MCP server path using in-process state.
 3. Add a broker daemon that owns shared LSP sessions.
 4. Teach MCP plugins to try the broker first and fall back to direct mode.
-5. Add broker-only tools once the lifecycle is stable.
+5. Move render-memory alias coordination into broker session state: one master
+   alias book per workspace, with a per-client introduction frontier.
+6. Add broker-only tools once the lifecycle is stable.
 
 That keeps adoption reversible and avoids turning an architecture experiment
 into a hard runtime dependency.
