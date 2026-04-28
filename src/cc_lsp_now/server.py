@@ -15,6 +15,9 @@ from typing import Any, cast
 from mcp.server.fastmcp import FastMCP
 
 from cc_lsp_now.agent_log import agent_log, drain_agent_messages
+from cc_lsp_now.broker import BrokerError
+from cc_lsp_now.broker_client import BrokerClient
+from cc_lsp_now.broker_lsp import chain_config_hash, chain_to_wire
 from cc_lsp_now.lsp import LspClient, LspError, file_uri
 from cc_lsp_now.python_refactor import merge_workspace_edits, python_import_rewrite
 from cc_lsp_now.candidate import Candidate
@@ -69,6 +72,9 @@ _just_started_this_call: list[str] = []
 _warmed_folders: set[tuple[int, str]] = set()  # (chain_idx, folder)
 # Warmup metadata for status reporting: (chain_idx, folder) -> WarmupStats
 _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
+
+_BROKER_DISABLED = {"0", "false", "no", "off", "disabled"}
+_BROKER_REQUIRED = {"1", "true", "yes", "on", "required", "force"}
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
@@ -288,6 +294,11 @@ def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
         client.notify_files_renamed([*applied.renamed, *renamed])
         client.notify_files_created([*applied.created, *created])
         client.notify_files_deleted([*applied.deleted, *deleted])
+    _notify_broker_workspace_changes_sync(
+        [*applied.renamed, *renamed],
+        [*applied.created, *created],
+        [*applied.deleted, *deleted],
+    )
 
     affected = {*applied.affected, *created, *deleted}
     affected.update(new for _old, new in renamed)
@@ -426,6 +437,184 @@ def _ensure_chain_configs() -> list[ChainServer]:
         _chain_clients.extend([None] * len(_chain_configs))
         _method_handler.update(_parse_prefer(_chain_configs))
     return _chain_configs
+
+
+def _broker_mode() -> str:
+    raw = os.environ.get("CC_LSP_BROKER", "auto").strip().lower()
+    if raw in _BROKER_DISABLED:
+        return "off"
+    if raw in _BROKER_REQUIRED:
+        return "on"
+    return "auto"
+
+
+def _broker_enabled() -> bool:
+    if _broker_mode() == "off":
+        return False
+    return bool(os.environ.get("LSP_SERVERS") or os.environ.get("LSP_COMMAND"))
+
+
+def _broker_base_params() -> dict[str, object]:
+    chain = _ensure_chain_configs()
+    language = os.environ.get("LSP_LANGUAGE", "").strip()
+    return {
+        "root": os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd())),
+        "config_hash": chain_config_hash(language, chain),
+        "chain": chain_to_wire(chain),
+        "server_label": chain[0].label if chain else "",
+        "prefer": {
+            method: idx
+            for method, idx in _method_handler.items()
+            if isinstance(idx, int)
+        },
+    }
+
+
+def _broker_call_sync(method: str, params: dict[str, object]) -> object:
+    with BrokerClient() as client:
+        client.connect_or_start()
+        return client.request(method, params)
+
+
+async def _broker_call(method: str, params: dict[str, object]) -> object:
+    return await asyncio.to_thread(_broker_call_sync, method, params)
+
+
+def _broker_unavailable(e: BrokerError) -> bool:
+    return e.code in {"broker_unreachable", "transport", "not_connected"}
+
+
+def _lsp_error_from_broker(e: BrokerError) -> LspError | None:
+    if not e.code.startswith("lsp:"):
+        return None
+    raw_code = e.code.removeprefix("lsp:")
+    try:
+        code = int(raw_code)
+    except ValueError:
+        code = -1
+    return LspError(code, str(e))
+
+
+def _wire_list(container: dict[str, object], key: str) -> list[object]:
+    value = container.get(key, [])
+    return cast(list[object], value) if isinstance(value, list) else []
+
+
+def _wire_dict(container: dict[str, object], key: str) -> dict[str, object] | None:
+    value = container.get(key)
+    if isinstance(value, dict):
+        return cast(dict[str, object], value)
+    return None
+
+
+def _broker_lsp_request_sync(method: str, params: dict | None, uri: str | None) -> dict[str, object]:
+    wire = _broker_base_params()
+    wire.update(
+        {
+            "lsp_method": method,
+            "lsp_params": params,
+            "uri": uri or "",
+            "empty_fallback_methods": sorted(_parse_empty_fallback_methods()),
+        }
+    )
+    result = _broker_call_sync("lsp.request", wire)
+    if not isinstance(result, dict):
+        raise BrokerError("invalid_response", "broker lsp.request returned a non-object")
+    return cast(dict[str, object], result)
+
+
+async def _broker_lsp_request(method: str, params: dict | None, uri: str | None) -> dict[str, object]:
+    return await asyncio.to_thread(_broker_lsp_request_sync, method, params, uri)
+
+
+async def _broker_lsp_status() -> dict[str, object] | None:
+    if not _broker_enabled():
+        return None
+    try:
+        result = await _broker_call("lsp.status", {})
+    except BrokerError as e:
+        if _broker_mode() == "on":
+            raise RuntimeError(f"broker status failed: {e.code}: {e}") from None
+        return None
+    if isinstance(result, dict):
+        return cast(dict[str, object], result)
+    return None
+
+
+async def _known_workspace_roots() -> list[str]:
+    roots: set[str] = {os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd()))}
+    if _broker_enabled():
+        status = await _broker_lsp_status()
+        if status:
+            current = _broker_base_params()
+            root = current["root"]
+            chash = current["config_hash"]
+            for session_obj in _wire_list(status, "sessions"):
+                if not isinstance(session_obj, dict):
+                    continue
+                session = cast(dict[str, object], session_obj)
+                if session.get("root") != root or session.get("config_hash") != chash:
+                    continue
+                roots.add(str(session.get("root", root)))
+                lsp = _wire_dict(session, "lsp")
+                if lsp is None:
+                    continue
+                for client_obj in _wire_list(lsp, "clients"):
+                    if not isinstance(client_obj, dict):
+                        continue
+                    client = cast(dict[str, object], client_obj)
+                    folders = client.get("folders", [])
+                    if not isinstance(folders, list):
+                        continue
+                    for folder in folders:
+                        if isinstance(folder, str):
+                            roots.add(folder)
+    for client in _chain_clients:
+        if client is not None:
+            roots.update(client.workspace_folders)
+    roots.update(_pending_workspace_adds)
+    return sorted(roots)
+
+
+async def _stored_diagnostics(uri: str) -> list[dict]:
+    if _broker_enabled():
+        try:
+            params = _broker_base_params()
+            params["uri"] = uri
+            result = await _broker_call("lsp.diagnostics", params)
+            if isinstance(result, dict):
+                result_dict = cast(dict[str, object], result)
+                items = result_dict.get("items", [])
+                if isinstance(items, list):
+                    return [cast(dict, item) for item in items if isinstance(item, dict)]
+        except BrokerError as e:
+            if _broker_mode() == "on":
+                raise RuntimeError(f"broker diagnostics failed: {e.code}: {e}") from None
+    primary = await _get_client(0)
+    return primary.diagnostics.get(uri, [])
+
+
+def _notify_broker_workspace_changes_sync(
+    renamed: list[tuple[str, str]],
+    created: list[str],
+    deleted: list[str],
+) -> None:
+    if not _broker_enabled() or not (renamed or created or deleted):
+        return
+    params = _broker_base_params()
+    params.update(
+        {
+            "renamed": [[old, new] for old, new in renamed],
+            "created": list(created),
+            "deleted": list(deleted),
+        }
+    )
+    try:
+        _broker_call_sync("lsp.notify_files", params)
+    except BrokerError as e:
+        if _broker_mode() == "on":
+            raise
+        agent_log(f"broker notify_files failed ({e.code}: {e})")
 
 
 # Project-root detection. Plugins contribute markers via LSP_PROJECT_MARKERS.
@@ -606,6 +795,27 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
     """Route a request through the chain. Caches which server handles each method."""
     global _last_server
     _ensure_chain_configs()
+    if _broker_enabled():
+        try:
+            forwarded = await _broker_lsp_request(method, params, uri)
+            label = forwarded.get("server_label", "")
+            if isinstance(label, str):
+                _last_server = label
+            for item in _wire_list(forwarded, "started"):
+                if isinstance(item, str) and item not in _just_started_this_call:
+                    _just_started_this_call.append(item)
+            for item in _wire_list(forwarded, "workspaces_added"):
+                if isinstance(item, str) and item not in _added_workspaces_this_call:
+                    _added_workspaces_this_call.append(item)
+            return forwarded.get("result")
+        except BrokerError as e:
+            lsp_error = _lsp_error_from_broker(e)
+            if lsp_error is not None:
+                raise lsp_error
+            if _broker_mode() == "on" or not _broker_unavailable(e):
+                raise RuntimeError(f"broker request failed: {e.code}: {e}") from None
+            agent_log(f"broker unavailable ({e.code}: {e}); falling back to direct LSP")
+
     empty_fallback = _parse_empty_fallback_methods()
 
     timeout = _SLOW_TIMEOUT if method in _SLOW_METHODS else 30.0
@@ -2203,7 +2413,7 @@ def _check_move_discrepancy(from_paths: list[str]) -> str | None:
         if client is not None:
             folders.update(client.workspace_folders)
     if not folders:
-        return None
+        folders.add(os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd())))
 
     hits: list[str] = []
     MAX_HITS = 10
@@ -2280,12 +2490,7 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
     # languages' moves.
     lsp_edits = _collect_edit_files(result)
     if not lsp_edits and os.environ.get("LSP_LANGUAGE", "").strip().lower() == "python":
-        workspace_folders: set[str] = set()
-        for client in _chain_clients:
-            if client is not None:
-                workspace_folders.update(client.workspace_folders)
-        if not workspace_folders:
-            workspace_folders.add(os.environ.get("LSP_ROOT", os.getcwd()))
+        workspace_folders = set(await _known_workspace_roots())
 
         rewriter_changes: dict = {"changes": {}}
         for f, t in files:
@@ -2506,8 +2711,7 @@ async def lsp_fix(
         return resolved
 
     try:
-        primary = await _get_client(0)
-        stored = primary.diagnostics.get(resolved.uri, [])
+        stored = await _stored_diagnostics(resolved.uri)
         target_line = resolved.pos.get("line", 0)
         line_diagnostics = _diagnostics_for_line(stored, target_line)
 
@@ -2756,6 +2960,36 @@ async def _session_status() -> str:
     except Exception:
         pass
 
+    lines.append(f"broker: {_broker_mode()}")
+    broker_status = await _broker_lsp_status() if _broker_enabled() else None
+    if broker_status:
+        lines.append("")
+        lines.append("Broker sessions:")
+        sessions = _wire_list(broker_status, "sessions")
+        if not sessions:
+            lines.append("  (none)")
+        for session_obj in sessions:
+            if not isinstance(session_obj, dict):
+                continue
+            session = cast(dict[str, object], session_obj)
+            lines.append(
+                "  "
+                f"{session.get('session_id')} root={session.get('root')} "
+                f"hash={session.get('config_hash')} clients={session.get('client_count')}"
+            )
+            lsp = _wire_dict(session, "lsp")
+            if lsp is None:
+                continue
+            for client_obj in _wire_list(lsp, "clients"):
+                if not isinstance(client_obj, dict):
+                    continue
+                client = cast(dict[str, object], client_obj)
+                label = client.get("label", "server")
+                state = client.get("state", "unknown")
+                folders = client.get("folders", [])
+                folder_text = ", ".join(str(f) for f in folders) if isinstance(folders, list) else ""
+                lines.append(f"    [{label}] {state}: {folder_text or '(no folders)'}")
+
     _ensure_chain_configs()
     now = time.time()
     lines.append("")
@@ -2804,6 +3038,23 @@ async def _session_add(path: str) -> str:
     if not os.path.isdir(abs_path):
         return f"Not a directory: {abs_path}"
 
+    if _broker_enabled():
+        params = _broker_base_params()
+        params["path"] = abs_path
+        try:
+            result = await _broker_call("lsp.add_workspace", params)
+        except BrokerError as e:
+            if _broker_mode() == "on":
+                return f"broker add failed: {e.code}: {e}"
+            agent_log(f"broker add failed ({e.code}: {e}); falling back to direct LSP")
+        else:
+            if isinstance(result, dict):
+                result_dict = cast(dict[str, object], result)
+                added = result_dict.get("added", [])
+                count = len(added) if isinstance(added, list) else 0
+                return f"[broker] queued {abs_path}; applied to {count} live client(s)"
+            return f"[broker] queued {abs_path}"
+
     _ensure_chain_configs()
     for idx in range(len(_chain_configs)):
         await _get_client(idx)
@@ -2826,6 +3077,12 @@ async def _session_warm(path: str, server: str) -> str:
     abs_path = os.path.abspath(path) if path else ""
     if abs_path and not os.path.isdir(abs_path):
         return f"Not a directory: {abs_path}"
+
+    if _broker_enabled():
+        return (
+            "broker mode: warmup is centralized by live broker sessions. "
+            "Use action=add to register a folder; direct per-process warm is disabled."
+        )
 
     _ensure_chain_configs()
     indices = _session_resolve_indices(server)
@@ -2860,6 +3117,33 @@ async def _session_warm(path: str, server: str) -> str:
 
 
 async def _session_restart(server: str) -> str:
+    if _broker_enabled():
+        status = await _broker_lsp_status()
+        current = _broker_base_params()
+        if not status:
+            return "No broker status available."
+        stopped: list[str] = []
+        for session_obj in _wire_list(status, "sessions"):
+            if not isinstance(session_obj, dict):
+                continue
+            session = cast(dict[str, object], session_obj)
+            if session.get("root") != current["root"] or session.get("config_hash") != current["config_hash"]:
+                continue
+            sid = session.get("session_id")
+            if not isinstance(sid, str):
+                continue
+            try:
+                result = await _broker_call("session.stop", {"session_id": sid})
+            except BrokerError as e:
+                return f"broker restart failed stopping {sid}: {e.code}: {e}"
+            if isinstance(result, dict) and cast(dict[str, object], result).get("stopped"):
+                stopped.append(sid)
+        return (
+            f"[broker] stopped {len(stopped)} session(s); next request will spawn fresh"
+            if stopped else
+            "[broker] no matching live session to restart"
+        )
+
     _ensure_chain_configs()
     indices = _session_resolve_indices(server)
     if isinstance(indices, str):
@@ -3414,8 +3698,7 @@ async def _diagnostics_single(file_path: str) -> str:
         }, uri=uri)
         diagnostics = result.get("items", []) if result else []
     except LspError:
-        primary = await _get_client(0)
-        diagnostics = primary.diagnostics.get(uri, [])
+        diagnostics = await _stored_diagnostics(uri)
     if not diagnostics:
         return "(clean)"
     lines = []
@@ -3761,9 +4044,7 @@ async def lsp_grep(
     max_groups = max(1, min(max_groups, 100))
 
     try:
-        client = await _get_client(0)
-        await client.resync_open_documents()
-        roots = sorted(client.workspace_folders) or [os.environ.get("LSP_ROOT", os.getcwd())]
+        roots = await _known_workspace_roots()
         paths = _semantic_grep_paths(file_path, pattern, roots, _semantic_grep_max_files())
         hits = _semantic_grep_text_hits(paths, query, max_hits)
         if not hits:

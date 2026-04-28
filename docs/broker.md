@@ -7,7 +7,11 @@ clients may ask the same workspace the same semantic questions, and repeatedly
 warming Roslyn, ty, basedpyright, or other servers wastes time and loses shared
 semantic context.
 
-This note records a future direction, not an active implementation plan.
+This note started as a future direction. The first lifecycle slice now exists:
+the MCP server defaults to broker-first mode when an LSP chain is configured,
+auto-starts `cc-lsp-now-broker`, and forwards LSP requests over the Unix socket.
+If the broker is unavailable in `auto` mode, direct in-process spawning remains
+the fallback.
 
 ## Thesis
 
@@ -70,18 +74,31 @@ answers tied to workspace snapshots.
 ## First Useful Slice
 
 Do not start with unsaved overlays, distributed locking, or a persistent symbol
-database. The smallest useful broker is a process supervisor with session reuse:
+database. The smallest useful broker is a process supervisor with session reuse.
+That slice is implemented as:
 
-- `cc-lsp-broker daemon`
-- `cc-lsp-broker request --workspace ROOT --server csharp-ls ...`
-- session key: `(language, root, command, args, env/config hash)`
+- `cc-lsp-now-broker` / `python -m cc_lsp_now.broker`
+- JSONL over a user-scoped Unix socket
+- MCP server request path: broker-first, direct fallback
+- session key: `(root, chain config hash)`
 - list active sessions,
 - stop a session,
-- evict idle sessions,
+- queue/add workspace folders,
+- forward LSP requests through one broker-owned language-server chain,
 - keep direct `cc-lsp-now` spawning as a fallback.
 
-This first slice should preserve the current LSP bridge behavior while moving
-the lifecycle from "per MCP process" to "per warm broker session."
+This preserves the current LSP bridge behavior while moving the lifecycle from
+"per MCP process" to "per warm broker session." It is specifically aimed at
+agent fanout: launching N subagents should not mean starting and warming N
+copies of csharp-ls, ty, basedpyright, or other configured servers.
+
+Runtime switches:
+
+- `CC_LSP_BROKER=auto` (default): use broker when an LSP chain is configured,
+  fall back to direct mode if the broker cannot be reached.
+- `CC_LSP_BROKER=on`: require broker mode; broker transport errors surface.
+- `CC_LSP_BROKER=off`: keep the old direct in-process lifecycle.
+- `CC_LSP_BROKER_SOCKET=/path/to.sock`: isolate or override the broker socket.
 
 ## Session Model
 
@@ -98,6 +115,11 @@ A broker session owns:
 
 Clients connect to the broker and borrow a session. The broker reference-counts
 active clients and keeps idle sessions alive for a configurable TTL.
+
+Current implementation note: the registry stores session records, and
+`BrokerLspSession` owns the live `LspClient` chain. Reference counting and idle
+eviction are still future work; sessions live until explicitly stopped or until
+the broker exits.
 
 Session identity should be explicit and debuggable:
 
@@ -195,11 +217,11 @@ and belongs naturally in the broker once it can see multiple clients.
 
 `cc-lsp-now` should remain useful without a broker.
 
-The migration path should be:
+The migration path was:
 
-1. Extract current global LSP state behind an `LspSession` object.
-2. Keep the existing MCP server path using an in-process `LspSession`.
-3. Add a broker daemon that owns many `LspSession` objects.
+1. Extract current global LSP state behind reusable session-shaped pieces.
+2. Keep the existing MCP server path using in-process state.
+3. Add a broker daemon that owns shared LSP sessions.
 4. Teach MCP plugins to try the broker first and fall back to direct mode.
 5. Add broker-only tools once the lifecycle is stable.
 

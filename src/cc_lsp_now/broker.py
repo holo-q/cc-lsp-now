@@ -1,10 +1,10 @@
-"""cc-lsp-broker daemon skeleton.
+"""cc-lsp-broker daemon.
 
-This is the v1 of the broker described in `docs/broker.md`: a user-level
-Unix-domain socket JSONL daemon that supervises shared workspace sessions
-for `cc-lsp-now`.  This first slice intentionally does *not* forward LSP
-methods.  It establishes the parts that have to exist before forwarding
-makes sense:
+This is the broker described in `docs/broker.md`: a user-level Unix-domain
+socket JSONL daemon that supervises shared workspace sessions for
+`cc-lsp-now` and owns the expensive LSP processes for those sessions.
+MCP servers in agent subprocesses connect here instead of each spawning a
+fresh language-server chain.
 
 - a stable socket path derivation (so any number of clients agree on
   where to find the broker without environment plumbing);
@@ -12,14 +12,10 @@ makes sense:
   response per line);
 - a workspace session registry keyed by `(root, config_hash)` so two
   clients asking for the same workspace get the same session record;
-- clean start/stop helpers that the client side can drive (`stop` / a
-  graceful `shutdown` request).
-
-The MCP server (`server.py`) is *not* edited in this slice.  Direct mode
-keeps spawning its own LSP chain.  Once the broker stabilises, the MCP
-server will gain a `try-broker-first, fall back to direct` path; today
-the broker exists as a parallel skeleton agents can dial in for
-`status` / `session.get_or_create` / `ping` / `shutdown` and nothing else.
+- shared LSP request forwarding with the same chain routing policy as
+  direct mode;
+- clean start/stop helpers that the client side can drive (`session.stop`
+  / a graceful `shutdown` request).
 
 The protocol intentionally does not implement JSON-RPC framing — JSONL
 is enough for the workloads we expect (request/response pairs, not high
@@ -51,6 +47,11 @@ from cc_lsp_now.broker_session import (
     SessionRegistry,
     session_to_dict,
 )
+from cc_lsp_now.broker_lsp import (
+    BrokerLspManager,
+    chain_from_wire,
+)
+from cc_lsp_now.lsp import LspError
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +171,7 @@ class BrokerDaemon:
 
     def __init__(self) -> None:
         self.registry = SessionRegistry()
+        self.lsp = BrokerLspManager(self.registry)
         self.started_at: float = time.time()
         # Set when a `shutdown` request is processed.  `serve_unix` waits
         # on this to break out of `serve_forever`.
@@ -198,6 +200,8 @@ class BrokerDaemon:
             result = await self._dispatch(method, params)
         except BrokerError as e:
             return _error_response(rid, e.code, str(e))
+        except LspError as e:
+            return _error_response(rid, f"lsp:{e.code}", str(e))
         except Exception as e:
             log.exception("broker handler crashed: method=%s", method)
             return _error_response(rid, "internal", repr(e))
@@ -214,8 +218,19 @@ class BrokerDaemon:
             return [session_to_dict(s) for s in self.registry.all_sessions()]
         if method == "session.stop":
             sid = _str_param(params, "session_id")
-            return {"stopped": self.registry.stop(sid)}
+            return {"stopped": await self.lsp.stop_session(sid)}
+        if method == "lsp.status":
+            return self.lsp.lsp_status()
+        if method == "lsp.request":
+            return await self._lsp_request(params)
+        if method == "lsp.add_workspace":
+            return await self._lsp_add_workspace(params)
+        if method == "lsp.diagnostics":
+            return await self._lsp_diagnostics(params)
+        if method == "lsp.notify_files":
+            return await self._lsp_notify_files(params)
         if method == "shutdown":
+            await self.lsp.stop_all()
             self._shutdown.set()
             return {"shutting_down": True}
         raise BrokerError("unknown_method", f"unknown method: {method}")
@@ -241,6 +256,63 @@ class BrokerDaemon:
         )
         return session_to_dict(session)
 
+    def _lsp_session_from_params(self, params: dict[str, object]):
+        root = _str_param(params, "root")
+        chash = _str_param(params, "config_hash")
+        try:
+            chain = chain_from_wire(params.get("chain"))
+        except ValueError as e:
+            raise BrokerError("invalid_params", str(e)) from None
+        label_obj = params.get("server_label", "")
+        label = label_obj if isinstance(label_obj, str) else ""
+        prefer = _prefer_param(params)
+        _sid, session = self.lsp.get_or_create(
+            root=root,
+            config_hash_value=chash,
+            chain=chain,
+            server_label=label,
+            prefer=prefer,
+        )
+        return session
+
+    async def _lsp_request(self, params: dict[str, object]) -> dict[str, object]:
+        session = self._lsp_session_from_params(params)
+        method = _str_param(params, "lsp_method")
+        lsp_params = params.get("lsp_params")
+        if lsp_params is not None and not isinstance(lsp_params, dict):
+            raise BrokerError("invalid_params", "lsp_params must be an object or null")
+        uri_obj = params.get("uri")
+        uri = uri_obj if isinstance(uri_obj, str) and uri_obj else None
+        empty_fallback = set(_str_list_param(params, "empty_fallback_methods"))
+        result = await session.request(
+            method,
+            cast(dict | None, lsp_params),
+            uri=uri,
+            empty_fallback_methods=empty_fallback,
+        )
+        return result.to_wire()
+
+    async def _lsp_add_workspace(self, params: dict[str, object]) -> object:
+        session = self._lsp_session_from_params(params)
+        path = _str_param(params, "path")
+        return await session.add_workspace(path)
+
+    async def _lsp_diagnostics(self, params: dict[str, object]) -> object:
+        session = self._lsp_session_from_params(params)
+        uri = _str_param(params, "uri")
+        return await session.diagnostics(uri)
+
+    async def _lsp_notify_files(self, params: dict[str, object]) -> object:
+        session = self._lsp_session_from_params(params)
+        renamed = _rename_list_param(params, "renamed")
+        created = _str_list_param(params, "created")
+        deleted = _str_list_param(params, "deleted")
+        return await session.notify_files(
+            renamed=renamed,
+            created=created,
+            deleted=deleted,
+        )
+
 
 def _error_response(
     rid: object, code: str, message: str
@@ -253,6 +325,48 @@ def _str_param(params: dict[str, object], name: str) -> str:
     if not isinstance(value, str) or not value:
         raise BrokerError("invalid_params", f"missing or non-string param: {name}")
     return value
+
+
+def _str_list_param(params: dict[str, object], name: str) -> list[str]:
+    value = params.get(name, [])
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise BrokerError("invalid_params", f"{name} must be a list of strings")
+    return list(cast(list[str], value))
+
+
+def _rename_list_param(params: dict[str, object], name: str) -> list[tuple[str, str]]:
+    value = params.get(name, [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise BrokerError("invalid_params", f"{name} must be a list of [old, new] pairs")
+    result: list[tuple[str, str]] = []
+    for item in value:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not isinstance(item[1], str)
+        ):
+            raise BrokerError("invalid_params", f"{name} must be a list of [old, new] pairs")
+        result.append((item[0], item[1]))
+    return result
+
+
+def _prefer_param(params: dict[str, object]) -> dict[str, int]:
+    value = params.get("prefer", {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise BrokerError("invalid_params", "prefer must be an object")
+    result: dict[str, int] = {}
+    for method, idx in value.items():
+        if not isinstance(method, str) or not isinstance(idx, int):
+            raise BrokerError("invalid_params", "prefer must map methods to integer indices")
+        result[method] = idx
+    return result
 
 
 # --- Socket server -----------------------------------------------------------

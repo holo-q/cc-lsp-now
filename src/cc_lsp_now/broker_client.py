@@ -2,7 +2,7 @@
 
 Stays sync on purpose: the MCP server already runs an asyncio loop, but
 broker calls happen at well-defined seams (status checks, session
-borrow/return, future LSP-method forwarding) where blocking briefly is
+borrow/return, LSP-method forwarding) where blocking briefly is
 fine.  Avoiding `async` here keeps the client usable from tests, CLI
 helpers, and any other tool that doesn't want to spin up a loop just to
 ping the broker.
@@ -11,8 +11,7 @@ Auto mode: `connect_or_start()` first tries to dial the existing socket
 (`broker.socket_path()`).  If nobody is home — no socket file, or the
 file is stale and `connect()` fails — it spawns a detached
 `python -m cc_lsp_now.broker` and waits for the listener to come up.
-This is the path the MCP server will eventually take when it gains a
-broker-first lookup.
+This is the path the MCP server uses in broker-first mode.
 """
 
 from __future__ import annotations
@@ -69,7 +68,11 @@ class BrokerClient:
             return
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(timeout)
-        s.connect(str(self.path))
+        try:
+            s.connect(str(self.path))
+        except OSError:
+            s.close()
+            raise
         # After connect, drop the connect-phase timeout to None so
         # individual reads/writes can use per-call timeouts.
         s.settimeout(None)
