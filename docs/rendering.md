@@ -5,6 +5,10 @@ stable, navigable, and honest about provenance. The renderer contract is part of
 the API: if an agent can see a row, it should usually be able to bounce from
 that row into another tool without re-resolving the same target by hand.
 
+Context-aware compression belongs to the same contract. See
+`docs/render-memory.md` for render-memory aliases, dense path/call output,
+legend rules, and the reversible compression guardrails.
+
 ## Canonical Row Shape
 
 Default data rows should move toward:
@@ -171,6 +175,8 @@ Migration order:
 4. Move rename/move/fix previews to shared `PreviewHeader` / `EditPreview`.
 5. Replace raw string `PendingBuffer.kind` values with `CandidateKind`.
 6. Add renderer golden tests to catch drift.
+7. Add render-memory aliases as a sidecar over graph handles, starting with
+   resolver support and dense `lsp_path` rows.
 
 Formatting is deliberately outside this scope. This document is about the
 information contract, not pretty-printing source code.

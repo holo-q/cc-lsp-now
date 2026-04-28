@@ -13,11 +13,12 @@ Find semantic nodes -> inspect nodes -> expand graph edges -> stage mutations ->
 
 Renderer details are part of this public contract. See
 `docs/rendering.md` for the canonical row shapes, graph-handle expectations,
-diagnostic repair flow, and preview rules. See `docs/agent-tool-roadmap.md` for
-the pending-edit, what-if, witness, multi-agent, and verifier tool roadmap that
-extends this surface beyond raw LSP orchestration. See `docs/lsp-path.md` for
-the bounded pathfinding operator that connects two known semantic anchors
-through one explicit edge family.
+diagnostic repair flow, and preview rules. See `docs/render-memory.md` for the
+planned reversible alias/compression layer over repeated semantic nodes. See
+`docs/agent-tool-roadmap.md` for the pending-edit, what-if, witness,
+multi-agent, and verifier tool roadmap that extends this surface beyond raw LSP
+orchestration. See `docs/lsp-path.md` for the bounded pathfinding operator that
+connects two known semantic anchors through one explicit edge family.
 
 ## Target Tools
 
