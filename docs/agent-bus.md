@@ -207,28 +207,88 @@ The output should avoid forks that require conscious policy decisions. It should
 make the next safe action obvious: run the named tests, inspect the named file,
 reply to the named question, or continue.
 
-## Hook CLI
+## Bus CLI
 
-Hooks need a stable CLI so shell integrations do not need to know MCP internals:
+Shell hooks talk to the bus through the same `cc-lsp-now` binary as the MCP
+server. There is no separate `cc-lsp-now-log`; the `log` subcommand is the
+shell-facing mirror of the `lsp_log` MCP actions, so harness-wired hook bodies,
+git wrappers, and live agents share one event stream and one broker.
 
 ```text
-cc-lsp-now-log hook --kind pre_edit --files src/server.py
-cc-lsp-now-log hook --kind post_edit --files src/server.py --symbols lsp_refs
-cc-lsp-now-log hook --kind pre_commit
-cc-lsp-now-log hook --kind post_commit --commit d796fc8
-cc-lsp-now-log hook --kind test --status passed --targets tests/test_lsp_refs.py
+cc-lsp-now log weather
+cc-lsp-now log recent
+cc-lsp-now log settle
+cc-lsp-now log note --message "..." --files src/server.py
+cc-lsp-now log ask --message "Anyone touching server.py?" --files src/server.py --timeout 3m
+cc-lsp-now log reply --id Q3 --message "done"
+cc-lsp-now log hook --kind edit.after --files src/server.py
+cc-lsp-now log hook --kind commit.after --commit d796fc8
 ```
 
-The hook command should print nothing when there is no useful signal. Silence is
-part of the interface.
+Each subcommand prints a compact bus-stop notice or stays silent when no
+related motion is nearby. Silence is part of the interface; harness hooks
+should pass output straight through without prefixing or summarizing it.
 
-Git command wrapping is useful but fragile. Agents can run `git commit` through
-shell pipelines, aliases, scripts, or command substitutions, and trying to catch
-every spelling turns the bus into brittle enforcement. Prefer native harness
-hooks when available, then lightweight git wrapper hooks, then explicit
-`lsp_log(action="precommit")` prompts as the fallback. Every path should produce
-the same weather report; none should be required for correctness in the first
-slice.
+The CLI stays warn-only at this layer too. `cc-lsp-now log` never blocks the
+caller, never claims a file, and never returns a non-zero exit code to gate an
+edit — it only describes the surrounding weather. Coordination pressure comes
+from making nearby motion visible at the next bus stop, not from refusing the
+current action.
+
+### Hook Recipes
+
+These are the ambient stops the harness should wire. Each one fires
+`cc-lsp-now log hook --kind <kind>` with whatever scope the hook already has;
+the broker then decides whether the next bus stop has a digest worth printing.
+All of them are safe to enable unconditionally because absence of nearby motion
+produces empty output.
+
+| Stop | Hook kind | Example invocation |
+|------|-----------|--------------------|
+| session start | `session.start` | `cc-lsp-now log hook --kind session.start` |
+| user prompt | `prompt` | `cc-lsp-now log hook --kind prompt` |
+| before edit | `edit.before` | `cc-lsp-now log hook --kind edit.before --files src/server.py` |
+| after edit | `edit.after` | `cc-lsp-now log hook --kind edit.after --files src/server.py --symbols lsp_refs` |
+| before `lsp_confirm` | `confirm.before` | `cc-lsp-now log hook --kind confirm.before` |
+| after `lsp_confirm` | `confirm.after` | `cc-lsp-now log hook --kind confirm.after` |
+| after tests | `test` | `cc-lsp-now log hook --kind test --status passed --targets tests/test_lsp_refs.py` |
+| before git commit | `commit.before` | `cc-lsp-now log hook --kind commit.before` |
+| after git commit | `commit.after` | `cc-lsp-now log hook --kind commit.after --commit d796fc8` |
+| before push/pull | `push.before` | `cc-lsp-now log hook --kind push.before` |
+| after push/pull | `push.after` | `cc-lsp-now log hook --kind push.after` |
+
+Session start and prompt stops emit weather; edit/confirm/test/commit/push
+stops record a touched-files event and then emit any digest the broker has
+queued for that scope. The same broker decides whether to surface an open
+question, a settled digest, a related commit, or nothing.
+
+### Timed Questions
+
+`ask` and `reply` are not hook stops; they are the coordination move an agent
+makes when it wants to shape the upcoming weather rather than just observe it.
+The CLI shape mirrors the MCP actions one-to-one:
+
+```text
+cc-lsp-now log ask --message "Anyone touching server.py?" \
+                   --files src/server.py --timeout 3m
+cc-lsp-now log reply --id Q3 --message "done"
+```
+
+`ask` returns the question id (`Q3`, etc.) so a worker can address replies
+without scraping `recent`. While the question is open, every hook stop above
+whose scope overlaps the question appends a compact "Q3 still open" line. At
+timeout, the next stop emits the digest described in *Bus Windows*. Nothing
+about this gates an edit; the timeout is coordination pressure, not a lock.
+
+### Wiring Notes
+
+Prefer native harness hooks where they exist, lightweight git wrappers as a
+second choice, and explicit `lsp_log(action="precommit")` prompts as the
+manual fallback. Git wrapping in particular is useful but fragile: agents
+invoke `git commit` through pipelines, aliases, scripts, and command
+substitutions, and chasing every spelling turns the bus into brittle
+enforcement. All three paths funnel through the same `cc-lsp-now log` surface,
+so the broker still sees one event stream regardless of which path fired.
 
 ## Broker Relationship
 
@@ -246,9 +306,9 @@ only aliases that have already been introduced in that client's context. Bus
 messages should prefer file/symbol names first, then aliases when they are known
 to that recipient.
 
-## First Slice
+## Wave 1: Broker-Backed Bus
 
-The initial implementation is now broker-backed and intentionally advisory:
+The initial implementation is broker-backed and intentionally advisory:
 
 1. `src/cc_lsp_now/bus_event.py` owns the strict event/scope wire schema.
 2. `src/cc_lsp_now/agent_bus.py` owns in-memory state, timed questions,
@@ -263,9 +323,27 @@ The initial implementation is now broker-backed and intentionally advisory:
    so agents can inspect daemon state without adding bespoke debug endpoints.
 6. Coordination remains warn-only: no claims, no leases, no denial path.
 
-Hook output is the next slice. The current bus already has the broker methods
-and rendering helpers needed for session-start, edit, test, and commit hooks to
-call into the same substrate.
+## Wave 2: Ambient Hook Surface
+
+Wave 2 wires the same broker substrate into harness-fired hook bodies through
+a single `cc-lsp-now log` subcommand. The shape is:
+
+1. No new binary. `log` is a subcommand on `cc-lsp-now`; there is no
+   `cc-lsp-now-log`. One entrypoint keeps install paths, broker discovery, and
+   socket auth identical between the MCP server and the hook CLI.
+2. The subcommand mirrors `lsp_log` actions one-to-one (`weather`, `recent`,
+   `settle`, `note`, `ask`, `reply`, `hook`, `precommit`, `postcommit`,
+   `event`), so any MCP example translates directly to a shell hook body.
+3. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
+   before/after, test result, git commit before/after, and push before/after.
+   The broker decides per-stop whether the digest is worth printing; silent
+   exit is the common case.
+4. Stays warn-only: no claims, no blocking, no non-zero exit codes for
+   coordination. Hook bodies that pipe `cc-lsp-now log` output through must
+   not interpret it as a gate.
+5. Timed questions (`ask`/`reply`) layer on top of the same stops: open
+   questions whose scope overlaps the current stop append a compact reminder,
+   and at timeout the next stop emits the closing digest.
 
 ## Implementation Notes
 

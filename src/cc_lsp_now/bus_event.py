@@ -36,12 +36,23 @@ class BusEventKind(Enum):
     """
 
     AGENT_STARTED = "agent.started"
+    SESSION_START = "session.start"
+    PROMPT = "prompt"
     USER_PROMPT = "user.prompt"
     TASK_INTENT = "task.intent"
+    EDIT_BEFORE = "edit.before"
+    EDIT_AFTER = "edit.after"
+    CONFIRM_BEFORE = "confirm.before"
+    CONFIRM_AFTER = "confirm.after"
     FILE_TOUCHED = "file.touched"
     SYMBOL_TOUCHED = "symbol.touched"
+    TEST = "test"
     TEST_RAN = "test.ran"
+    COMMIT_BEFORE = "commit.before"
+    COMMIT_AFTER = "commit.after"
     COMMIT_CREATED = "commit.created"
+    PUSH_BEFORE = "push.before"
+    PUSH_AFTER = "push.after"
     NOTE_POSTED = "note.posted"
     BUS_ASK = "bus.ask"
     BUS_REPLY = "bus.reply"
@@ -49,6 +60,7 @@ class BusEventKind(Enum):
 
     @classmethod
     def from_wire(cls, value: str) -> BusEventKind:
+        value = _EVENT_KIND_ALIASES.get(value, value)
         for kind in cls:
             if kind.value == value:
                 return kind
@@ -286,6 +298,16 @@ def _string_string_dict(value: object) -> dict[str, str]:
         if isinstance(k, str) and isinstance(v, str):
             out[k] = v
     return out
+
+
+_EVENT_KIND_ALIASES: Final[dict[str, str]] = {
+    "prompt.start": BusEventKind.PROMPT.value,
+    "lsp_confirm.before": BusEventKind.CONFIRM_BEFORE.value,
+    "lsp_confirm.after": BusEventKind.CONFIRM_AFTER.value,
+    "test.result": BusEventKind.TEST.value,
+    "git.commit": BusEventKind.COMMIT_AFTER.value,
+    "git.push": BusEventKind.PUSH_AFTER.value,
+}
 
 
 __all__ = [

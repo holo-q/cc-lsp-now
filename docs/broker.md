@@ -252,6 +252,16 @@ set, the broker also registers `broker`, `bus`, `registry`, and `lsp` with
 agents direct runtime introspection of daemon state without making devtools a
 hard dependency.
 
+Wave 2 layers ambient harness hooks over the same broker. There is no separate
+`cc-lsp-now-log` binary; `cc-lsp-now log <action>` is a subcommand that mirrors
+`lsp_log` for shell hook bodies. Session start, user prompt, edit before/after,
+`lsp_confirm` before/after, test result, and git commit/push hooks all funnel
+through `cc-lsp-now log hook --kind <kind>` into the broker's existing `bus.*`
+methods, so MCP agents and harness hooks share one event stream. The CLI stays
+warn-only — it never blocks the caller or returns a coordination error code —
+and prints nothing when no useful signal is queued. See `docs/agent-bus.md`
+for the full hook taxonomy and recipes.
+
 ## Relationship To cc-lsp-now
 
 `cc-lsp-now` should remain useful without a broker.

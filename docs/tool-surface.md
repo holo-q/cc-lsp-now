@@ -57,6 +57,10 @@ Planned coordination surface:
 `lsp_log` is not a raw LSP verb. It belongs to the broker-shaped agent layer:
 weather reports for parallel work, not file locks. The first implementation
 should be warn-only and should print nothing when there is no useful signal.
+The same actions are reachable from the shell as `cc-lsp-now log <action>` for
+harness-fired hook bodies — there is no separate `cc-lsp-now-log` binary; both
+the MCP tool and the CLI subcommand funnel into the broker's `bus.*` JSONL
+surface. See `docs/agent-bus.md` for the ambient hook recipes.
 
 ## Raw Tool Cut Map
 
