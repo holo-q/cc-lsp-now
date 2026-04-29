@@ -128,9 +128,9 @@ Set in the `env` block of your `mcpServers` entry:
 | `CC_LSP_BROKER_SOCKET` | No | Override the user-scoped Unix socket. Useful for isolated tests or separate broker pools. |
 | `CC_LSP_BROKER_LOG` | No | Override the broker log path. Default: `$XDG_STATE_HOME/cc-lsp-now/broker.log` or `~/.local/state/cc-lsp-now/broker.log`. |
 | `CC_LSP_BROKER_IDLE_TTL_SECONDS` | No | Idle broker session TTL. Default 14400 seconds. Set `0` to disable automatic idle eviction. |
-| `CC_LSP_DEVTOOLS` | No | Set `1`/`true`/`on` to expose the live broker to `python-devtools` for runtime introspection. Registers `broker`, `bus`, `registry`, and `lsp` under app id `cc-lsp-now-broker` by default. |
-| `CC_LSP_DEVTOOLS_APP_ID` | No | Override the devtools app id. Default: `cc-lsp-now-broker`. |
-| `CC_LSP_DEVTOOLS_READONLY` | No | Devtools readonly mode. Default: enabled, so agents can inspect broker state without mutation tools. |
+| `LSP_DEVTOOLS` | No | Set `1`/`true`/`on` to expose the live broker to `python-devtools` for runtime introspection. Registers `broker`, `bus`, `registry`, and `lsp` under app id `cc-lsp-now-broker` by default. |
+| `LSP_DEVTOOLS_APP_ID` | No | Override the devtools app id. Default: `cc-lsp-now-broker`. |
+| `LSP_DEVTOOLS_READONLY` | No | Devtools readonly mode. Default: enabled, so agents can inspect broker state without mutation tools. |
 | `CC_LSP_PROBE_CAPABILITIES` | No | Opt into startup capability probing (`1`/`true`/`on`). Default off so MCP startup never launches heavy language servers before the initialize handshake. Runtime fallback still handles unsupported methods. |
 | `LSP_PROJECT_MARKERS` | No | Comma-separated filenames that mark a project root (e.g. `pyproject.toml,setup.py,.git`). When a file outside the current workspace folders is accessed, the bridge walks up looking for these markers and adds the found root to the LSP's workspace via `workspace/didChangeWorkspaceFolders`. Plugins contribute their language's markers — Python plugins list `pyproject.toml`, Rust plugins list `Cargo.toml`, etc. Default: `.git`. |
 | `LSP_WARMUP_PATTERNS` | No | Comma-separated glob patterns (e.g. `*.py,*.pyi` for Python, `*.rs` for Rust). When a workspace folder is added (initial spawn or via auto-detection), the bridge bulk-emits `textDocument/didOpen` for matching files so the LSP eagerly indexes them. Prevents the "cold index" failure mode where `willRenameFiles` returns 0 edits because nothing has been indexed yet. No warmup if unset. |
@@ -173,7 +173,7 @@ cc-lsp-now-broker
   records replies, settles closed windows, and renders compact weather. The bus
   is advisory only: no claims, leases, or edit denial. See
   [docs/agent-bus.md](docs/agent-bus.md).
-- With `CC_LSP_DEVTOOLS=1`, the broker starts `python-devtools` and registers
+- With `LSP_DEVTOOLS=1`, the broker starts `python-devtools` and registers
   live `broker`, `bus`, `registry`, and `lsp` objects so agents can attach via
   the `python-devtools` MCP bridge and inspect daemon state directly.
 - Primary and fallback are both lazy-spawned — no LSP processes start until the

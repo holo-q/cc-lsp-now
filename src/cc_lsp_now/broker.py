@@ -68,11 +68,11 @@ DEFAULT_SOCKET_NAME = "cc-lsp-broker.sock"
 SOCKET_ENV_OVERRIDE = "CC_LSP_BROKER_SOCKET"
 LOG_ENV_OVERRIDE = "CC_LSP_BROKER_LOG"
 IDLE_TTL_ENV = "CC_LSP_BROKER_IDLE_TTL_SECONDS"
-DEVTOOLS_ENV = "CC_LSP_DEVTOOLS"
-DEVTOOLS_APP_ID_ENV = "CC_LSP_DEVTOOLS_APP_ID"
-DEVTOOLS_HOST_ENV = "CC_LSP_DEVTOOLS_HOST"
-DEVTOOLS_PORT_ENV = "CC_LSP_DEVTOOLS_PORT"
-DEVTOOLS_READONLY_ENV = "CC_LSP_DEVTOOLS_READONLY"
+DEVTOOLS_ENV = "LSP_DEVTOOLS"
+DEVTOOLS_APP_ID_ENV = "LSP_DEVTOOLS_APP_ID"
+DEVTOOLS_HOST_ENV = "LSP_DEVTOOLS_HOST"
+DEVTOOLS_PORT_ENV = "LSP_DEVTOOLS_PORT"
+DEVTOOLS_READONLY_ENV = "LSP_DEVTOOLS_READONLY"
 DEFAULT_IDLE_TTL_SECONDS = 4 * 60 * 60
 
 
@@ -543,7 +543,7 @@ def _maybe_start_devtools(daemon: BrokerDaemon):
 
     This intentionally stays opt-in and import-optional. Production broker
     sessions should not grow a runtime-inspection surface unless the caller sets
-    ``CC_LSP_DEVTOOLS=1``. When enabled, agents can attach through the
+    ``LSP_DEVTOOLS=1``. When enabled, agents can attach through the
     ``python-devtools`` MCP bridge using the stable app id
     ``cc-lsp-now-broker`` and inspect ``broker``, ``bus``, ``registry``, and
     ``lsp``.
@@ -553,7 +553,7 @@ def _maybe_start_devtools(daemon: BrokerDaemon):
     try:
         import python_devtools as devtools
     except Exception as e:
-        log.warning("CC_LSP_DEVTOOLS requested but python_devtools import failed: %r", e)
+        log.warning("LSP_DEVTOOLS requested but python_devtools import failed: %r", e)
         return None
 
     app_id = os.environ.get(DEVTOOLS_APP_ID_ENV, "cc-lsp-now-broker")

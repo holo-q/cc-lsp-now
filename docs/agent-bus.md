@@ -258,7 +258,7 @@ The initial implementation is now broker-backed and intentionally advisory:
    `bus.recent`, `bus.settle`, `bus.precommit`, `bus.postcommit`,
    `bus.weather`, and `bus.status`.
 4. The MCP surface is `lsp_log(action="event|note|ask|reply|recent|settle|precommit|postcommit|weather")`.
-5. `CC_LSP_DEVTOOLS=1` registers the live broker, bus, registry, and LSP
+5. `LSP_DEVTOOLS=1` registers the live broker, bus, registry, and LSP
    manager with `python-devtools` under app id `cc-lsp-now-broker` by default,
    so agents can inspect daemon state without adding bespoke debug endpoints.
 6. Coordination remains warn-only: no claims, no leases, no denial path.
