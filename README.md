@@ -124,7 +124,12 @@ Claude's built-in `LSP()` tool is incomplete and occasionally silent-fails (e.g.
 }
 ```
 
-The `hsp-redirect-hook` binary ships with hsp. No custom script needed — every LSP plugin gets the same redirect behavior by copy-pasting this block.
+The published HSP Claude plugin already bundles these hooks. Plugin authors
+copy the block only when building a new downstream plugin; users should not
+hand-install hook config. Ambient bus hooks are bundled the same way and stay
+silent until `HSP_HOOKS=1` is present in the Claude Code environment. When the
+env var is unset, the bundled hook commands drain their JSON payload and exit
+without launching `uvx`.
 
 ### 3. Configuration via env vars
 
@@ -134,6 +139,7 @@ Set in the `env` block of your `mcpServers` entry:
 |----------|----------|-------------|
 | `HSP_AUTO_PROFILES` | No | Set `1`/`true`/`on` in the unified plugin to let HSP select a builtin language profile by file extension or project markers. Explicit `LSP_SERVERS`/`LSP_COMMAND` disables auto mode for backwards compatibility. |
 | `HSP_PROFILE` | No | Force one builtin profile (`python` or `csharp`) when auto mode is enabled and a request has no target file URI. |
+| `HSP_HOOKS` | No | Enables bundled ambient bus hooks when set to `1`/`true`/`on`. The hooks ship inside the plugin and no-op before launching `uvx` by default, so turning this on records session, prompt, and edit bus events without manual hook installation. |
 | `LSP_SERVERS` | Required only for custom/legacy plugin configs | `;`-separated chain in priority order. Each entry is `<command> <args...>`. First = primary. Example: `ty server;basedpyright-langserver --stdio;pyright-langserver --stdio` |
 | `LSP_ROOT` | No | Workspace root path (defaults to cwd) |
 | `LSP_PREFER` | No | Per-method server override: `method1=command,method2=command`. Skips the cold-call probe and routes directly. Example: `workspace/willRenameFiles=basedpyright-langserver,textDocument/callHierarchy=basedpyright-langserver` |

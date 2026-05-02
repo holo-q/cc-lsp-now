@@ -29,6 +29,7 @@ class CliLogTests(unittest.TestCase):
         scripts = data["project"]["scripts"]
         self.assertIn("hsp", scripts)
         self.assertNotIn("hsp-log", scripts)
+        self.assertNotIn("hsp-hook", scripts)
 
     def test_entrypoint_dispatches_log_weather_without_starting_mcp_stdio(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
@@ -108,12 +109,73 @@ class CliLogTests(unittest.TestCase):
         self.assertIs(BusEventKind.from_wire("lsp_confirm.after"), BusEventKind.CONFIRM_AFTER)
         self.assertIs(BusEventKind.from_wire("git.push"), BusEventKind.PUSH_AFTER)
 
+    def test_bundled_hook_command_is_noop_until_env_enabled(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run_hook(["hook", "--kind", "edit.after"], root=root, stdin=payload, enabled=False)
+            path = Path(root) / "tmp" / "hsp-bus.jsonl"
+
+        self.assertEqual(out, "")
+        self.assertFalse(path.exists())
+
+    def test_bundled_hook_records_harness_payload_when_env_enabled(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+            "tool_response": {"success": True},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run_hook(["hook", "--kind", "edit.after"], root=root, stdin=payload, enabled=True)
+            event = self._read_last_event(root)
+            scope = self._require_dict(event, "scope")
+
+        self.assertEqual(out, "")
+        self.assertEqual(event["kind"], "edit.after")
+        self.assertEqual(event["message"], "PostToolUse Edit")
+        self.assertEqual(scope["files"], ["src/hsp/server.py"])
+
+    def test_claude_plugin_bundles_env_gated_bus_hooks(self) -> None:
+        data = json.loads(Path(".claude-plugin/plugin.json").read_text(encoding="utf-8"))
+        hooks = data["hooks"]
+        self.assertIn("SessionStart", hooks)
+        self.assertIn("UserPromptSubmit", hooks)
+        self.assertIn("PreToolUse", hooks)
+        self.assertIn("PostToolUse", hooks)
+        commands = "\n".join(_plugin_hook_commands(hooks))
+        self.assertIn("hsp hook --kind session.start", commands)
+        self.assertIn("hsp hook --kind prompt", commands)
+        self.assertIn("hsp hook --kind edit.before", commands)
+        self.assertIn("hsp hook --kind edit.after", commands)
+        self.assertIn("HSP_HOOKS", commands)
+        self.assertIn("cat >/dev/null", commands)
+        self.assertNotIn("hsp-hook", commands)
+
     def _run(self, argv: list[str], *, root: str) -> str:
         out = io.StringIO()
         with patch.dict(os.environ, {"HSP_BROKER": "off", "LSP_ROOT": root}, clear=False):
             with contextlib.redirect_stdout(out):
                 with self.assertRaises(SystemExit) as cm:
                     hsp_main(argv)
+        self.assertEqual(cm.exception.code, 0)
+        return out.getvalue()
+
+    def _run_hook(self, argv: list[str], *, root: str, stdin: str, enabled: bool) -> str:
+        out = io.StringIO()
+        env = {
+            "HSP_BROKER": "off",
+            "LSP_ROOT": root,
+            "HSP_HOOKS": "1" if enabled else "0",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with patch("sys.stdin", io.StringIO(stdin)):
+                with contextlib.redirect_stdout(out):
+                    with self.assertRaises(SystemExit) as cm:
+                        hsp_main(argv)
         self.assertEqual(cm.exception.code, 0)
         return out.getvalue()
 
@@ -129,6 +191,28 @@ class CliLogTests(unittest.TestCase):
         value = container[key]
         self.assertIsInstance(value, dict)
         return cast(dict[str, object], value)
+
+
+def _plugin_hook_commands(hooks: dict[str, object]) -> list[str]:
+    commands: list[str] = []
+    for entries_obj in hooks.values():
+        if not isinstance(entries_obj, list):
+            continue
+        for entry_obj in entries_obj:
+            if not isinstance(entry_obj, dict):
+                continue
+            entry = cast(dict[str, object], entry_obj)
+            hook_list = entry.get("hooks")
+            if not isinstance(hook_list, list):
+                continue
+            for hook_obj in hook_list:
+                if not isinstance(hook_obj, dict):
+                    continue
+                hook = cast(dict[str, object], hook_obj)
+                command = hook.get("command")
+                if isinstance(command, str):
+                    commands.append(command)
+    return commands
 
 
 if __name__ == "__main__":

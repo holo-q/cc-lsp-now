@@ -253,14 +253,15 @@ agents direct runtime introspection of daemon state without making devtools a
 hard dependency.
 
 Wave 2 layers ambient harness hooks over the same broker. There is no separate
-`hsp-log` binary; `hsp log <action>` is a subcommand that mirrors
-`lsp_log` for shell hook bodies. Session start, user prompt, edit before/after,
-`lsp_confirm` before/after, test result, and git commit/push hooks all funnel
-through `hsp log hook --kind <kind>` into the broker's existing `bus.*`
-methods, so MCP agents and harness hooks share one event stream. The CLI stays
-warn-only — it never blocks the caller or returns a coordination error code —
-and prints nothing when no useful signal is queued. See `docs/agent-bus.md`
-for the full hook taxonomy and recipes.
+`hsp-log` or `hsp-hook` binary; `hsp log <action>` is the explicit shell mirror
+of `lsp_log`, while bundled plugin hooks call `hsp hook --kind <kind>` and feed
+the harness payload on stdin. The hook adapter is env-gated by `HSP_HOOKS` and
+no-ops before launching `uvx` by default. Session start, user prompt, and edit
+before/after hooks now ship inside the Claude plugin manifests; later
+test/commit/push stops should use the same adapter. The CLI stays warn-only: it
+never blocks the caller or returns a coordination error code. See
+`docs/agent-bus.md` for the full hook taxonomy
+and recipes.
 
 ## Relationship To hsp
 

@@ -209,10 +209,11 @@ reply to the named question, or continue.
 
 ## Bus CLI
 
-Shell hooks talk to the bus through the same `hsp` binary as the MCP
-server. There is no separate `hsp-log`; the `log` subcommand is the
-shell-facing mirror of the `lsp_log` MCP actions, so harness-wired hook bodies,
-git wrappers, and live agents share one event stream and one broker.
+Shell hooks talk to the bus through the same `hsp` binary as the MCP server.
+There is no separate `hsp-log` or `hsp-hook`; `hsp log` is the explicit
+operator surface and `hsp hook` is the bundled plugin hook adapter that reads
+the harness JSON payload from stdin. Both land in the same `lsp_log`/`bus.*`
+event stream.
 
 ```text
 hsp log weather
@@ -223,6 +224,7 @@ hsp log ask --message "Anyone touching server.py?" --files src/server.py --timeo
 hsp log reply --id Q3 --message "done"
 hsp log hook --kind edit.after --files src/server.py
 hsp log hook --kind commit.after --commit d796fc8
+hsp hook --kind edit.after < "$CLAUDE_HOOK_PAYLOAD"
 ```
 
 Each subcommand prints a compact bus-stop notice or stays silent when no
@@ -237,25 +239,30 @@ current action.
 
 ### Hook Recipes
 
-These are the ambient stops the harness should wire. Each one fires
-`hsp log hook --kind <kind>` with whatever scope the hook already has;
-the broker then decides whether the next bus stop has a digest worth printing.
-All of them are safe to enable unconditionally because absence of nearby motion
-produces empty output.
+These are the ambient stops the Claude plugin ships. Users should not copy
+hook blocks by hand; the plugin owns the hook declarations and each hook calls
+`hsp hook --kind <kind>` with the JSON payload on stdin. The hook adapter is
+env-gated twice: the bundled shell command drains stdin and exits before
+launching `uvx` when `HSP_HOOKS` is unset or false, and the Python adapter also
+no-ops defensively. Setting `HSP_HOOKS=1` turns the feature on.
+
+The first shipped hook slice records session start, user prompt, and edit
+before/after events. Test, commit, push, and `lsp_confirm` stops remain in the
+taxonomy below for the next hook expansion.
 
 | Stop | Hook kind | Example invocation |
 |------|-----------|--------------------|
-| session start | `session.start` | `hsp log hook --kind session.start` |
-| user prompt | `prompt` | `hsp log hook --kind prompt` |
-| before edit | `edit.before` | `hsp log hook --kind edit.before --files src/server.py` |
-| after edit | `edit.after` | `hsp log hook --kind edit.after --files src/server.py --symbols lsp_refs` |
-| before `lsp_confirm` | `confirm.before` | `hsp log hook --kind confirm.before` |
-| after `lsp_confirm` | `confirm.after` | `hsp log hook --kind confirm.after` |
-| after tests | `test` | `hsp log hook --kind test --status passed --targets tests/test_lsp_refs.py` |
-| before git commit | `commit.before` | `hsp log hook --kind commit.before` |
-| after git commit | `commit.after` | `hsp log hook --kind commit.after --commit d796fc8` |
-| before push/pull | `push.before` | `hsp log hook --kind push.before` |
-| after push/pull | `push.after` | `hsp log hook --kind push.after` |
+| session start | `session.start` | `hsp hook --kind session.start` |
+| user prompt | `prompt` | `hsp hook --kind prompt` |
+| before edit | `edit.before` | `hsp hook --kind edit.before` |
+| after edit | `edit.after` | `hsp hook --kind edit.after` |
+| before `lsp_confirm` | `confirm.before` | `hsp hook --kind confirm.before` |
+| after `lsp_confirm` | `confirm.after` | `hsp hook --kind confirm.after` |
+| after tests | `test` | `hsp hook --kind test` |
+| before git commit | `commit.before` | `hsp hook --kind commit.before` |
+| after git commit | `commit.after` | `hsp hook --kind commit.after` |
+| before push/pull | `push.before` | `hsp hook --kind push.before` |
+| after push/pull | `push.after` | `hsp hook --kind push.after` |
 
 Session start and prompt stops emit weather; edit/confirm/test/commit/push
 stops record a touched-files event and then emit any digest the broker has
@@ -326,22 +333,23 @@ The initial implementation is broker-backed and intentionally advisory:
 ## Wave 2: Ambient Hook Surface
 
 Wave 2 wires the same broker substrate into harness-fired hook bodies through
-a single `hsp log` subcommand. The shape is:
+a single `hsp` binary. The shape is:
 
-1. No new binary. `log` is a subcommand on `hsp`; there is no
-   `hsp-log`. One entrypoint keeps install paths, broker discovery, and
-   socket auth identical between the MCP server and the hook CLI.
+1. No new binary. `log` and `hook` are subcommands on `hsp`; there is no
+   `hsp-log` or `hsp-hook`. One entrypoint keeps install paths, broker
+   discovery, and socket auth identical between the MCP server and hooks.
 2. The subcommand mirrors `lsp_log` actions one-to-one (`weather`, `recent`,
    `settle`, `note`, `ask`, `reply`, `hook`, `precommit`, `postcommit`,
    `event`), so any MCP example translates directly to a shell hook body.
-3. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
+3. Bundled plugin hooks are opt-in with `HSP_HOOKS=1` and no-op otherwise.
+4. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
    before/after, test result, git commit before/after, and push before/after.
    The broker decides per-stop whether the digest is worth printing; silent
    exit is the common case.
-4. Stays warn-only: no claims, no blocking, no non-zero exit codes for
+5. Stays warn-only: no claims, no blocking, no non-zero exit codes for
    coordination. Hook bodies that pipe `hsp log` output through must
    not interpret it as a gate.
-5. Timed questions (`ask`/`reply`) layer on top of the same stops: open
+6. Timed questions (`ask`/`reply`) layer on top of the same stops: open
    questions whose scope overlaps the current stop append a compact reminder,
    and at timeout the next stop emits the closing digest.
 
