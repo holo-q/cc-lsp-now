@@ -8,12 +8,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from cc_lsp_now.agent_log import agent_log
-from cc_lsp_now.alias_coordinator import AliasCoordinator, AliasTouchResult
-from cc_lsp_now.broker_session import SessionKey, SessionRegistry, config_hash, session_to_dict
-from cc_lsp_now.chain_server import ChainServer
-from cc_lsp_now.lsp import LspClient, LspError
-from cc_lsp_now.render_memory import AliasIdentity, AliasResolution
+from hsp.agent_log import agent_log
+from hsp.alias_coordinator import AliasCoordinator, AliasTouchResult
+from hsp.broker_session import SessionKey, SessionRegistry, config_hash, session_to_dict
+from hsp.chain_server import ChainServer
+from hsp.lsp import LspClient, LspError
+from hsp.render_memory import AliasIdentity, AliasResolution
 
 
 ClientFactory = Callable[[list[str], str], LspClient]

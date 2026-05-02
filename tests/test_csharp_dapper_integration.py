@@ -7,10 +7,10 @@ import unittest
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from cc_lsp_now import server
+from hsp import server
 
 
-RUN_CSHARP_FIXTURE = os.environ.get("CC_LSP_NOW_RUN_CSHARP_FIXTURE") == "1"
+RUN_CSHARP_FIXTURE = os.environ.get("HSP_RUN_CSHARP_FIXTURE") == "1"
 DEFAULT_FIXTURE_ROOT = Path("tmp/csharp-fixtures/Dapper")
 SMOKE_PROJECT_ROOT = Path("tmp/csharp-fixtures/dapper-smoke")
 SMOKE_HANDLER_SOURCE = """using Dapper;
@@ -29,7 +29,7 @@ public sealed class SmokeStringHandler : SqlMapper.StringTypeHandler<SmokeValue>
 
 
 def _fixture_root() -> Path:
-    return Path(os.environ.get("CC_LSP_NOW_CSHARP_FIXTURE_ROOT", str(DEFAULT_FIXTURE_ROOT))).resolve()
+    return Path(os.environ.get("HSP_CSHARP_FIXTURE_ROOT", str(DEFAULT_FIXTURE_ROOT))).resolve()
 
 
 def _smoke_root() -> Path:
@@ -101,7 +101,7 @@ class CSharpDapperIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         if not RUN_CSHARP_FIXTURE:
-            self.skipTest("set CC_LSP_NOW_RUN_CSHARP_FIXTURE=1 to run csharp-ls fixture tests")
+            self.skipTest("set HSP_RUN_CSHARP_FIXTURE=1 to run csharp-ls fixture tests")
         if shutil.which("csharp-ls") is None:
             self.skipTest("csharp-ls is not on PATH")
         dapper_root = _fixture_root()

@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import cast
 
-from cc_lsp_now.bus_event import BusEvent
+from hsp.bus_event import BusEvent
 
 
 class BusLog:

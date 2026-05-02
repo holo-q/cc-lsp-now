@@ -2,9 +2,9 @@ import unittest
 import asyncio
 from pathlib import Path
 
-from cc_lsp_now.candidate import Candidate
-from cc_lsp_now.candidate_kind import CandidateKind
-from cc_lsp_now.server import (
+from hsp.candidate import Candidate
+from hsp.candidate_kind import CandidateKind
+from hsp.server import (
     _clear_pending,
     _apply_text_edits,
     _apply_workspace_edit,

@@ -34,7 +34,7 @@ wheels = [
 ]
 
 [[package]]
-name = "cc-lsp-now"
+name = "hsp"
 version = "0.13.0"
 source = { editable = "." }
 dependencies = [

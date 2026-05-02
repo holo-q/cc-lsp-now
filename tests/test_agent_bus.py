@@ -5,9 +5,9 @@ import unittest
 from typing import cast
 from unittest.mock import patch
 
-from cc_lsp_now import server
-from cc_lsp_now.agent_bus import AgentBus
-from cc_lsp_now.broker import BrokerDaemon
+from hsp import server
+from hsp.agent_bus import AgentBus
+from hsp.broker import BrokerDaemon
 
 
 class AgentBusPureTests(unittest.TestCase):
@@ -17,7 +17,7 @@ class AgentBusPureTests(unittest.TestCase):
         result = bus.note({
             "workspace_root": "/repo",
             "message": "touching broker bus",
-            "files": ["src/cc_lsp_now/broker.py"],
+            "files": ["src/hsp/broker.py"],
             "agent_id": "agent-a",
         })
 
@@ -25,14 +25,14 @@ class AgentBusPureTests(unittest.TestCase):
         self.assertEqual(event["event_id"], "E1")
         self.assertEqual(event["event_type"], "note.posted")
         self.assertEqual(event["workspace_root"], "/repo")
-        self.assertEqual(event["files"], ["src/cc_lsp_now/broker.py"])
+        self.assertEqual(event["files"], ["src/hsp/broker.py"])
 
     def test_question_collects_related_events_and_settles(self) -> None:
         bus = AgentBus()
         question_result = bus.ask({
             "workspace_root": "/repo",
             "message": "anyone touching server?",
-            "files": ["src/cc_lsp_now/server.py"],
+            "files": ["src/hsp/server.py"],
             "timeout": 0,
         })
         question = cast(dict[str, object], question_result["question"])
@@ -41,7 +41,7 @@ class AgentBusPureTests(unittest.TestCase):
         bus.event({
             "workspace_root": "/repo",
             "event_type": "file.touched",
-            "files": ["src/cc_lsp_now/server.py"],
+            "files": ["src/hsp/server.py"],
             "message": "added lsp_log",
         })
         bus.reply({"workspace_root": "/repo", "id": qid, "message": "same file, coordinating"})
@@ -90,7 +90,7 @@ class ServerLspLogTests(unittest.TestCase):
     def test_lsp_log_routes_to_broker_bus(self) -> None:
         async def fake_bus_call(method: str, params: dict[str, object]) -> object:
             self.assertEqual(method, "bus.note")
-            self.assertEqual(params["files"], ["src/cc_lsp_now/server.py"])
+            self.assertEqual(params["files"], ["src/hsp/server.py"])
             return {
                 "event": {
                     "event_id": 7,
@@ -108,7 +108,7 @@ class ServerLspLogTests(unittest.TestCase):
                     text = asyncio.run(server.lsp_log(
                         action="note",
                         message="coordinating",
-                        files="src/cc_lsp_now/server.py",
+                        files="src/hsp/server.py",
                     ))
 
         self.assertIn("logged E7 note.posted coordinating", text)

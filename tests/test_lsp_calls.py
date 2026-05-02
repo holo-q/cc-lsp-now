@@ -64,8 +64,8 @@ from collections.abc import Coroutine
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES
+from hsp import server as _server
+from hsp.server import _ALL_TOOLS, TOOL_CAPABILITIES
 
 
 def _calls_attr() -> Any:
@@ -77,7 +77,7 @@ def _calls_attr() -> Any:
 
 
 _CALLS_HOOK_MSG = (
-    "MISSING SOURCE HOOK: lsp_calls not yet defined on cc_lsp_now.server "
+    "MISSING SOURCE HOOK: lsp_calls not yet defined on hsp.server "
     "(Wave 2 verifier lane). docs/tool-surface.md expects "
     "`async def lsp_calls(target='', direction='both', file_path='', "
     "symbol='', line=0, max_depth=1, max_edges=50) -> str`, replacing "
@@ -227,7 +227,7 @@ class LspCallsRegistryTests(unittest.TestCase):
         # an empty label would render as "[]" and lose the orientation
         # signal. We don't pin a specific verb (the implementation may
         # choose textDocument/prepareCallHierarchy or a synthetic
-        # cc-lsp-now/calls label) but it must be a non-empty string.
+        # hsp/calls label) but it must be a non-empty string.
         self.assertIsInstance(method, str)
         self.assertTrue(method, "calls method label must be non-empty")
 

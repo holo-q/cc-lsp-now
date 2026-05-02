@@ -19,7 +19,7 @@ The next workflow should be:
 find -> inspect -> expand -> stage -> predict -> confirm -> witness
 ```
 
-Staging means an LSP operation has produced a `WorkspaceEdit` and `cc-lsp-now`
+Staging means an LSP operation has produced a `WorkspaceEdit` and `hsp`
 has rendered a preview, but disk has not changed yet. `lsp_confirm` is the
 commit operator.
 

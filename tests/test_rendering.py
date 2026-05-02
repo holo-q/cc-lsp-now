@@ -1,6 +1,6 @@
 import unittest
 
-from cc_lsp_now.rendering import (
+from hsp.rendering import (
     LegendBucket,
     LegendBinding,
     LegendIdentity,

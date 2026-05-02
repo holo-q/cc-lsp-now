@@ -29,7 +29,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 if TYPE_CHECKING:
-    from cc_lsp_now.lsp import LspClient
+    from hsp.lsp import LspClient
 
 log = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ class FileWatcher:
 
     def _send(self, events: dict[str, int]) -> None:
         """Emit didChangeWatchedFiles + refresh any open documents."""
-        from cc_lsp_now.lsp import file_uri  # avoid circular at module load
+        from hsp.lsp import file_uri  # avoid circular at module load
 
         changes = [
             {"uri": file_uri(path), "type": change_type}

@@ -6,10 +6,10 @@ def main(argv: list[str] | None = None) -> None:
 
     args = list(sys.argv[1:] if argv is None else argv)
     if args:
-        from cc_lsp_now.cli import main as cli_main
+        from hsp.cli import main as cli_main
 
         raise SystemExit(cli_main(args))
 
-    from cc_lsp_now.server import mcp
+    from hsp.server import mcp
 
     mcp.run(transport="stdio")

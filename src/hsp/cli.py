@@ -1,7 +1,7 @@
-"""Command-line surface for cc-lsp-now.
+"""Command-line surface for hsp.
 
-The MCP server stays the default `cc-lsp-now` behavior for Claude Code, while
-agent-bus hooks live under the same binary as `cc-lsp-now log ...`. Keeping one
+The MCP server stays the default `hsp` behavior for Claude Code, while
+agent-bus hooks live under the same binary as `hsp log ...`. Keeping one
 entrypoint avoids install-path drift between MCP, broker, and harness hooks.
 """
 
@@ -11,7 +11,7 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from cc_lsp_now import server
+from hsp import server
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -24,7 +24,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cc-lsp-now")
+    parser = argparse.ArgumentParser(prog="hsp")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     log = subcommands.add_parser(
@@ -54,7 +54,7 @@ def _run_log(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     kind = str(ns.kind)
     if action == "hook":
         if not kind.strip():
-            parser.error("cc-lsp-now log hook requires --kind")
+            parser.error("hsp log hook requires --kind")
         action = "event"
 
     result = asyncio.run(

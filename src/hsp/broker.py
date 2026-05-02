@@ -1,8 +1,8 @@
-"""cc-lsp-broker daemon.
+"""hsp-broker daemon.
 
 This is the broker described in `docs/broker.md`: a user-level Unix-domain
 socket JSONL daemon that supervises shared workspace sessions for
-`cc-lsp-now` and owns the expensive LSP processes for those sessions.
+`hsp` and owns the expensive LSP processes for those sessions.
 MCP servers in agent subprocesses connect here instead of each spawning a
 fresh language-server chain.
 
@@ -42,32 +42,32 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
-from cc_lsp_now.agent_bus import AgentBus
-from cc_lsp_now.alias_coordinator import (
+from hsp.agent_bus import AgentBus
+from hsp.alias_coordinator import (
     alias_identity_from_wire,
     alias_record_to_wire,
     alias_touch_result_to_wire,
 )
-from cc_lsp_now.broker_session import (
+from hsp.broker_session import (
     SessionKey,
     SessionRegistry,
     session_to_dict,
 )
-from cc_lsp_now.broker_lsp import (
+from hsp.broker_lsp import (
     BrokerLspManager,
     chain_from_wire,
 )
-from cc_lsp_now.lsp import LspError
+from hsp.lsp import LspError
 
 log = logging.getLogger(__name__)
 
 
 # --- Socket path -------------------------------------------------------------
 
-DEFAULT_SOCKET_NAME = "cc-lsp-broker.sock"
-SOCKET_ENV_OVERRIDE = "CC_LSP_BROKER_SOCKET"
-LOG_ENV_OVERRIDE = "CC_LSP_BROKER_LOG"
-IDLE_TTL_ENV = "CC_LSP_BROKER_IDLE_TTL_SECONDS"
+DEFAULT_SOCKET_NAME = "hsp-broker.sock"
+SOCKET_ENV_OVERRIDE = "HSP_BROKER_SOCKET"
+LOG_ENV_OVERRIDE = "HSP_BROKER_LOG"
+IDLE_TTL_ENV = "HSP_BROKER_IDLE_TTL_SECONDS"
 DEVTOOLS_ENV = "LSP_DEVTOOLS"
 DEVTOOLS_APP_ID_ENV = "LSP_DEVTOOLS_APP_ID"
 DEVTOOLS_HOST_ENV = "LSP_DEVTOOLS_HOST"
@@ -81,12 +81,12 @@ def socket_path() -> Path:
 
     Resolution order (first match wins):
 
-    1. `$CC_LSP_BROKER_SOCKET` — explicit override, used in tests and by
+    1. `$HSP_BROKER_SOCKET` — explicit override, used in tests and by
        users who run an isolated broker for a single project.
-    2. `$XDG_RUNTIME_DIR/cc-lsp-broker.sock` — the canonical location on
+    2. `$XDG_RUNTIME_DIR/hsp-broker.sock` — the canonical location on
        systemd-managed systems; the directory is already user-private and
        cleaned on logout.
-    3. `/tmp/cc-lsp-broker-<user>/cc-lsp-broker.sock` — fallback for shells
+    3. `/tmp/hsp-broker-<user>/hsp-broker.sock` — fallback for shells
        without `$XDG_RUNTIME_DIR` (containers, minimal envs).  The parent
        directory is created mode `0o700` so a multi-user box keeps
        per-user isolation.
@@ -102,7 +102,7 @@ def socket_path() -> Path:
     if runtime:
         return Path(runtime) / DEFAULT_SOCKET_NAME
     user = os.environ.get("USER") or _safe_user() or str(os.getuid())
-    base = Path(f"/tmp/cc-lsp-broker-{user}")
+    base = Path(f"/tmp/hsp-broker-{user}")
     try:
         base.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError:
@@ -129,7 +129,7 @@ def broker_log_path() -> Path:
         return Path(override)
     state_home = os.environ.get("XDG_STATE_HOME")
     base = Path(state_home) if state_home else Path.home() / ".local" / "state"
-    return base / "cc-lsp-now" / "broker.log"
+    return base / "hsp" / "broker.log"
 
 
 # --- Protocol framing --------------------------------------------------------
@@ -545,7 +545,7 @@ def _maybe_start_devtools(daemon: BrokerDaemon):
     sessions should not grow a runtime-inspection surface unless the caller sets
     ``LSP_DEVTOOLS=1``. When enabled, agents can attach through the
     ``python-devtools`` MCP bridge using the stable app id
-    ``cc-lsp-now-broker`` and inspect ``broker``, ``bus``, ``registry``, and
+    ``hsp-broker`` and inspect ``broker``, ``bus``, ``registry``, and
     ``lsp``.
     """
     if not _env_enabled(DEVTOOLS_ENV):
@@ -556,7 +556,7 @@ def _maybe_start_devtools(daemon: BrokerDaemon):
         log.warning("LSP_DEVTOOLS requested but python_devtools import failed: %r", e)
         return None
 
-    app_id = os.environ.get(DEVTOOLS_APP_ID_ENV, "cc-lsp-now-broker")
+    app_id = os.environ.get(DEVTOOLS_APP_ID_ENV, "hsp-broker")
     host = os.environ.get(DEVTOOLS_HOST_ENV, "localhost")
     readonly = _env_enabled(DEVTOOLS_READONLY_ENV, default=True)
     devtools.register("broker", daemon)
@@ -628,7 +628,7 @@ async def serve_unix(
 
     if ready is not None:
         ready.set()
-    log.info("cc-lsp-broker listening on %s", path)
+    log.info("hsp-broker listening on %s", path)
 
     try:
         async with server:
@@ -701,7 +701,7 @@ async def _main_async(path: Path) -> None:
 
 
 def main() -> None:
-    """Entry point for `python -m cc_lsp_now.broker`."""
+    """Entry point for `python -m hsp.broker`."""
     log_file = broker_log_path()
     log_file.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(

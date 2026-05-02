@@ -4,8 +4,8 @@ import unittest
 from collections.abc import Coroutine
 from typing import Any
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES
+from hsp import server as _server
+from hsp.server import _ALL_TOOLS, TOOL_CAPABILITIES
 
 
 def _path_attr() -> Any:

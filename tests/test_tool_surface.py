@@ -1,7 +1,7 @@
 import unittest
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.server import (
+from hsp import server as _server
+from hsp.server import (
     CAPABILITY_PROBE_ENV,
     _ALL_TOOLS,
     DISABLED_BY_DEFAULT,
@@ -376,7 +376,7 @@ class WaveThreeSurfaceTests(unittest.TestCase):
         if "move" not in _ALL_TOOLS:
             self.skipTest(
                 "MISSING SOURCE HOOK: lsp_move not yet defined on "
-                "cc_lsp_now.server. docs/tool-surface.md expects "
+                "hsp.server. docs/tool-surface.md expects "
                 "`async def lsp_move(from_path='', to_path='', "
                 "symbol='', moves='') -> str`."
             )
@@ -496,7 +496,7 @@ class WaveFourSurfaceTests(unittest.TestCase):
         if "types" not in _ALL_TOOLS:
             self.skipTest(
                 "MISSING SOURCE HOOK: lsp_types not yet defined on "
-                "cc_lsp_now.server. docs/tool-surface.md expects "
+                "hsp.server. docs/tool-surface.md expects "
                 "`async def lsp_types(target='', direction='both', "
                 "file_path='', symbol='', line=0, max_depth=1, "
                 "max_edges=50) -> str`."
@@ -560,15 +560,15 @@ class LogSurfaceTests(unittest.TestCase):
             "session/memory/confirm admin tools which all use None",
         )
 
-    def test_log_method_label_uses_cc_lsp_now_namespace(self) -> None:
+    def test_log_method_label_uses_hsp_namespace(self) -> None:
         _func, method = _ALL_TOOLS["log"]
-        # Other admin tools register as e.g. "cc-lsp-now/session"; staying
+        # Other admin tools register as e.g. "hsp/session"; staying
         # in that namespace keeps the [header] line readable across the
         # admin surface family.
         self.assertEqual(
             method,
-            "cc-lsp-now/log",
-            f"log method label drifted from cc-lsp-now/log: {method!r}",
+            "hsp/log",
+            f"log method label drifted from hsp/log: {method!r}",
         )
 
 

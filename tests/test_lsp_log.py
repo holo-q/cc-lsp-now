@@ -23,8 +23,8 @@ async def lsp_log(
 ```
 
 Tests stay safe to run without a live broker because the in-process
-:class:`~cc_lsp_now.agent_bus.AgentBus` answers every action when
-``CC_LSP_BROKER=off`` is set in the environment.
+:class:`~hsp.agent_bus.AgentBus` answers every action when
+``HSP_BROKER=off`` is set in the environment.
 """
 from __future__ import annotations
 
@@ -36,10 +36,10 @@ from collections.abc import Coroutine
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.agent_bus import AgentBus
-from cc_lsp_now.broker import BrokerError
-from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES, _BUS_ACTIONS
+from hsp import server as _server
+from hsp.agent_bus import AgentBus
+from hsp.broker import BrokerError
+from hsp.server import _ALL_TOOLS, TOOL_CAPABILITIES, _BUS_ACTIONS
 
 
 def _run(coro: Coroutine[Any, Any, str]) -> str:
@@ -60,7 +60,7 @@ class _LocalBusFixture(unittest.TestCase):
     def setUp(self) -> None:
         self._env_patch = patch.dict(
             os.environ,
-            {"CC_LSP_BROKER": "off", "LSP_ROOT": os.getcwd()},
+            {"HSP_BROKER": "off", "LSP_ROOT": os.getcwd()},
             clear=False,
         )
         self._env_patch.start()
@@ -139,14 +139,14 @@ class LspLogRegistryTests(unittest.TestCase):
     def test_log_is_registered_in_all_tools(self) -> None:
         self.assertIn("log", _ALL_TOOLS, "log not registered in _ALL_TOOLS")
 
-    def test_log_method_label_uses_cc_lsp_now_namespace(self) -> None:
+    def test_log_method_label_uses_hsp_namespace(self) -> None:
         _func, method = _ALL_TOOLS["log"]
         self.assertTrue(
-            method.startswith("cc-lsp-now/"),
-            f"log method label {method!r} should live under cc-lsp-now/",
+            method.startswith("hsp/"),
+            f"log method label {method!r} should live under hsp/",
         )
         # Pin the exact label — agents can grep for it in [header] lines.
-        self.assertEqual(method, "cc-lsp-now/log")
+        self.assertEqual(method, "hsp/log")
 
     def test_log_capability_is_none(self) -> None:
         self.assertIn("log", TOOL_CAPABILITIES)
@@ -281,7 +281,7 @@ class LspLogAskFlowTests(_LocalBusFixture):
 
 
 class LspLogBrokerRoutingTests(unittest.TestCase):
-    """The fallback policy is the load-bearing contract: ``CC_LSP_BROKER=on``
+    """The fallback policy is the load-bearing contract: ``HSP_BROKER=on``
     surfaces broker errors directly so a misconfigured deployment is loud,
     while ``auto`` lets the agent keep coordinating against the in-process
     bus when the broker socket is gone.
@@ -297,7 +297,7 @@ class LspLogBrokerRoutingTests(unittest.TestCase):
     def test_broker_on_failure_surfaces_error_string(self) -> None:
         with patch.dict(
             os.environ,
-            {"CC_LSP_BROKER": "on", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
+            {"HSP_BROKER": "on", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
             clear=False,
         ):
             with patch.object(
@@ -314,7 +314,7 @@ class LspLogBrokerRoutingTests(unittest.TestCase):
     def test_broker_auto_falls_back_to_local_bus(self) -> None:
         with patch.dict(
             os.environ,
-            {"CC_LSP_BROKER": "auto", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
+            {"HSP_BROKER": "auto", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
             clear=False,
         ):
             with patch.object(
@@ -331,7 +331,7 @@ class LspLogBrokerRoutingTests(unittest.TestCase):
     def test_broker_off_uses_local_bus_directly(self) -> None:
         with patch.dict(
             os.environ,
-            {"CC_LSP_BROKER": "off", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
+            {"HSP_BROKER": "off", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
             clear=False,
         ):
             with patch.object(

@@ -25,16 +25,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cc_lsp_now.bus_event import BusEvent, BusEventKind, BusScope
-from cc_lsp_now.bus_journal import BusJournal
-from cc_lsp_now.bus_log import BusLog
-from cc_lsp_now.bus_presence import (
+from hsp.bus_event import BusEvent, BusEventKind, BusScope
+from hsp.bus_journal import BusJournal
+from hsp.bus_log import BusLog
+from hsp.bus_presence import (
     ACTIVE_WINDOW_SECONDS,
     PRUNE_WINDOW_SECONDS,
     PresenceStatus,
     PresenceTracker,
 )
-from cc_lsp_now.bus_registry import (
+from hsp.bus_registry import (
     BUS_DIR_ENV,
     BrokerMode,
     BusRegistry,

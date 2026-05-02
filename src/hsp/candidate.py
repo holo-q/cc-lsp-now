@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from cc_lsp_now.candidate_kind import CandidateKind
-from cc_lsp_now.file_move import FileMove
+from hsp.candidate_kind import CandidateKind
+from hsp.file_move import FileMove
 
 @dataclass
 class Candidate:

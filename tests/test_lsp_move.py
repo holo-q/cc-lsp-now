@@ -46,12 +46,12 @@ import unittest
 from collections.abc import Coroutine
 from typing import Any
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES
+from hsp import server as _server
+from hsp.server import _ALL_TOOLS, TOOL_CAPABILITIES
 
 
 _MOVE_HOOK_MSG = (
-    "MISSING SOURCE HOOK: lsp_move not yet defined on cc_lsp_now.server "
+    "MISSING SOURCE HOOK: lsp_move not yet defined on hsp.server "
     "(Wave 3 mutation lane). docs/tool-surface.md expects "
     "`async def lsp_move(from_path='', to_path='', symbol='', moves='') -> str`, "
     "absorbing lsp_move_file + lsp_move_files into one preview-and-stage tool."
@@ -176,7 +176,7 @@ class LspMoveRegistryTests(unittest.TestCase):
         # The header line ([method]) is what the agent sees on every call;
         # an empty label would render as "[]" and lose the orientation
         # signal. We don't pin a specific verb (the implementation may
-        # choose workspace/willRenameFiles or a synthetic cc-lsp-now/move
+        # choose workspace/willRenameFiles or a synthetic hsp/move
         # label) but it must be a non-empty string.
         self.assertIsInstance(method, str)
         self.assertTrue(method, "move method label must be non-empty")

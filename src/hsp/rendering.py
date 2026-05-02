@@ -27,7 +27,7 @@ existing inline renderers stay until that migration ships, so the agent
 surface contract does not flap.
 
 A ``RenderMemory``-shaped Protocol is declared here so future
-``src/cc_lsp_now/render_memory.py`` can plug in without changing this
+``src/hsp/render_memory.py`` can plug in without changing this
 module's API. The Protocol is intentionally small: aliases are looked up
 *by record* (already minted by the alias book), never minted here.
 """

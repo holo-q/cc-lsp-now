@@ -17,8 +17,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cc_lsp_now.bus_event import BusEvent, BusEventKind, BusScope
-from cc_lsp_now.bus_log import BusLog
+from hsp.bus_event import BusEvent, BusEventKind, BusScope
+from hsp.bus_log import BusLog
 
 
 def _event(seq: int, *, message: str = "x") -> BusEvent:

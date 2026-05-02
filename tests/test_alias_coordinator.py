@@ -1,13 +1,13 @@
 import unittest
 
-from cc_lsp_now.alias_coordinator import (
+from hsp.alias_coordinator import (
     AliasCoordinator,
     alias_identity_from_wire,
     alias_identity_to_wire,
     alias_record_from_wire,
     alias_record_to_wire,
 )
-from cc_lsp_now.render_memory import AliasIdentity, AliasKind
+from hsp.render_memory import AliasIdentity, AliasKind
 
 
 def _identity(name: str = "ctx") -> AliasIdentity:

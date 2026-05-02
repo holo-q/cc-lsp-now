@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import unittest
 
-from cc_lsp_now.bus_event import (
+from hsp.bus_event import (
     MAX_MESSAGE_BYTES,
     SCHEMA_VERSION,
     BusEvent,

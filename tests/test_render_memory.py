@@ -1,6 +1,6 @@
 import unittest
 
-from cc_lsp_now.render_memory import AliasError, AliasIdentity, AliasKind, RenderMemory
+from hsp.render_memory import AliasError, AliasIdentity, AliasKind, RenderMemory
 
 
 def _identity(

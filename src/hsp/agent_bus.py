@@ -18,7 +18,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from cc_lsp_now.bus_event import BusEvent, BusEventKind, BusScope, truncate_message
+from hsp.bus_event import BusEvent, BusEventKind, BusScope, truncate_message
 
 
 DEFAULT_RECENT_LIMIT = 20
@@ -375,7 +375,7 @@ def _event_wire(event: BusEvent) -> dict[str, Any]:
 
 
 def _append_jsonl(workspace_root: str, payload: dict[str, Any]) -> None:
-    path = Path(workspace_root) / "tmp" / "cc-lsp-now-bus.jsonl"
+    path = Path(workspace_root) / "tmp" / "hsp-bus.jsonl"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:

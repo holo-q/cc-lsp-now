@@ -3,7 +3,7 @@
 The agent bus is described in ``docs/agent-bus.md``. Wave 1 has three
 moving parts that other workers ship in parallel:
 
-- ``cc_lsp_now.agent_bus`` — the workspace-scoped event log + question
+- ``hsp.agent_bus`` — the workspace-scoped event log + question
   table (already landed as ``AgentBus``).
 - ``BrokerDaemon`` bus methods (``bus.event|note|ask|reply|recent|settle|
   precommit|postcommit|weather``) — already wired in ``broker.py``.
@@ -21,7 +21,7 @@ for Wave 1:
 - presence policy: active <60s, asleep >=60s, pruned hidden after 600s,
   ``prompt_count >= 2`` pinned (skip-tolerant — presence may land later);
 - ``lsp_log`` shape: action default ``weather``, timeout default ``3m``,
-  registered method label ``cc-lsp-now/log``, capability ``None``;
+  registered method label ``hsp/log``, capability ``None``;
 - broker bus method names exist through ``BrokerDaemon.handle_request``.
 
 Skipped tests double as a punch-list pointing the implementation worker
@@ -36,19 +36,19 @@ import unittest
 from collections.abc import Coroutine
 from typing import Any, cast
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.agent_bus import AgentBus
-from cc_lsp_now.broker import BrokerDaemon
-from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES
+from hsp import server as _server
+from hsp.agent_bus import AgentBus
+from hsp.broker import BrokerDaemon
+from hsp.server import _ALL_TOOLS, TOOL_CAPABILITIES
 
 
 _LSP_LOG_HOOK_MSG = (
-    "MISSING SOURCE HOOK: lsp_log not yet defined on cc_lsp_now.server "
+    "MISSING SOURCE HOOK: lsp_log not yet defined on hsp.server "
     "(Wave 1 agent-bus surface). docs/agent-bus.md and "
     "docs/tool-surface.md expect a coroutine "
     "`async def lsp_log(action='weather', message='', files='', "
     "symbols='', timeout='3m', id='') -> str`, registered as "
-    "`cc-lsp-now/log` with TOOL_CAPABILITIES[name] is None."
+    "`hsp/log` with TOOL_CAPABILITIES[name] is None."
 )
 
 _PRESENCE_HOOK_MSG = (
@@ -307,16 +307,16 @@ class LspLogToolSurfaceTests(unittest.TestCase):
             "0 default would silently change ask-window semantics",
         )
 
-    def test_log_registered_with_cc_lsp_now_namespace(self) -> None:
+    def test_log_registered_with_hsp_namespace(self) -> None:
         if "log" not in _ALL_TOOLS:
             self.skipTest(_LSP_LOG_HOOK_MSG)
         _func, method = _ALL_TOOLS["log"]
         self.assertEqual(
             method,
-            "cc-lsp-now/log",
-            f"log method label must be `cc-lsp-now/log` — got {method!r}. "
+            "hsp/log",
+            f"log method label must be `hsp/log` — got {method!r}. "
             "docs/agent-bus.md treats lsp_log as broker-shaped agent "
-            "layer, so it lives under the cc-lsp-now/ namespace alongside "
+            "layer, so it lives under the hsp/ namespace alongside "
             "the other internal verbs (info, workspaces, confirm, ...).",
         )
 
@@ -382,7 +382,7 @@ class BrokerBusMethodSurfaceTests(unittest.TestCase):
                             # workspace_root keeps the bus from defaulting
                             # to os.getcwd() inside the test runner.
                             "params": {
-                                "workspace_root": "/tmp/cc-lsp-bus-test",
+                                "workspace_root": "/tmp/hsp-bus-test",
                                 "message": "probe",
                             },
                         }

@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from cc_lsp_now.agent_log import agent_log
-from cc_lsp_now.file_watcher import FileWatcher
+from hsp.agent_log import agent_log
+from hsp.file_watcher import FileWatcher
 
 log = logging.getLogger(__name__)
 

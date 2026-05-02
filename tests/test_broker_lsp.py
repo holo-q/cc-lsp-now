@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from cc_lsp_now.broker_session import SessionRegistry
+from hsp.broker_session import SessionRegistry
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
-from cc_lsp_now import server
-from cc_lsp_now.alias_coordinator import alias_identity_to_wire
-from cc_lsp_now.broker import BrokerDaemon
-from cc_lsp_now.broker_lsp import BrokerLspManager, BrokerLspSession, chain_config_hash, chain_from_wire, chain_to_wire
-from cc_lsp_now.chain_server import ChainServer
-from cc_lsp_now.lsp import LspClient
-from cc_lsp_now.render_memory import AliasIdentity, AliasKind
+from hsp import server
+from hsp.alias_coordinator import alias_identity_to_wire
+from hsp.broker import BrokerDaemon
+from hsp.broker_lsp import BrokerLspManager, BrokerLspSession, chain_config_hash, chain_from_wire, chain_to_wire
+from hsp.chain_server import ChainServer
+from hsp.lsp import LspClient
+from hsp.render_memory import AliasIdentity, AliasKind
 
 
 class FakeLspClient:
@@ -323,7 +323,7 @@ class ServerBrokerForwardingTests(unittest.TestCase):
         server._chain_clients.clear()
         server._method_handler.clear()
 
-        with patch.dict("os.environ", {"LSP_SERVERS": "fake-ls", "CC_LSP_BROKER": "on"}, clear=False):
+        with patch.dict("os.environ", {"LSP_SERVERS": "fake-ls", "HSP_BROKER": "on"}, clear=False):
             with patch.object(server, "_broker_lsp_request", AsyncMock(side_effect=fake_broker)):
                 with patch.object(server, "_get_client", AsyncMock(side_effect=explode_get_client)):
                     result = asyncio.run(server._request("textDocument/definition", {}, uri="file:///repo/a.cs"))

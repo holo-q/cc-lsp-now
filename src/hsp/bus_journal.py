@@ -31,14 +31,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Final
 
-from cc_lsp_now.bus_event import (
+from hsp.bus_event import (
     BusEvent,
     BusEventKind,
     BusScope,
     truncate_message,
 )
-from cc_lsp_now.bus_log import BusLog
-from cc_lsp_now.bus_presence import (
+from hsp.bus_log import BusLog
+from hsp.bus_presence import (
     PresenceEntry,
     PresenceStatus,
     PresenceTracker,

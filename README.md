@@ -1,6 +1,6 @@
-# LSP Now — Agent-First LSP for Claude Code
+# HSP — Harness Server Protocol for Agent-First LSP
 
-A **standalone MCP server** that bridges the Language Server Protocol into Claude Code, exposing LSP-backed operations as typed MCP tools. Claude Code's built-in `LSP()` tool covers ~9 methods and is often buggy — this bridge covers the protocol surface for **any** language server while evolving toward a smaller graph-operator interface for agents: find semantic nodes, inspect nodes, expand graph edges, stage mutations, and verify.
+A **standalone MCP server** that bridges the Language Server Protocol into Claude Code, exposing LSP-backed operations as typed MCP tools. HSP is the harness layer around language servers: it keeps LSP protocol details inside the server while exposing graph-oriented operators for agents. Claude Code's built-in `LSP()` tool covers ~9 methods and is often buggy — this bridge covers the protocol surface for **any** language server while evolving toward a smaller graph-operator interface: find semantic nodes, inspect nodes, expand graph edges, stage mutations, and verify.
 
 ## Tools
 
@@ -28,11 +28,12 @@ The remaining protocol-shaped tools are transitional. The cut direction is one-w
 
 File arguments may be full paths, relative paths, or unique basenames. For example, `lsp_outline(file_path="NodesWindow.cs")` resolves the file under active workspaces; if the basename is not unique, the tool returns the matching paths and asks for a more specific path.
 
-## Known LSP Plugins using cc-lsp-now
+## Known LSP Plugins using hsp
 
-- **[cc-ty-plugin](https://github.com/holo-q/cc-ty-plugin)** — Python via [ty](https://github.com/astral-sh/ty) (Astral), with basedpyright fallback for call hierarchy and `willRenameFiles`.
+- **[hsp-cs](https://github.com/holo-q/hsp-cs)** — C# via [csharp-ls](https://github.com/razzmatazz/csharp-language-server).
+- **[hsp-py](https://github.com/holo-q/hsp-py)** — Python via [ty](https://github.com/astral-sh/ty) (Astral), with basedpyright fallback for call hierarchy and `willRenameFiles`.
 
-**Want to add yours?** Open a PR adding a bullet here. An LSP plugin is ~20 lines of JSON — see [cc-ty-plugin/plugin.json](https://github.com/holo-q/cc-ty-plugin/blob/main/.claude-plugin/plugin.json) for the minimal shape (lspServers + mcpServers + the redirect hook). Tested language servers we'd like to see plugins for: `rust-analyzer`, `gopls`, `tsserver`, `clangd`, `lua-language-server`, `solargraph`, `elixir-ls`, `haskell-language-server`, `zls`, `nil`, `jdtls`.
+**Want to add yours?** Open a PR adding a bullet here. An LSP plugin is ~20 lines of JSON — see [hsp-py/plugin.json](https://github.com/holo-q/hsp-py/blob/main/.claude-plugin/plugin.json) for the minimal shape (lspServers + mcpServers + the redirect hook). Tested language servers we'd like to see plugins for: `rust-analyzer`, `gopls`, `tsserver`, `clangd`, `lua-language-server`, `solargraph`, `elixir-ls`, `haskell-language-server`, `zls`, `nil`, `jdtls`.
 
 ## How the model calls the tools
 
@@ -65,7 +66,7 @@ Standalone ComfyUI frontend built on AppKit.
 
 ## For LSP Plugin Authors
 
-cc-lsp-now is the MCP server; your plugin bundles it. Users install one plugin (yours), get both the native `lspServers` integration (for hooks/diagnostics) *and* the graph-oriented MCP tool set.
+hsp is the MCP server; your plugin bundles it. Users install one plugin (yours), get both the native `lspServers` integration (for hooks/diagnostics) *and* the graph-oriented MCP tool set.
 
 ### 1. Declare the MCP server in `plugin.json`
 
@@ -79,7 +80,7 @@ cc-lsp-now is the MCP server; your plugin bundles it. Users install one plugin (
   "mcpServers": {
     "ty-lsp-extended": {
       "command": "uvx",
-      "args": ["cc-lsp-now"],
+      "args": ["hsp"],
       "env": {
         "LSP_SERVERS": "ty server;basedpyright-langserver --stdio"
       }
@@ -101,7 +102,7 @@ Claude's built-in `LSP()` tool is incomplete and occasionally silent-fails (e.g.
         "hooks": [
           {
             "type": "command",
-            "command": "cc-lsp-now-redirect-hook"
+            "command": "hsp-redirect-hook"
           }
         ]
       }
@@ -110,7 +111,7 @@ Claude's built-in `LSP()` tool is incomplete and occasionally silent-fails (e.g.
 }
 ```
 
-The `cc-lsp-now-redirect-hook` binary ships with cc-lsp-now. No custom script needed — every LSP plugin gets the same redirect behavior by copy-pasting this block.
+The `hsp-redirect-hook` binary ships with hsp. No custom script needed — every LSP plugin gets the same redirect behavior by copy-pasting this block.
 
 ### 3. Configuration via env vars
 
@@ -124,14 +125,14 @@ Set in the `env` block of your `mcpServers` entry:
 | `LSP_REPLACE` | No | Post-filter command substitution: `old=new,old=new`. Applied to `LSP_SERVERS` entries and `LSP_PREFER` targets so a user can swap a binary without rewriting the whole config. Example: `basedpyright-langserver=pylance-language-server` replaces basedpyright everywhere the plugin mentions it. |
 | `LSP_TOOLS` | No | Which tools to register. `all` = every public tool. Comma list = explicit opt-in. Default = all public tools. |
 | `LSP_EXCLUDE` | No | Comma-separated tools to exclude from the enabled set. (Legacy name: `LSP_DISABLED_TOOLS` — still accepted.) |
-| `CC_LSP_BROKER` | No | Broker mode: `auto` (default) shares one warm LSP chain across agents and falls back to direct mode if the broker is unreachable; `on` requires the broker; `off` restores one LSP chain per MCP process. |
-| `CC_LSP_BROKER_SOCKET` | No | Override the user-scoped Unix socket. Useful for isolated tests or separate broker pools. |
-| `CC_LSP_BROKER_LOG` | No | Override the broker log path. Default: `$XDG_STATE_HOME/cc-lsp-now/broker.log` or `~/.local/state/cc-lsp-now/broker.log`. |
-| `CC_LSP_BROKER_IDLE_TTL_SECONDS` | No | Idle broker session TTL. Default 14400 seconds. Set `0` to disable automatic idle eviction. |
-| `LSP_DEVTOOLS` | No | Set `1`/`true`/`on` to expose the live broker to `python-devtools` for runtime introspection. Registers `broker`, `bus`, `registry`, and `lsp` under app id `cc-lsp-now-broker` by default. |
-| `LSP_DEVTOOLS_APP_ID` | No | Override the devtools app id. Default: `cc-lsp-now-broker`. |
+| `HSP_BROKER` | No | Broker mode: `auto` (default) shares one warm LSP chain across agents and falls back to direct mode if the broker is unreachable; `on` requires the broker; `off` restores one LSP chain per MCP process. |
+| `HSP_BROKER_SOCKET` | No | Override the user-scoped Unix socket. Useful for isolated tests or separate broker pools. |
+| `HSP_BROKER_LOG` | No | Override the broker log path. Default: `$XDG_STATE_HOME/hsp/broker.log` or `~/.local/state/hsp/broker.log`. |
+| `HSP_BROKER_IDLE_TTL_SECONDS` | No | Idle broker session TTL. Default 14400 seconds. Set `0` to disable automatic idle eviction. |
+| `LSP_DEVTOOLS` | No | Set `1`/`true`/`on` to expose the live broker to `python-devtools` for runtime introspection. Registers `broker`, `bus`, `registry`, and `lsp` under app id `hsp-broker` by default. |
+| `LSP_DEVTOOLS_APP_ID` | No | Override the devtools app id. Default: `hsp-broker`. |
 | `LSP_DEVTOOLS_READONLY` | No | Devtools readonly mode. Default: enabled, so agents can inspect broker state without mutation tools. |
-| `CC_LSP_PROBE_CAPABILITIES` | No | Opt into startup capability probing (`1`/`true`/`on`). Default off so MCP startup never launches heavy language servers before the initialize handshake. Runtime fallback still handles unsupported methods. |
+| `HSP_PROBE_CAPABILITIES` | No | Opt into startup capability probing (`1`/`true`/`on`). Default off so MCP startup never launches heavy language servers before the initialize handshake. Runtime fallback still handles unsupported methods. |
 | `LSP_PROJECT_MARKERS` | No | Comma-separated filenames that mark a project root (e.g. `pyproject.toml,setup.py,.git`). When a file outside the current workspace folders is accessed, the bridge walks up looking for these markers and adds the found root to the LSP's workspace via `workspace/didChangeWorkspaceFolders`. Plugins contribute their language's markers — Python plugins list `pyproject.toml`, Rust plugins list `Cargo.toml`, etc. Default: `.git`. |
 | `LSP_WARMUP_PATTERNS` | No | Comma-separated glob patterns (e.g. `*.py,*.pyi` for Python, `*.rs` for Rust). When a workspace folder is added (initial spawn or via auto-detection), the bridge bulk-emits `textDocument/didOpen` for matching files so the LSP eagerly indexes them. Prevents the "cold index" failure mode where `willRenameFiles` returns 0 edits because nothing has been indexed yet. No warmup if unset. |
 | `LSP_WARMUP_MAX_FILES` | No | Cap on how many files to warm per workspace folder. Default 500. |
@@ -143,11 +144,11 @@ Set in the `env` block of your `mcpServers` entry:
 ## Standalone / CLI Usage
 
 ```bash
-uv tool install cc-lsp-now     # or: pip install cc-lsp-now
+uv tool install hsp     # or: pip install hsp
 
-LSP_COMMAND=ty LSP_ARGS=server cc-lsp-now
-LSP_COMMAND=rust-analyzer cc-lsp-now
-LSP_COMMAND=gopls LSP_ARGS=serve cc-lsp-now
+LSP_COMMAND=ty LSP_ARGS=server hsp
+LSP_COMMAND=rust-analyzer hsp
+LSP_COMMAND=gopls LSP_ARGS=serve hsp
 ```
 
 The MCP server speaks stdio — useful for testing or for non-plugin MCP clients.
@@ -157,9 +158,9 @@ The MCP server speaks stdio — useful for testing or for non-plugin MCP clients
 ```
 Claude Code
     ↕ MCP (stdio)
-cc-lsp-now (mcp_server.py)
+hsp (mcp_server.py)
     ↕ JSONL / Unix socket  [broker mode, default]
-cc-lsp-now-broker
+hsp-broker
     ↕ JSON-RPC / LSP (stdio)
 ┌─── Primary LSP (ty, rust-analyzer, ...)
 └─── Fallback LSP  (basedpyright, pyright, ...)  [lazy-spawned]
@@ -169,7 +170,7 @@ cc-lsp-now-broker
   the same broker-owned LSP chain for the same root/config hash, reducing CPU
   and keeping method routing, diagnostics, and future alias memory aligned.
 - The broker owns the first agent-bus slice: `lsp_log` appends durable
-  workspace events to `tmp/cc-lsp-now-bus.jsonl`, opens timed questions,
+  workspace events to `tmp/hsp-bus.jsonl`, opens timed questions,
   records replies, settles closed windows, and renders compact weather. The bus
   is advisory only: no claims, leases, or edit denial. See
   [docs/agent-bus.md](docs/agent-bus.md).

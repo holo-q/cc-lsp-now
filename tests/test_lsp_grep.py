@@ -2,7 +2,7 @@ import unittest
 import asyncio
 from pathlib import Path
 
-from cc_lsp_now.server import (
+from hsp.server import (
     SemanticGrepGroup,
     SemanticGrepHit,
     _context_breadcrumb,

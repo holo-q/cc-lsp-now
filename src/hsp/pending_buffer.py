@@ -32,7 +32,7 @@ public ``handle`` grammar.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from cc_lsp_now.candidate import Candidate
+from hsp.candidate import Candidate
 
 # Reserved handle for the unnamed slot. Legacy callers (`lsp_rename`,
 # `lsp_move`, `lsp_fix`) stage here so `lsp_confirm(0)` keeps committing the

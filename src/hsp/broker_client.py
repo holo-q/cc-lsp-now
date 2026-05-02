@@ -1,4 +1,4 @@
-"""Synchronous client for the cc-lsp-broker JSONL daemon.
+"""Synchronous client for the hsp-broker JSONL daemon.
 
 Stays sync on purpose: the MCP server already runs an asyncio loop, but
 broker calls happen at well-defined seams (status checks, session
@@ -10,7 +10,7 @@ ping the broker.
 Auto mode: `connect_or_start()` first tries to dial the existing socket
 (`broker.socket_path()`).  If nobody is home — no socket file, or the
 file is stale and `connect()` fails — it spawns a detached
-`python -m cc_lsp_now.broker` and waits for the listener to come up.
+`python -m hsp.broker` and waits for the listener to come up.
 This is the path the MCP server uses in broker-first mode.
 """
 
@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import cast
 
-from cc_lsp_now.broker import (
+from hsp.broker import (
     BrokerError,
     broker_log_path,
     decode_message,
@@ -194,7 +194,7 @@ class BrokerClient:
 
 
 def start_broker_subprocess() -> subprocess.Popen[bytes]:
-    """Spawn a detached `python -m cc_lsp_now.broker` process.
+    """Spawn a detached `python -m hsp.broker` process.
 
     Detached so it survives the calling MCP session.  stdout/stderr are
     appended to the same broker log as structured Python logging, so
@@ -205,7 +205,7 @@ def start_broker_subprocess() -> subprocess.Popen[bytes]:
     log_handle = log_file.open("ab")
     try:
         return subprocess.Popen(
-            [sys.executable, "-m", "cc_lsp_now.broker"],
+            [sys.executable, "-m", "hsp.broker"],
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=subprocess.STDOUT,

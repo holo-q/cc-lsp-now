@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Final
 
-from cc_lsp_now.bus_event import BusEvent, BusEventKind
+from hsp.bus_event import BusEvent, BusEventKind
 
 
 ACTIVE_WINDOW_SECONDS: Final[float] = 60.0

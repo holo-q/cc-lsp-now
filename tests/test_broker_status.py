@@ -10,7 +10,7 @@ real wire:
   the same connection (key reuse over the wire);
 - a `shutdown` request really stops `serve_unix`.
 
-This test does NOT exercise the `python -m cc_lsp_now.broker` subprocess
+This test does NOT exercise the `python -m hsp.broker` subprocess
 launcher.  Spawning a subprocess from inside the test runner makes
 debugging painful and the launcher is already covered by import.  The
 in-process variant verifies the protocol fidelity instead, which is
@@ -27,8 +27,8 @@ import unittest
 from pathlib import Path
 from typing import cast
 
-from cc_lsp_now.broker import BrokerDaemon, serve_unix
-from cc_lsp_now.broker_client import BrokerClient
+from hsp.broker import BrokerDaemon, serve_unix
+from hsp.broker_client import BrokerClient
 
 
 class _ServerThread:
@@ -83,7 +83,7 @@ class _ServerThread:
 
 class BrokerStatusOverSocketTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmpdir = tempfile.TemporaryDirectory(prefix="cc-lsp-broker-test-")
+        self._tmpdir = tempfile.TemporaryDirectory(prefix="hsp-broker-test-")
         self.addCleanup(self._tmpdir.cleanup)
         self.socket_path = Path(self._tmpdir.name) / "broker.sock"
         self.server = _ServerThread(self.socket_path)

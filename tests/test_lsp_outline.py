@@ -24,8 +24,8 @@ end-to-end behaviour with a real server stays in live smoke per the docs.
 import inspect
 import unittest
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.server import (
+from hsp import server as _server
+from hsp.server import (
     _ALL_TOOLS,
     TOOL_CAPABILITIES,
     _context_breadcrumb,

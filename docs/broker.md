@@ -1,6 +1,6 @@
-# cc-lsp-broker Design Note
+# hsp-broker Design Note
 
-`cc-lsp-now` currently runs as an MCP server that owns a short-lived chain of
+`hsp` currently runs as an MCP server that owns a short-lived chain of
 language-server clients inside one agent/plugin session. That is the right
 shape for today's Codex plugin, but agents change the value equation: multiple
 clients may ask the same workspace the same semantic questions, and repeatedly
@@ -9,7 +9,7 @@ semantic context.
 
 This note started as a future direction. The first lifecycle slice now exists:
 the MCP server defaults to broker-first mode when an LSP chain is configured,
-auto-starts `cc-lsp-now-broker`, and forwards LSP requests over the Unix socket.
+auto-starts `hsp-broker`, and forwards LSP requests over the Unix socket.
 If the broker is unavailable in `auto` mode, direct in-process spawning remains
 the fallback.
 
@@ -22,7 +22,7 @@ editor / agent / worker
         |
    MCP or CLI client
         |
- cc-lsp-broker daemon
+ hsp-broker daemon
         |
  workspace session manager
         |
@@ -77,7 +77,7 @@ Do not start with unsaved overlays, distributed locking, or a persistent symbol
 database. The smallest useful broker is a process supervisor with session reuse.
 That slice is implemented as:
 
-- `cc-lsp-now-broker` / `python -m cc_lsp_now.broker`
+- `hsp-broker` / `python -m hsp.broker`
 - JSONL over a user-scoped Unix socket
 - MCP server request path: broker-first, direct fallback
 - session key: `(root, chain config hash)`
@@ -85,7 +85,7 @@ That slice is implemented as:
 - stop a session,
 - queue/add workspace folders,
 - forward LSP requests through one broker-owned language-server chain,
-- keep direct `cc-lsp-now` spawning as a fallback.
+- keep direct `hsp` spawning as a fallback.
 
 This preserves the current LSP bridge behavior while moving the lifecycle from
 "per MCP process" to "per warm broker session." It is specifically aimed at
@@ -94,13 +94,13 @@ copies of csharp-ls, ty, basedpyright, or other configured servers.
 
 Runtime switches:
 
-- `CC_LSP_BROKER=auto` (default): use broker when an LSP chain is configured,
+- `HSP_BROKER=auto` (default): use broker when an LSP chain is configured,
   fall back to direct mode if the broker cannot be reached.
-- `CC_LSP_BROKER=on`: require broker mode; broker transport errors surface.
-- `CC_LSP_BROKER=off`: keep the old direct in-process lifecycle.
-- `CC_LSP_BROKER_SOCKET=/path/to.sock`: isolate or override the broker socket.
-- `CC_LSP_BROKER_LOG=/path/to.log`: isolate or override the broker log.
-- `CC_LSP_BROKER_IDLE_TTL_SECONDS=14400`: evict idle sessions after this many
+- `HSP_BROKER=on`: require broker mode; broker transport errors surface.
+- `HSP_BROKER=off`: keep the old direct in-process lifecycle.
+- `HSP_BROKER_SOCKET=/path/to.sock`: isolate or override the broker socket.
+- `HSP_BROKER_LOG=/path/to.log`: isolate or override the broker log.
+- `HSP_BROKER_IDLE_TTL_SECONDS=14400`: evict idle sessions after this many
   seconds; `0` disables eviction.
 
 ## Session Model
@@ -186,7 +186,7 @@ Agent coordination needs provenance. Broker responses should eventually include:
 This lets agents say "these callsites were computed against snapshot X" and
 avoid confirming stale rename previews after unrelated edits.
 
-Direct `cc-lsp-now` should grow the local version first: snapshot stamps on
+Direct `hsp` should grow the local version first: snapshot stamps on
 responses, named pending buffers, named semantic graph pins, and a mutation
 journal. Those primitives do not require a broker, and they make the later
 broker semantics concrete rather than speculative.
@@ -246,25 +246,25 @@ explicit policy on top of the bus rather than the core coordination model.
 Current slice: `BrokerDaemon` owns an `AgentBus` instance and exposes it over
 the JSONL protocol with `bus.*` methods. `lsp_log` is the MCP-facing workflow
 tool, and every append is also persisted under the workspace's
-`tmp/cc-lsp-now-bus.jsonl` for replay/debugging. When `LSP_DEVTOOLS=1` is
+`tmp/hsp-bus.jsonl` for replay/debugging. When `LSP_DEVTOOLS=1` is
 set, the broker also registers `broker`, `bus`, `registry`, and `lsp` with
-`python-devtools` (`app_id=cc-lsp-now-broker` unless overridden), which gives
+`python-devtools` (`app_id=hsp-broker` unless overridden), which gives
 agents direct runtime introspection of daemon state without making devtools a
 hard dependency.
 
 Wave 2 layers ambient harness hooks over the same broker. There is no separate
-`cc-lsp-now-log` binary; `cc-lsp-now log <action>` is a subcommand that mirrors
+`hsp-log` binary; `hsp log <action>` is a subcommand that mirrors
 `lsp_log` for shell hook bodies. Session start, user prompt, edit before/after,
 `lsp_confirm` before/after, test result, and git commit/push hooks all funnel
-through `cc-lsp-now log hook --kind <kind>` into the broker's existing `bus.*`
+through `hsp log hook --kind <kind>` into the broker's existing `bus.*`
 methods, so MCP agents and harness hooks share one event stream. The CLI stays
 warn-only — it never blocks the caller or returns a coordination error code —
 and prints nothing when no useful signal is queued. See `docs/agent-bus.md`
 for the full hook taxonomy and recipes.
 
-## Relationship To cc-lsp-now
+## Relationship To hsp
 
-`cc-lsp-now` should remain useful without a broker.
+`hsp` should remain useful without a broker.
 
 The migration path was:
 

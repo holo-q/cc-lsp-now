@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
-from cc_lsp_now.render_memory import AliasIdentity, AliasKind, AliasRecord, AliasResolution, RenderMemory
+from hsp.render_memory import AliasIdentity, AliasKind, AliasRecord, AliasResolution, RenderMemory
 
 
 @dataclass(frozen=True, slots=True)

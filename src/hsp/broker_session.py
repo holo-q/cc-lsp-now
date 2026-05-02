@@ -1,4 +1,4 @@
-"""Workspace-session registry for the cc-lsp-broker daemon.
+"""Workspace-session registry for the hsp-broker daemon.
 
 The broker design (see `docs/broker.md`) keeps one warm language-server
 session per `(language, root, command, args, env/config hash)` and

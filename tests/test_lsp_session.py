@@ -44,13 +44,13 @@ from collections.abc import Coroutine
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.chain_server import ChainServer
-from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES
+from hsp import server as _server
+from hsp.chain_server import ChainServer
+from hsp.server import _ALL_TOOLS, TOOL_CAPABILITIES
 
 
 _SESSION_HOOK_MSG = (
-    "MISSING SOURCE HOOK: lsp_session not yet defined on cc_lsp_now.server "
+    "MISSING SOURCE HOOK: lsp_session not yet defined on hsp.server "
     "(Wave 2 verifier lane). docs/tool-surface.md expects "
     "`async def lsp_session(action='status', path='', server='') -> str`, "
     "absorbing lsp_info + lsp_workspaces + lsp_add_workspace."
@@ -118,7 +118,7 @@ class LspSessionSignatureTests(unittest.TestCase):
 
 class LspSessionRegistryTests(unittest.TestCase):
     """Wave 2 acceptance for the registry: ``session`` is registered with
-    a ``cc-lsp-now/...`` style internal method label (consistent with the
+    a ``hsp/...`` style internal method label (consistent with the
     other admin tools — ``info``, ``workspaces``, ``add_workspace``,
     ``confirm`` all use that prefix), and capability gating is disabled
     (``None``) since session has no single backend LSP method to gate on.
@@ -129,16 +129,16 @@ class LspSessionRegistryTests(unittest.TestCase):
     pin the *positive* registration shape of ``session`` itself.
     """
 
-    def test_session_method_label_uses_cc_lsp_now_namespace(self) -> None:
+    def test_session_method_label_uses_hsp_namespace(self) -> None:
         if "session" not in _ALL_TOOLS:
             self.skipTest(_SESSION_HOOK_MSG)
         _func, method = _ALL_TOOLS["session"]
-        # Other admin tools register as e.g. "cc-lsp-now/info"; staying in
+        # Other admin tools register as e.g. "hsp/info"; staying in
         # that namespace keeps the [header] line readable across the family.
         self.assertTrue(
-            method.startswith("cc-lsp-now/"),
+            method.startswith("hsp/"),
             f"session method label {method!r} should live under "
-            f"the cc-lsp-now/ namespace alongside info/workspaces/confirm",
+            f"the hsp/ namespace alongside info/workspaces/confirm",
         )
 
     def test_session_capability_is_none(self) -> None:
@@ -224,7 +224,7 @@ class LspSessionDefensiveSurfaceTests(unittest.TestCase):
         result = _run(
             _server.lsp_session(
                 action="add",
-                path="/definitely/not/a/real/dir/xyz_cc_lsp_now_test",
+                path="/definitely/not/a/real/dir/xyz_hsp_test",
             )
         )
         self.assertIsInstance(result, str)
@@ -242,7 +242,7 @@ class LspSessionDefensiveSurfaceTests(unittest.TestCase):
         result = _run(
             _server.lsp_session(
                 action="warm",
-                path="/definitely/not/a/real/dir/xyz_cc_lsp_now_test",
+                path="/definitely/not/a/real/dir/xyz_hsp_test",
             )
         )
         self.assertIn("Not a directory", result)
@@ -339,8 +339,8 @@ class LspSessionLifecycleHelperTests(unittest.TestCase):
         _server._chain_clients[:] = [None]
         broker_status: dict[str, object] = {
             "pid": 123,
-            "socket": "/run/user/1/cc-lsp-broker.sock",
-            "log_path": "/state/cc-lsp-now/broker.log",
+            "socket": "/run/user/1/hsp-broker.sock",
+            "log_path": "/state/hsp/broker.log",
             "idle_ttl_seconds": 14400.0,
             "sessions": [
                 {
@@ -369,13 +369,13 @@ class LspSessionLifecycleHelperTests(unittest.TestCase):
             ],
         }
 
-        with patch.dict("os.environ", {"LSP_SERVERS": "fake-ls", "CC_LSP_BROKER": "on"}, clear=False):
+        with patch.dict("os.environ", {"LSP_SERVERS": "fake-ls", "HSP_BROKER": "on"}, clear=False):
             with patch.object(_server, "_broker_lsp_status", AsyncMock(return_value=broker_status)):
                 result = _run(_server._session_status())
 
         self.assertIn("broker: on (enabled)", result)
         self.assertIn("broker pid: 123", result)
-        self.assertIn("broker socket: /run/user/1/cc-lsp-broker.sock", result)
+        self.assertIn("broker socket: /run/user/1/hsp-broker.sock", result)
         self.assertIn("routes: textDocument/definition->fake", result)
         self.assertIn("[fake] live pid=456 open=2 requests=3", result)
 
@@ -383,7 +383,7 @@ class LspSessionLifecycleHelperTests(unittest.TestCase):
         _server._chain_configs[:] = [ChainServer(command="fake-ls", args=[], name="fake", label="fake")]
         _server._chain_clients[:] = [None]
 
-        with patch.dict("os.environ", {"LSP_SERVERS": "fake-ls", "CC_LSP_BROKER": "on"}, clear=False):
+        with patch.dict("os.environ", {"LSP_SERVERS": "fake-ls", "HSP_BROKER": "on"}, clear=False):
             with patch.object(_server, "_broker_call", AsyncMock(return_value={"stopped": ["s1"]})) as call:
                 result = _run(_server._session_stop(""))
 

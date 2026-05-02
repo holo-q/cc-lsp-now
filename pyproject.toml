@@ -1,7 +1,7 @@
 [project]
-name = "cc-lsp-now"
+name = "hsp"
 version = "0.13.0"
-description = "Add your description here"
+description = "Harness Server Protocol bridge from LSP servers to agent-friendly MCP tools"
 readme = "README.md"
 authors = [
     { name = "nuck", email = "teoxysoft@gmail.com" }
@@ -13,13 +13,13 @@ dependencies = ["mcp>=1.0.0", "watchdog>=3.0.0"]
 # Per-language aliases exist so each Claude Code plugin using this bridge
 # invokes a visibly-distinct command — Claude Code dedupes MCP servers by
 # command string and won't run two plugins that share one.
-cc-lsp-now = "cc_lsp_now:main"
-cc-lsp-now-ty = "cc_lsp_now:main"
-cc-lsp-now-csharp = "cc_lsp_now:main"
-cc-lsp-now-redirect-hook = "cc_lsp_now.redirect_hook:main"
-cc-lsp-now-redirect-hook-ty = "cc_lsp_now.redirect_hook:main"
-cc-lsp-now-redirect-hook-csharp = "cc_lsp_now.redirect_hook:main"
-cc-lsp-now-broker = "cc_lsp_now.broker:main"
+hsp = "hsp:main"
+hsp-ty = "hsp:main"
+hsp-csharp = "hsp:main"
+hsp-redirect-hook = "hsp.redirect_hook:main"
+hsp-redirect-hook-ty = "hsp.redirect_hook:main"
+hsp-redirect-hook-csharp = "hsp.redirect_hook:main"
+hsp-broker = "hsp.broker:main"
 
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]

@@ -1,8 +1,8 @@
 import unittest
 
-from cc_lsp_now.candidate import Candidate
-from cc_lsp_now.candidate_kind import CandidateKind
-from cc_lsp_now.pending_buffer import DEFAULT_STAGE_HANDLE, PendingBook, PendingBuffer
+from hsp.candidate import Candidate
+from hsp.candidate_kind import CandidateKind
+from hsp.pending_buffer import DEFAULT_STAGE_HANDLE, PendingBook, PendingBuffer
 
 
 def _candidate(title: str) -> Candidate:

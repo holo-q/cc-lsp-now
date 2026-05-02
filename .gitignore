@@ -5,3 +5,5 @@ tmp/foo_run/
 tmp/csharp-fixtures/
 tmp/cc-lsp-bus/
 tmp/cc-lsp-now-bus.jsonl
+tmp/hsp-bus/
+tmp/hsp-bus.jsonl

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import unittest
 
-from cc_lsp_now.broker_session import (
+from hsp.broker_session import (
     BrokerSession,
     SessionKey,
     SessionRegistry,

@@ -1,8 +1,8 @@
 """Custom AGENT logging level — messages surface in MCP tool output.
 
-Usage anywhere in cc-lsp-now:
+Usage anywhere in hsp:
 
-    from cc_lsp_now.agent_log import agent_log, drain_agent_messages
+    from hsp.agent_log import agent_log, drain_agent_messages
 
     agent_log("Pylance says: no files in program")  # surfaces in tool output
     log.info("internal detail")                      # stays in Python logs
@@ -32,12 +32,12 @@ class _AgentHandler(logging.Handler):
 
 _handler = _AgentHandler()
 _handler.setFormatter(logging.Formatter("%(message)s"))
-logging.getLogger("cc_lsp_now").addHandler(_handler)
+logging.getLogger("hsp").addHandler(_handler)
 
 
 def agent_log(msg: str) -> None:
     """Log a message that will appear in the next MCP tool response."""
-    logging.getLogger("cc_lsp_now").log(AGENT, msg)
+    logging.getLogger("hsp").log(AGENT, msg)
 
 
 def drain_agent_messages() -> list[str]:

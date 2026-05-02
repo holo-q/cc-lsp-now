@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from cc_lsp_now.path_finder import PathDirection, PathEdge, PathNode, find_paths
+from hsp.path_finder import PathDirection, PathEdge, PathNode, find_paths
 
 
 def _node(key: str) -> PathNode:

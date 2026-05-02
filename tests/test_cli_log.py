@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from cc_lsp_now import main as cc_lsp_now_main
-from cc_lsp_now import server
-from cc_lsp_now.bus_event import BusEventKind
+from hsp import main as hsp_main
+from hsp import server
+from hsp.bus_event import BusEventKind
 
 
 class CliLogTests(unittest.TestCase):
@@ -24,11 +24,11 @@ class CliLogTests(unittest.TestCase):
     def tearDown(self) -> None:
         server._local_bus = self._previous_bus
 
-    def test_project_keeps_single_cc_lsp_now_entrypoint_for_log(self) -> None:
+    def test_project_keeps_single_hsp_entrypoint_for_log(self) -> None:
         data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         scripts = data["project"]["scripts"]
-        self.assertIn("cc-lsp-now", scripts)
-        self.assertNotIn("cc-lsp-now-log", scripts)
+        self.assertIn("hsp", scripts)
+        self.assertNotIn("hsp-log", scripts)
 
     def test_entrypoint_dispatches_log_weather_without_starting_mcp_stdio(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
@@ -41,10 +41,10 @@ class CliLogTests(unittest.TestCase):
     def test_log_hook_requires_kind(self) -> None:
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory(dir="tmp") as root:
-            with patch.dict(os.environ, {"CC_LSP_BROKER": "off", "LSP_ROOT": root}, clear=False):
+            with patch.dict(os.environ, {"HSP_BROKER": "off", "LSP_ROOT": root}, clear=False):
                 with contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as cm:
-                        cc_lsp_now_main(["log", "hook", "--files", "src/server.py"])
+                        hsp_main(["log", "hook", "--files", "src/server.py"])
 
         self.assertEqual(cm.exception.code, 2)
         self.assertIn("requires --kind", stderr.getvalue())
@@ -110,15 +110,15 @@ class CliLogTests(unittest.TestCase):
 
     def _run(self, argv: list[str], *, root: str) -> str:
         out = io.StringIO()
-        with patch.dict(os.environ, {"CC_LSP_BROKER": "off", "LSP_ROOT": root}, clear=False):
+        with patch.dict(os.environ, {"HSP_BROKER": "off", "LSP_ROOT": root}, clear=False):
             with contextlib.redirect_stdout(out):
                 with self.assertRaises(SystemExit) as cm:
-                    cc_lsp_now_main(argv)
+                    hsp_main(argv)
         self.assertEqual(cm.exception.code, 0)
         return out.getvalue()
 
     def _read_last_event(self, root: str) -> dict[str, object]:
-        path = Path(root) / "tmp" / "cc-lsp-now-bus.jsonl"
+        path = Path(root) / "tmp" / "hsp-bus.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         self.assertTrue(lines, f"no bus events written to {path}")
         event = json.loads(lines[-1])

@@ -7,12 +7,12 @@ stable across processes, no central registry, no broker handshake.
 
 Path policy:
 
-- ``CC_LSP_BUS_DIR`` overrides the storage directory entirely (used by
+- ``HSP_BUS_DIR`` overrides the storage directory entirely (used by
   tests and by users who keep buses on a separate volume). The workspace
   id is appended so multiple roots still get distinct buckets.
-- Broker mode stores under ``$XDG_STATE_HOME/cc-lsp-now/bus/<wsid>/`` so
+- Broker mode stores under ``$XDG_STATE_HOME/hsp/bus/<wsid>/`` so
   the bus survives clean broker restarts.
-- Direct mode stores under ``<root>/tmp/cc-lsp-bus/`` because the project
+- Direct mode stores under ``<root>/tmp/hsp-bus/`` because the project
   directory is the natural cleanup boundary for short-lived agent runs.
 
 The registry caches journals per directory so multiple ``get_or_open``
@@ -28,15 +28,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Final
 
-from cc_lsp_now.bus_journal import BusJournal
-from cc_lsp_now.bus_log import BusLog
+from hsp.bus_journal import BusJournal
+from hsp.bus_log import BusLog
 
 
 WORKSPACE_ID_LENGTH: Final[int] = 12
 LOG_FILE_NAME: Final[str] = "events.jsonl"
-BUS_DIR_ENV: Final[str] = "CC_LSP_BUS_DIR"
-DIRECT_TMP_DIR: Final[str] = "tmp/cc-lsp-bus"
-BROKER_RELATIVE: Final[Path] = Path("cc-lsp-now") / "bus"
+BUS_DIR_ENV: Final[str] = "HSP_BUS_DIR"
+DIRECT_TMP_DIR: Final[str] = "tmp/hsp-bus"
+BROKER_RELATIVE: Final[Path] = Path("hsp") / "bus"
 
 
 class BrokerMode(Enum):
@@ -59,7 +59,7 @@ def workspace_id_for(root: str | Path) -> str:
 def bus_dir_for(root: str | Path, mode: BrokerMode) -> Path:
     """Resolve the bus directory for ``root`` under the given mode.
 
-    The ``CC_LSP_BUS_DIR`` override always wins so tests and isolated
+    The ``HSP_BUS_DIR`` override always wins so tests and isolated
     runs can pin the path without thinking about XDG.
     """
     wsid = workspace_id_for(root)

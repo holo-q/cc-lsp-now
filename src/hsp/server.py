@@ -15,28 +15,28 @@ from typing import Any, cast
 
 from mcp.server.fastmcp import FastMCP
 
-from cc_lsp_now.agent_bus import AgentBus
-from cc_lsp_now.agent_log import agent_log, drain_agent_messages
-from cc_lsp_now.alias_coordinator import (
+from hsp.agent_bus import AgentBus
+from hsp.agent_log import agent_log, drain_agent_messages
+from hsp.alias_coordinator import (
     AliasCoordinator,
     AliasTouchResult,
     alias_identity_to_wire,
     alias_record_from_wire,
     alias_touch_result_from_wire,
 )
-from cc_lsp_now.broker import BrokerError
-from cc_lsp_now.broker_client import BrokerClient
-from cc_lsp_now.broker_lsp import chain_config_hash, chain_to_wire
-from cc_lsp_now.lsp import LspClient, LspError, file_uri
-from cc_lsp_now.python_refactor import merge_workspace_edits, python_import_rewrite
-from cc_lsp_now.candidate import Candidate
-from cc_lsp_now.candidate_kind import CandidateKind
-from cc_lsp_now.chain_server import ChainServer
-from cc_lsp_now.file_move import FileMove
-from cc_lsp_now.path_finder import PathDirection, PathEdge, PathNode, PathSearchResult, find_paths
-from cc_lsp_now.pending_buffer import DEFAULT_STAGE_HANDLE, PendingBook, PendingBuffer
-from cc_lsp_now.render_memory import AliasError, AliasIdentity, AliasKind, AliasRecord, RenderMemory
-from cc_lsp_now.warmup_stats import WarmupStats
+from hsp.broker import BrokerError
+from hsp.broker_client import BrokerClient
+from hsp.broker_lsp import chain_config_hash, chain_to_wire
+from hsp.lsp import LspClient, LspError, file_uri
+from hsp.python_refactor import merge_workspace_edits, python_import_rewrite
+from hsp.candidate import Candidate
+from hsp.candidate_kind import CandidateKind
+from hsp.chain_server import ChainServer
+from hsp.file_move import FileMove
+from hsp.path_finder import PathDirection, PathEdge, PathNode, PathSearchResult, find_paths
+from hsp.pending_buffer import DEFAULT_STAGE_HANDLE, PendingBook, PendingBuffer
+from hsp.render_memory import AliasError, AliasIdentity, AliasKind, AliasRecord, RenderMemory
+from hsp.warmup_stats import WarmupStats
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
 _BROKER_DISABLED = {"0", "false", "no", "off", "disabled"}
 _BROKER_REQUIRED = {"1", "true", "yes", "on", "required", "force"}
 _CAPABILITY_PROBE_ENABLED = {"1", "true", "yes", "on", "enabled", "force"}
-CAPABILITY_PROBE_ENV = "CC_LSP_PROBE_CAPABILITIES"
+CAPABILITY_PROBE_ENV = "HSP_PROBE_CAPABILITIES"
 
 # --- Preview/confirm buffer --------------------------------------------------
 #
@@ -454,7 +454,7 @@ def _ensure_chain_configs() -> list[ChainServer]:
 
 
 def _broker_mode() -> str:
-    raw = os.environ.get("CC_LSP_BROKER", "auto").strip().lower()
+    raw = os.environ.get("HSP_BROKER", "auto").strip().lower()
     if raw in _BROKER_DISABLED:
         return "off"
     if raw in _BROKER_REQUIRED:
@@ -805,7 +805,7 @@ def _bus_params(
     """
     payload: dict[str, object] = {
         "workspace_root": os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd())),
-        "agent_id": os.environ.get("CC_LSP_AGENT_ID", _client_id),
+        "agent_id": os.environ.get("HSP_AGENT_ID", _client_id),
         "session_id": _client_id,
         "message": message,
         "files": _parse_bus_scope(files),
@@ -3355,7 +3355,7 @@ async def lsp_session(action: str = "status", path: str = "", server: str = "") 
     - ``status`` (default): compact build/version + per-server chain config,
       capability summary, registered workspace folders, and warmup ages.
       Use when tool behavior looks stale (compare the printed git SHA
-      against cc-lsp-now's HEAD — Claude Code reuses the MCP subprocess
+      against hsp's HEAD — Claude Code reuses the MCP subprocess
       across /reload-plugins, only a full restart spawns a fresh one).
     - ``add``: register ``path`` as a workspace folder on every server in
       the chain and run warmup. Use when LSP_PROJECT_MARKERS auto-detection
@@ -3420,10 +3420,10 @@ async def lsp_log(
 
     Routing mirrors the render/lsp broker fallback policy:
 
-    - When the broker is enabled (``CC_LSP_BROKER`` not ``off`` and an
+    - When the broker is enabled (``HSP_BROKER`` not ``off`` and an
       LSP chain is configured), call ``bus.<action>`` against the broker
       with workspace-stamped params.
-    - On ``CC_LSP_BROKER=on`` any broker failure surfaces as an inline
+    - On ``HSP_BROKER=on`` any broker failure surfaces as an inline
       error string so the agent sees the misconfiguration.
     - In ``auto`` (or ``off``) mode, an unreachable broker falls back to
       the in-process :class:`AgentBus` so coordination still works for
@@ -3592,14 +3592,14 @@ async def _session_status() -> str:
                 ["git", "-C", str(pkg_root), "rev-parse", "--short", "HEAD"],
                 capture_output=True, text=True, timeout=3,
             ).stdout.strip()
-            lines.append(f"cc-lsp-now: {pkg_root} @ {sha or 'unknown'}")
+            lines.append(f"hsp: {pkg_root} @ {sha or 'unknown'}")
         else:
-            lines.append(f"cc-lsp-now install: {pkg_root} (no .git — installed package)")
+            lines.append(f"hsp install: {pkg_root} (no .git — installed package)")
     except Exception as e:
-        lines.append(f"cc-lsp-now introspection failed: {e}")
+        lines.append(f"hsp introspection failed: {e}")
 
     try:
-        lines.append(f"version: {_imd.version('cc-lsp-now')}")
+        lines.append(f"version: {_imd.version('hsp')}")
     except Exception:
         pass
 
@@ -5094,22 +5094,22 @@ async def lsp_types(
 
 _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "diagnostics": (lsp_diagnostics, "textDocument/diagnostic"),
-    "grep": (lsp_grep, "cc-lsp-now/grep"),
-    "symbols_at": (lsp_symbols_at, "cc-lsp-now/symbols_at"),
-    "symbol": (lsp_symbol, "cc-lsp-now/symbol"),
-    "goto": (lsp_goto, "cc-lsp-now/goto"),
-    "refs": (lsp_refs, "cc-lsp-now/refs"),
+    "grep": (lsp_grep, "hsp/grep"),
+    "symbols_at": (lsp_symbols_at, "hsp/symbols_at"),
+    "symbol": (lsp_symbol, "hsp/symbol"),
+    "goto": (lsp_goto, "hsp/goto"),
+    "refs": (lsp_refs, "hsp/refs"),
     "outline": (lsp_outline, "textDocument/documentSymbol"),
     "rename": (lsp_rename, "textDocument/rename"),
     "move": (lsp_move, "workspace/willRenameFiles"),
-    "fix": (lsp_fix, "cc-lsp-now/fix"),
-    "calls": (lsp_calls, "cc-lsp-now/calls"),
-    "types": (lsp_types, "cc-lsp-now/types"),
-    "path": (lsp_path, "cc-lsp-now/path"),
-    "confirm": (lsp_confirm, "cc-lsp-now/confirm"),
-    "session": (lsp_session, "cc-lsp-now/session"),
-    "log": (lsp_log, "cc-lsp-now/log"),
-    "memory": (lsp_memory, "cc-lsp-now/memory"),
+    "fix": (lsp_fix, "hsp/fix"),
+    "calls": (lsp_calls, "hsp/calls"),
+    "types": (lsp_types, "hsp/types"),
+    "path": (lsp_path, "hsp/path"),
+    "confirm": (lsp_confirm, "hsp/confirm"),
+    "session": (lsp_session, "hsp/session"),
+    "log": (lsp_log, "hsp/log"),
+    "memory": (lsp_memory, "hsp/memory"),
 }
 
 

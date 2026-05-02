@@ -62,10 +62,10 @@ import unittest
 from collections.abc import Coroutine
 from typing import Any
 
-from cc_lsp_now.candidate import Candidate
-from cc_lsp_now.candidate_kind import CandidateKind
-from cc_lsp_now import server as _server
-from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES
+from hsp.candidate import Candidate
+from hsp.candidate_kind import CandidateKind
+from hsp import server as _server
+from hsp.server import _ALL_TOOLS, TOOL_CAPABILITIES
 
 
 def _fix_attr() -> Any:
@@ -77,7 +77,7 @@ def _fix_attr() -> Any:
 
 
 _FIX_HOOK_MSG = (
-    "MISSING SOURCE HOOK: lsp_fix not yet defined on cc_lsp_now.server "
+    "MISSING SOURCE HOOK: lsp_fix not yet defined on hsp.server "
     "(Wave 2 verifier lane). docs/tool-surface.md expects "
     "`async def lsp_fix(target='', file_path='', symbol='', line=0, "
     "diagnostic_index=-1, kind='') -> str`, replacing lsp_code_actions "
@@ -227,7 +227,7 @@ class LspFixRegistryTests(unittest.TestCase):
         # The header line ([method]) is what the agent sees on every call;
         # an empty label would render as "[]" and lose the orientation
         # signal. We don't pin a specific verb (the implementation may
-        # choose textDocument/codeAction or a synthetic cc-lsp-now/fix
+        # choose textDocument/codeAction or a synthetic hsp/fix
         # label) but it must be a non-empty string.
         self.assertIsInstance(method, str)
         self.assertTrue(method, "fix method label must be non-empty")

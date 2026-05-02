@@ -3,7 +3,7 @@ import unittest
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from cc_lsp_now import server as _server
+from hsp import server as _server
 
 
 def _run(coro: Any) -> str:

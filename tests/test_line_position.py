@@ -2,7 +2,7 @@ from pathlib import Path
 import shutil
 import unittest
 
-from cc_lsp_now.server import _fallback_position_on_line, _resolve_file_path, _resolve_line_target, _symbols_on_line
+from hsp.server import _fallback_position_on_line, _resolve_file_path, _resolve_line_target, _symbols_on_line
 
 
 class LinePositionTests(unittest.TestCase):

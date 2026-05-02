@@ -53,12 +53,12 @@ import unittest
 from collections.abc import Coroutine
 from typing import Any
 
-from cc_lsp_now import server as _server
-from cc_lsp_now.server import _ALL_TOOLS, TOOL_CAPABILITIES
+from hsp import server as _server
+from hsp.server import _ALL_TOOLS, TOOL_CAPABILITIES
 
 
 _TYPES_HOOK_MSG = (
-    "MISSING SOURCE HOOK: lsp_types not yet defined on cc_lsp_now.server "
+    "MISSING SOURCE HOOK: lsp_types not yet defined on hsp.server "
     "(Wave 4 graph operator). docs/tool-surface.md expects "
     "`async def lsp_types(target='', direction='both', file_path='', "
     "symbol='', line=0, max_depth=1, max_edges=50) -> str`, replacing "
@@ -216,7 +216,7 @@ class LspTypesRegistryTests(unittest.TestCase):
         # An empty label would render as "[]" and lose the orientation
         # signal. We don't pin a specific verb - the implementation may
         # choose textDocument/prepareTypeHierarchy or a synthetic
-        # cc-lsp-now/types label - but it must be a non-empty string.
+        # hsp/types label - but it must be a non-empty string.
         self.assertIsInstance(method, str)
         self.assertTrue(method, "types method label must be non-empty")
 
@@ -352,7 +352,7 @@ class LspTypesRoutingTests(unittest.TestCase):
         # Synthetic semantic target: skips the real workspace/symbol or
         # textDocument/definition resolve so the test runs without an
         # LSP chain. Matches the SemanticTarget dataclass shape from
-        # cc_lsp_now.server.
+        # hsp.server.
         target = _server.SemanticTarget(
             uri="file:///repo/src/types_demo.py",
             pos={"line": 9, "character": 6},

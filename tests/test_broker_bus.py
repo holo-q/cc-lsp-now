@@ -16,7 +16,7 @@ Coverage focus per the broker brief:
 - ``status`` and ``lsp.status`` carry a compact bus summary;
 - malformed params surface structured ``invalid_params`` errors.
 
-Bus events are persisted to ``<workspace_root>/tmp/cc-lsp-now-bus.jsonl``
+Bus events are persisted to ``<workspace_root>/tmp/hsp-bus.jsonl``
 by the current ``AgentBus`` core, so each test plants its workspace_root
 inside a ``TemporaryDirectory`` to avoid leaking JSONL into the runner's
 filesystem.
@@ -29,7 +29,7 @@ import tempfile
 import unittest
 from typing import Any, cast
 
-from cc_lsp_now.broker import BrokerDaemon
+from hsp.broker import BrokerDaemon
 
 
 def _run(coro: Any) -> Any:

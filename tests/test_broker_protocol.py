@@ -17,7 +17,7 @@ import json
 import unittest
 from typing import cast
 
-from cc_lsp_now.broker import (
+from hsp.broker import (
     BrokerDaemon,
     BrokerError,
     decode_message,

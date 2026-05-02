@@ -20,14 +20,14 @@ small `net10.0` project built from Dapper's real `SqlMapper.ITypeHandler.cs` and
 Run the suite explicitly:
 
 ```bash
-CC_LSP_NOW_RUN_CSHARP_FIXTURE=1 uv run --frozen python -m unittest tests.test_csharp_dapper_integration
+HSP_RUN_CSHARP_FIXTURE=1 uv run --frozen python -m unittest tests.test_csharp_dapper_integration
 ```
 
 Optional override:
 
 ```bash
-CC_LSP_NOW_CSHARP_FIXTURE_ROOT=/path/to/Dapper \
-CC_LSP_NOW_RUN_CSHARP_FIXTURE=1 \
+HSP_CSHARP_FIXTURE_ROOT=/path/to/Dapper \
+HSP_RUN_CSHARP_FIXTURE=1 \
 uv run --frozen python -m unittest tests.test_csharp_dapper_integration
 ```
 

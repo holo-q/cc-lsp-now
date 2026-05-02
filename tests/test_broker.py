@@ -6,15 +6,15 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from cc_lsp_now.broker import BrokerDaemon, BrokerError, decode_message, encode_message, socket_path
-from cc_lsp_now.broker_session import SessionKey, SessionRegistry, config_hash
+from hsp.broker import BrokerDaemon, BrokerError, decode_message, encode_message, socket_path
+from hsp.broker_session import SessionKey, SessionRegistry, config_hash
 
 
 class BrokerProtocolTests(unittest.TestCase):
     def test_socket_path_honors_env_override(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             expected = Path(d) / "broker.sock"
-            with patch.dict(os.environ, {"CC_LSP_BROKER_SOCKET": str(expected)}):
+            with patch.dict(os.environ, {"HSP_BROKER_SOCKET": str(expected)}):
                 self.assertEqual(socket_path(), expected)
 
     def test_jsonl_round_trip_is_deterministic(self) -> None:

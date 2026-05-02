@@ -389,7 +389,7 @@ The first implementation should be process-local and pure where possible.
 New module:
 
 ```text
-src/cc_lsp_now/render_memory.py
+src/hsp/render_memory.py
 ```
 
 Core types:

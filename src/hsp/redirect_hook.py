@@ -1,4 +1,4 @@
-"""PreToolUse hook that redirects the built-in LSP tool to the cc-lsp-now MCP tools.
+"""PreToolUse hook that redirects the built-in LSP tool to the hsp MCP tools.
 
 Wired from a plugin's plugin.json:
 
@@ -6,7 +6,7 @@ Wired from a plugin's plugin.json:
       "PreToolUse": [
         {
           "matcher": "LSP",
-          "hooks": [{"type": "command", "command": "cc-lsp-now-redirect-hook"}]
+          "hooks": [{"type": "command", "command": "hsp-redirect-hook"}]
         }
       ]
     }
@@ -21,7 +21,7 @@ import json
 import sys
 
 REDIRECT_MESSAGE = (
-    "The built-in LSP tool is disabled in favor of the cc-lsp-now MCP tools "
+    "The built-in LSP tool is disabled in favor of the hsp MCP tools "
     "(lsp_grep, lsp_symbols_at, lsp_symbol, lsp_goto, lsp_refs, lsp_outline, "
     "lsp_calls, lsp_types, lsp_diagnostics, lsp_session, lsp_rename, lsp_move, "
     "lsp_fix, lsp_confirm). "
