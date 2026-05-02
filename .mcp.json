@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hsp": {
+      "command": "uvx",
+      "args": ["--refresh", "--from", "git+https://github.com/holo-q/hsp", "hsp"],
+      "env": {
+        "HSP_AUTO_PROFILES": "1"
+      }
+    }
+  }
+}
