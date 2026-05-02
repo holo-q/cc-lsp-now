@@ -1,13 +1,13 @@
-"""Local roundtrip test for lsp_move_file through the full MCP tool path.
+"""Local roundtrip test for lsp_move through the full MCP tool path.
 
-Run after a cc-lsp-now edit to verify:
+Run after an hsp edit to verify:
 - LSP chain starts without crashing
 - willRenameFiles returns a non-empty WorkspaceEdit for a real symbol
 - stderr from the LSP server gets captured if anything dies
 - lsp_confirm applies the edits and moves the file
 
 Usage:
-    cd cc-lsp-now
+    cd hsp
     LSP_SERVERS="ty server;pylance-language-server --stdio" \\
         uv run python tmp/roundtrip.py
 """
@@ -36,38 +36,36 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 
 
 async def main() -> int:
-    from cc_lsp_now.server import (
+    from hsp.server import (
         _wrap_with_header,
-        lsp_info,
-        lsp_workspaces,
-        lsp_move_file,
         lsp_confirm,
-        lsp_references,
+        lsp_move,
+        lsp_refs,
+        lsp_session,
     )
 
-    info = _wrap_with_header(lsp_info, "cc-lsp-now/info")
-    ws = _wrap_with_header(lsp_workspaces, "cc-lsp-now/workspaces")
-    mv = _wrap_with_header(lsp_move_file, "workspace/willRenameFiles")
-    confirm = _wrap_with_header(lsp_confirm, "cc-lsp-now/confirm")
-    refs = _wrap_with_header(lsp_references, "textDocument/references")
+    session = _wrap_with_header(lsp_session, "hsp/session")
+    mv = _wrap_with_header(lsp_move, "workspace/willRenameFiles")
+    confirm = _wrap_with_header(lsp_confirm, "hsp/confirm")
+    refs = _wrap_with_header(lsp_refs, "textDocument/references")
 
     print("=" * 60)
-    print("1. lsp_info — confirm fresh build + caps")
+    print("1. lsp_session status — confirm fresh build + caps")
     print("=" * 60)
-    print(await info())
+    print(await session())
 
     print()
     print("=" * 60)
-    print("2. lsp_workspaces — force-spawn all chain servers")
+    print("2. lsp_session add — force-spawn all chain servers")
     print("=" * 60)
-    print(await ws())
+    print(await session(action="add", path=str(FOO_RUN)))
 
     print()
     print("=" * 60)
     print("3. lsp_references — baseline: does the LSP see imports at all?")
     print("=" * 60)
     helper_path = str(FOO_RUN / "src" / "foo_pkg" / "helper.py")
-    print(await refs(helper_path, symbol="greet"))
+    print(await refs(file_path=helper_path, symbol="greet"))
 
     print()
     print("=" * 60)
