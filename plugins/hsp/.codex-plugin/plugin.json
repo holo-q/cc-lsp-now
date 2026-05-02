@@ -1,0 +1,56 @@
+{
+  "name": "hsp",
+  "version": "0.14.0",
+  "description": "Harness Server Protocol: agent-friendly LSP tools with automatic language profile selection",
+  "author": {
+    "name": "holo-q",
+    "url": "https://github.com/holo-q"
+  },
+  "homepage": "https://github.com/holo-q/hsp",
+  "repository": "https://github.com/holo-q/hsp",
+  "license": "MIT",
+  "keywords": ["hsp", "lsp", "language-server", "python", "csharp", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "lspServers": {
+    "ty": {
+      "command": "ty",
+      "args": ["server"],
+      "extensionToLanguage": {
+        ".py": "python",
+        ".pyi": "python"
+      }
+    },
+    "basedpyright": {
+      "command": "basedpyright-langserver",
+      "args": ["--stdio"],
+      "extensionToLanguage": {
+        ".py": "python",
+        ".pyi": "python"
+      }
+    },
+    "csharp-ls": {
+      "command": "csharp-ls",
+      "args": [],
+      "extensionToLanguage": {
+        ".cs": "csharp"
+      }
+    }
+  },
+  "interface": {
+    "displayName": "HSP",
+    "shortDescription": "LSP-backed code intelligence through one auto-selecting plugin",
+    "longDescription": "Adds HSP MCP tools for semantic navigation, diagnostics, references, rename, moves, and code actions. The runtime selects the Python or C# LSP chain from file extensions and workspace markers.",
+    "developerName": "holo-q",
+    "category": "Development",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/holo-q/hsp",
+    "defaultPrompt": [
+      "Use HSP to inspect this symbol.",
+      "Use HSP diagnostics on this file.",
+      "Use HSP to rename this symbol."
+    ],
+    "brandColor": "#33B8A6"
+  }
+}
+

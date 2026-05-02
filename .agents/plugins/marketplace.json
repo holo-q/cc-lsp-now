@@ -1,0 +1,21 @@
+{
+  "name": "hsp",
+  "interface": {
+    "displayName": "hsp"
+  },
+  "plugins": [
+    {
+      "name": "hsp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hsp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Development"
+    }
+  ]
+}
+

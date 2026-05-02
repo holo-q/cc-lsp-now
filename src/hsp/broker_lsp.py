@@ -5,7 +5,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, cast
 
 from hsp.agent_log import agent_log
@@ -13,6 +12,7 @@ from hsp.alias_coordinator import AliasCoordinator, AliasTouchResult
 from hsp.broker_session import SessionKey, SessionRegistry, config_hash, session_to_dict
 from hsp.chain_server import ChainServer
 from hsp.lsp import LspClient, LspError
+from hsp.profiles import find_project_root
 from hsp.render_memory import AliasIdentity, AliasResolution
 
 
@@ -91,16 +91,11 @@ def _project_markers() -> list[str]:
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
-def _find_project_root(file_path: str) -> str | None:
-    markers = _project_markers()
+def _find_project_root(file_path: str, markers: list[str] | None = None) -> str | None:
+    markers = markers or _project_markers()
     if not markers:
         return None
-    path = Path(file_path).resolve()
-    for parent in [path, *path.parents]:
-        for marker in markers:
-            if (parent / marker).exists():
-                return str(parent)
-    return None
+    return find_project_root(file_path, markers)
 
 
 @dataclass
@@ -135,11 +130,13 @@ class BrokerLspSession:
         *,
         client_factory: ClientFactory | None = None,
         prefer: dict[str, int] | None = None,
+        project_markers: list[str] | None = None,
     ) -> None:
         self.root = os.path.abspath(root)
         self.chain = chain
         self.clients: list[LspClient | None] = [None] * len(chain)
         self.method_handler: dict[str, int | None] = dict(prefer or {})
+        self.project_markers = list(project_markers or _project_markers())
         self.pending_workspace_adds: list[str] = []
         self.lock = asyncio.Lock()
         self.client_factory = client_factory or (lambda command, root_path: LspClient(command, root_path))
@@ -341,7 +338,7 @@ class BrokerLspSession:
         abs_file = os.path.abspath(_uri_to_path(uri))
         if any(abs_file.startswith(f + os.sep) or abs_file == f for f in client.workspace_folders):
             return None
-        root = _find_project_root(abs_file)
+        root = _find_project_root(abs_file, self.project_markers)
         if root and root not in client.workspace_folders:
             client.add_workspace_folder(root)
             if root not in self.pending_workspace_adds:
@@ -368,6 +365,7 @@ class BrokerLspSession:
             )
         return {
             "root": self.root,
+            "project_markers": list(self.project_markers),
             "last_used_at": self.last_used_at,
             "request_count": self.request_count,
             "last_method": self.last_method,
@@ -402,6 +400,7 @@ class BrokerLspManager:
         chain: list[ChainServer],
         server_label: str,
         prefer: dict[str, int] | None = None,
+        project_markers: list[str] | None = None,
     ) -> tuple[str, BrokerLspSession]:
         session = self.registry.get_or_create(
             SessionKey(root=os.path.abspath(root), config_hash=config_hash_value),
@@ -415,6 +414,7 @@ class BrokerLspManager:
             chain,
             client_factory=self.client_factory,
             prefer=prefer,
+            project_markers=project_markers,
         )
         self.sessions[session.session_id] = lsp_session
         return session.session_id, lsp_session

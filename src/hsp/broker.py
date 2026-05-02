@@ -366,12 +366,14 @@ class BrokerDaemon:
         label_obj = params.get("server_label", "")
         label = label_obj if isinstance(label_obj, str) else ""
         prefer = _prefer_param(params)
+        project_markers = _str_list_param(params, "project_markers")
         _sid, session = self.lsp.get_or_create(
             root=root,
             config_hash_value=chash,
             chain=chain,
             server_label=label,
             prefer=prefer,
+            project_markers=project_markers,
         )
         return session
 
