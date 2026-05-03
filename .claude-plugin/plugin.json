@@ -1,6 +1,6 @@
 {
   "name": "hsp",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Harness Server Protocol: one MCP plugin that selects the right LSP for the workspace",
   "author": {
     "name": "holo-q"
@@ -38,7 +38,7 @@
       "command": "uvx",
       "args": ["--refresh", "--from", "git+https://github.com/holo-q/hsp", "hsp"],
       "env": {
-        "HSP_AUTO_PROFILES": "1"
+        "HSP_ROUTER": "1"
       }
     }
   },

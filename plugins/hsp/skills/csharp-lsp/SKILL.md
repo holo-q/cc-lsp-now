@@ -1,6 +1,6 @@
 ---
 name: csharp-lsp
-description: Use HSP's csharp-ls profile for C# semantic navigation, diagnostics, references, rename, call hierarchy, formatting, and code actions.
+description: Use HSP's csharp-ls route for C# semantic navigation, diagnostics, references, rename, call hierarchy, formatting, and code actions.
 ---
 
 # C# LSP
@@ -15,5 +15,4 @@ Prefer the bundled `lsp_*` MCP tools for:
 - call hierarchy and code actions
 - file move/create/delete operations that should notify the language server
 
-The unified HSP plugin selects the C# profile for `.cs` files and workspaces with `*.sln`, `*.csproj`, `Directory.Build.props`, or `global.json` markers. Use symbol names first, then add `line` only when a file contains ambiguous symbols. Use `lsp_diagnostics` after edits when the user needs verifier feedback.
-
+The unified HSP plugin routes `.cs` files and workspaces with `*.sln`, `*.csproj`, `Directory.Build.props`, or `global.json` markers to csharp-ls. Use symbol names first, then add `line` only when a file contains ambiguous symbols. Use `lsp_diagnostics` after edits when the user needs verifier feedback.

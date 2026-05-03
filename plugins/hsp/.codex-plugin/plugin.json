@@ -1,7 +1,7 @@
 {
   "name": "hsp",
-  "version": "0.14.0",
-  "description": "Harness Server Protocol: agent-friendly LSP tools with automatic language profile selection",
+  "version": "0.15.0",
+  "description": "Harness Server Protocol: agent-friendly LSP tools with automatic language routing",
   "author": {
     "name": "holo-q",
     "url": "https://github.com/holo-q"
@@ -53,4 +53,3 @@
     "brandColor": "#33B8A6"
   }
 }
-

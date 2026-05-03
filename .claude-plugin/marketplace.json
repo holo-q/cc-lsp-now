@@ -8,8 +8,8 @@
   "plugins": [
     {
       "name": "hsp",
-      "description": "One HSP plugin that chooses the appropriate LSP profile for Python and C# workspaces",
-      "version": "0.14.0",
+      "description": "One HSP plugin that routes Python and C# workspaces to the appropriate LSP chain",
+      "version": "0.15.0",
       "author": {
         "name": "holo-q"
       },
@@ -24,4 +24,3 @@
     }
   ]
 }
-

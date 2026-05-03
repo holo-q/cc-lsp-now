@@ -30,23 +30,23 @@ File arguments may be full paths, relative paths, or unique basenames. For examp
 
 ## Plugin Install Shape
 
-HSP now ships as one plugin that contains the Python and C# profiles directly. The MCP server runs with `HSP_AUTO_PROFILES=1`; each request chooses the profile from the target file extension or workspace markers, then keeps that language's LSP chain, method cache, warmup state, and broker session separate.
+HSP now ships as one plugin with a router for Python and C# language routes. The MCP server runs with `HSP_ROUTER=1`; each request chooses a route from the target file extension or workspace markers, then keeps that route's LSP chain, method cache, warmup state, and broker session separate.
 
-Built-in profiles:
+Built-in routes:
 
-| Profile | LSP chain | Selection signals |
+| Route | LSP chain | Selection signals |
 |---------|-----------|-------------------|
 | Python | `ty server;basedpyright-langserver --stdio` | `.py`, `.pyi`, `pyproject.toml`, `setup.py`, `setup.cfg` |
 | C# | `csharp-ls` | `.cs`, `*.sln`, `*.csproj`, `Directory.Build.props`, `global.json` |
 
-Set `HSP_PROFILE=python` or `HSP_PROFILE=csharp` to force a profile for workspace-level operations where no file URI is available. Explicit `LSP_SERVERS` or legacy `LSP_COMMAND` still wins and keeps the old single-chain mode, so the split plugin repos continue to work while users migrate to the unified `hsp` plugin.
+Set `HSP_ROUTE=python` or `HSP_ROUTE=csharp` to force a route for workspace-level operations where no file URI is available. Explicit `LSP_SERVERS` or legacy `LSP_COMMAND` still wins and keeps the old single-chain mode, so the split plugin repos continue to work while users migrate to the unified `hsp` plugin.
 
 ## Legacy Split Plugins using hsp
 
 - **[hsp-cs](https://github.com/holo-q/hsp-cs)** — C# via [csharp-ls](https://github.com/razzmatazz/csharp-language-server).
 - **[hsp-py](https://github.com/holo-q/hsp-py)** — Python via [ty](https://github.com/astral-sh/ty) (Astral), with basedpyright fallback for call hierarchy and `willRenameFiles`.
 
-**Want to add a new language?** Add a builtin profile in `hsp.profiles` plus the plugin manifest's native `lspServers` entry. The old "one repo per LSP" shape still works, but the preferred interface is a single HSP plugin with profile selection inside the runtime.
+**Want to add a new language?** Add a builtin route in `hsp.router` plus the plugin manifest's native `lspServers` entry. The old "one repo per LSP" shape still works, but the preferred interface is a single HSP plugin with routing inside the runtime.
 
 ## How the model calls the tools
 
@@ -137,8 +137,8 @@ Set in the `env` block of your `mcpServers` entry:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `HSP_AUTO_PROFILES` | No | Set `1`/`true`/`on` in the unified plugin to let HSP select a builtin language profile by file extension or project markers. Explicit `LSP_SERVERS`/`LSP_COMMAND` disables auto mode for backwards compatibility. |
-| `HSP_PROFILE` | No | Force one builtin profile (`python` or `csharp`) when auto mode is enabled and a request has no target file URI. |
+| `HSP_ROUTER` | No | Set `1`/`true`/`on` in the unified plugin to let HSP select a builtin language route by file extension or project markers. Explicit `LSP_SERVERS`/`LSP_COMMAND` disables router mode. |
+| `HSP_ROUTE` | No | Force one builtin route (`python` or `csharp`) when router mode is enabled and a request has no target file URI. |
 | `HSP_HOOKS` | No | Enables bundled ambient bus hooks when set to `1`/`true`/`on`. The hooks ship inside the plugin and no-op before launching `uvx` by default, so turning this on records session, prompt, and edit bus events without manual hook installation. |
 | `LSP_SERVERS` | Required only for custom/legacy plugin configs | `;`-separated chain in priority order. Each entry is `<command> <args...>`. First = primary. Example: `ty server;basedpyright-langserver --stdio;pyright-langserver --stdio` |
 | `LSP_ROOT` | No | Workspace root path (defaults to cwd) |
@@ -154,7 +154,7 @@ Set in the `env` block of your `mcpServers` entry:
 | `LSP_DEVTOOLS_APP_ID` | No | Override the devtools app id. Default: `hsp-broker`. |
 | `LSP_DEVTOOLS_READONLY` | No | Devtools readonly mode. Default: enabled, so agents can inspect broker state without mutation tools. |
 | `HSP_PROBE_CAPABILITIES` | No | Opt into startup capability probing (`1`/`true`/`on`). Default off so MCP startup never launches heavy language servers before the initialize handshake. Runtime fallback still handles unsupported methods. |
-| `LSP_PROJECT_MARKERS` | No | Comma-separated filenames or glob markers that mark a project root (e.g. `pyproject.toml,setup.py,*.csproj,.git`). When a file outside the current workspace folders is accessed, the bridge walks up looking for these markers and adds the found root to the LSP's workspace via `workspace/didChangeWorkspaceFolders`. Profiles contribute their language's markers. Default: `.git`. |
+| `LSP_PROJECT_MARKERS` | No | Comma-separated filenames or glob markers that mark a project root (e.g. `pyproject.toml,setup.py,*.csproj,.git`). When a file outside the current workspace folders is accessed, the bridge walks up looking for these markers and adds the found root to the LSP's workspace via `workspace/didChangeWorkspaceFolders`. Routes contribute their language's markers. Default: `.git`. |
 | `LSP_WARMUP_PATTERNS` | No | Comma-separated glob patterns (e.g. `*.py,*.pyi` for Python, `*.rs` for Rust). When a workspace folder is added (initial spawn or via auto-detection), the bridge bulk-emits `textDocument/didOpen` for matching files so the LSP eagerly indexes them. Prevents the "cold index" failure mode where `willRenameFiles` returns 0 edits because nothing has been indexed yet. No warmup if unset. |
 | `LSP_WARMUP_MAX_FILES` | No | Cap on how many files to warm per workspace folder. Default 500. |
 

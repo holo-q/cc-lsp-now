@@ -36,7 +36,7 @@ from hsp.chain_server import ChainServer
 from hsp.file_move import FileMove
 from hsp.path_finder import PathDirection, PathEdge, PathNode, PathSearchResult, find_paths
 from hsp.pending_buffer import DEFAULT_STAGE_HANDLE, PendingBook, PendingBuffer
-from hsp.profiles import BUILTIN_PROFILES, HspProfile, get_profile, has_marker, resolve_profile_id_for_path
+from hsp.router import BUILTIN_ROUTES, LanguageRoute, get_route, has_marker, resolve_route_id_for_path
 from hsp.render_memory import AliasError, AliasIdentity, AliasKind, AliasRecord, RenderMemory
 from hsp.warmup_stats import WarmupStats
 
@@ -53,7 +53,7 @@ mcp = FastMCP(
 )
 
 @dataclass
-class ProfileRuntime:
+class RouteRuntime:
     chain_configs: list[ChainServer] = field(default_factory=list)
     chain_clients: list[LspClient | None] = field(default_factory=list)
     method_handler: dict[str, int | None] = field(default_factory=dict)
@@ -92,8 +92,8 @@ _just_started_this_call: list[str] = []
 _warmed_folders: set[tuple[int, str]] = set()  # (chain_idx, folder)
 # Warmup metadata for status reporting: (chain_idx, folder) -> WarmupStats
 _folder_warmup_stats: dict[tuple[int, str], WarmupStats] = {}
-_profile_runtimes: dict[str, ProfileRuntime] = {
-    "legacy": ProfileRuntime(
+_route_runtimes: dict[str, RouteRuntime] = {
+    "legacy": RouteRuntime(
         chain_configs=_chain_configs,
         chain_clients=_chain_clients,
         method_handler=_method_handler,
@@ -101,8 +101,8 @@ _profile_runtimes: dict[str, ProfileRuntime] = {
         folder_warmup_stats=_folder_warmup_stats,
     )
 }
-_current_profile_id: contextvars.ContextVar[str] = contextvars.ContextVar("hsp_profile_id", default="")
-_active_profile_id = "legacy"
+_current_route_id: contextvars.ContextVar[str] = contextvars.ContextVar("hsp_route_id", default="")
+_active_route_id = "legacy"
 
 _BROKER_DISABLED = {"0", "false", "no", "off", "disabled"}
 _BROKER_REQUIRED = {"1", "true", "yes", "on", "required", "force"}
@@ -245,28 +245,28 @@ def _clear_pending(handle: str = "") -> None:
     _pending = _pending_book.active()
 
 
-def _profile_runtime(profile_id: str) -> ProfileRuntime:
-    runtime = _profile_runtimes.get(profile_id)
+def _route_runtime(route_id: str) -> RouteRuntime:
+    runtime = _route_runtimes.get(route_id)
     if runtime is None:
-        runtime = ProfileRuntime()
-        _profile_runtimes[profile_id] = runtime
+        runtime = RouteRuntime()
+        _route_runtimes[route_id] = runtime
     return runtime
 
 
-def _bind_profile_runtime(profile_id: str) -> None:
-    """Make the module-level runtime globals point at one profile's state.
+def _bind_route_runtime(route_id: str) -> None:
+    """Make the module-level runtime globals point at one route's state.
 
     The public tool code historically reads `_chain_configs` / `_chain_clients`
-    directly. Binding those globals to a profile runtime lets HSP host multiple
+    directly. Binding those globals to a language route lets HSP host multiple
     language chains without turning the whole file inside out, while explicit
     `LSP_SERVERS` users keep the legacy single-chain path.
     """
-    global _active_profile_id
+    global _active_route_id
     global _chain_configs, _chain_clients, _method_handler
     global _warmed_folders, _folder_warmup_stats
-    runtime = _profile_runtime(profile_id)
-    _active_profile_id = profile_id
-    _current_profile_id.set(profile_id)
+    runtime = _route_runtime(route_id)
+    _active_route_id = route_id
+    _current_route_id.set(route_id)
     _chain_configs = runtime.chain_configs
     _chain_clients = runtime.chain_clients
     _method_handler = runtime.method_handler
@@ -274,63 +274,63 @@ def _bind_profile_runtime(profile_id: str) -> None:
     _folder_warmup_stats = runtime.folder_warmup_stats
 
 
-def _bound_profile_id() -> str:
-    return _current_profile_id.get() or _active_profile_id or "legacy"
+def _bound_route_id() -> str:
+    return _current_route_id.get() or _active_route_id or "legacy"
 
 
-def _current_hsp_profile() -> HspProfile | None:
-    profile_id = _bound_profile_id()
-    if profile_id == "legacy":
+def _current_language_route() -> LanguageRoute | None:
+    route_id = _bound_route_id()
+    if route_id == "legacy":
         return None
-    return get_profile(profile_id)
+    return get_route(route_id)
 
 
 def _explicit_lsp_configured() -> bool:
     return bool(os.environ.get("LSP_SERVERS") or os.environ.get("LSP_COMMAND"))
 
 
-def _auto_profiles_enabled() -> bool:
-    raw = os.environ.get("HSP_AUTO_PROFILES", "").strip().lower()
+def _router_enabled() -> bool:
+    raw = os.environ.get("HSP_ROUTER", "").strip().lower()
     return raw in {"1", "true", "yes", "on", "enabled", "builtin", "auto"}
 
 
-def _profile_env(name: str, default: str = "") -> str:
-    profile = _current_hsp_profile()
-    if profile is not None and name in profile.env:
-        return profile.env[name]
+def _route_env(name: str, default: str = "") -> str:
+    route = _current_language_route()
+    if route is not None and name in route.env:
+        return route.env[name]
     return os.environ.get(name, default)
 
 
-def _select_profile_id_for_uri(uri: str | None) -> str:
-    if _explicit_lsp_configured() or not _auto_profiles_enabled():
+def _select_route_id_for_uri(uri: str | None) -> str:
+    if _explicit_lsp_configured() or not _router_enabled():
         return "legacy"
-    override = os.environ.get("HSP_PROFILE", "").strip().lower()
+    override = os.environ.get("HSP_ROUTE", "").strip().lower()
     if override:
-        if override not in BUILTIN_PROFILES:
-            known = ", ".join(sorted(BUILTIN_PROFILES))
-            raise RuntimeError(f"Unknown HSP_PROFILE {override!r}. Known: {known}")
+        if override not in BUILTIN_ROUTES:
+            known = ", ".join(sorted(BUILTIN_ROUTES))
+            raise RuntimeError(f"Unknown HSP_ROUTE {override!r}. Known: {known}")
         return override
     if uri:
         path = _uri_to_path(uri)
-        resolved = resolve_profile_id_for_path(path)
+        resolved = resolve_route_id_for_path(path)
         if resolved:
             return resolved
 
-    cwd_profile = resolve_profile_id_for_path(os.environ.get("LSP_ROOT", os.getcwd()))
-    if cwd_profile:
-        return cwd_profile
+    cwd_route = resolve_route_id_for_path(os.environ.get("LSP_ROOT", os.getcwd()))
+    if cwd_route:
+        return cwd_route
 
-    known = ", ".join(sorted(BUILTIN_PROFILES))
+    known = ", ".join(sorted(BUILTIN_ROUTES))
     raise RuntimeError(
-        "HSP auto profiles could not select a language profile. "
-        f"Set HSP_PROFILE to one of: {known}; or set LSP_SERVERS explicitly."
+        "HSP router could not select a language route. "
+        f"Set HSP_ROUTE to one of: {known}; or set LSP_SERVERS explicitly."
     )
 
 
-def _activate_profile_for_uri(uri: str | None) -> str:
-    profile_id = _select_profile_id_for_uri(uri)
-    _bind_profile_runtime(profile_id)
-    return profile_id
+def _activate_route_for_uri(uri: str | None) -> str:
+    route_id = _select_route_id_for_uri(uri)
+    _bind_route_runtime(route_id)
+    return route_id
 
 
 def _apply_candidate(candidate: Candidate) -> tuple[int, int]:
@@ -474,7 +474,7 @@ def _parse_chain() -> list[ChainServer]:
 
     def _sub(cmd: str) -> str:
         return replace.get(cmd, cmd)
-    servers_env = _profile_env("LSP_SERVERS", "").strip()
+    servers_env = _route_env("LSP_SERVERS", "").strip()
     if servers_env:
         chain: list[ChainServer] = []
         for i, entry in enumerate(s.strip() for s in servers_env.split(";")):
@@ -489,37 +489,37 @@ def _parse_chain() -> list[ChainServer]:
         return chain
 
     # Legacy path
-    primary_cmd = _profile_env("LSP_COMMAND", "")
+    primary_cmd = _route_env("LSP_COMMAND", "")
     if not primary_cmd:
         raise RuntimeError("LSP_SERVERS or LSP_COMMAND environment variable is required")
     primary_cmd = _sub(primary_cmd)
 
     chain: list[ChainServer] = [ChainServer(
         command=primary_cmd,
-        args=_profile_env("LSP_ARGS", "").split() if _profile_env("LSP_ARGS", "") else [],
+        args=_route_env("LSP_ARGS", "").split() if _route_env("LSP_ARGS", "") else [],
         name=primary_cmd,
         label=primary_cmd,
     )]
 
-    first_fb = _profile_env("LSP_FALLBACK_COMMAND", "")
+    first_fb = _route_env("LSP_FALLBACK_COMMAND", "")
     if first_fb:
         first_fb = _sub(first_fb)
         chain.append(ChainServer(
             command=first_fb,
-            args=_profile_env("LSP_FALLBACK_ARGS", "").split() if _profile_env("LSP_FALLBACK_ARGS", "") else [],
+            args=_route_env("LSP_FALLBACK_ARGS", "").split() if _route_env("LSP_FALLBACK_ARGS", "") else [],
             name=first_fb,
             label=f"{first_fb} (fallback)",
         ))
 
     i = 2
     while True:
-        cmd = _profile_env(f"LSP_FALLBACK_{i}_COMMAND", "")
+        cmd = _route_env(f"LSP_FALLBACK_{i}_COMMAND", "")
         if not cmd:
             break
         cmd = _sub(cmd)
         chain.append(ChainServer(
             command=cmd,
-            args=_profile_env(f"LSP_FALLBACK_{i}_ARGS", "").split() if _profile_env(f"LSP_FALLBACK_{i}_ARGS", "") else [],
+            args=_route_env(f"LSP_FALLBACK_{i}_ARGS", "").split() if _route_env(f"LSP_FALLBACK_{i}_ARGS", "") else [],
             name=cmd,
             label=f"{cmd} (fallback {i})",
         ))
@@ -535,7 +535,7 @@ def _parse_prefer(chain: list[ChainServer]) -> dict[str, int]:
     Example: 'workspace/willRenameFiles=basedpyright-langserver,textDocument/callHierarchy=basedpyright-langserver'
     If the named command isn't in the chain, the entry is ignored.
     """
-    prefer_env = _profile_env("LSP_PREFER", "").strip()
+    prefer_env = _route_env("LSP_PREFER", "").strip()
     if not prefer_env:
         return {}
     replace = _parse_replace()
@@ -574,12 +574,12 @@ def _broker_mode() -> str:
 def _broker_enabled() -> bool:
     if _broker_mode() == "off":
         return False
-    return bool(_profile_env("LSP_SERVERS", "") or _profile_env("LSP_COMMAND", ""))
+    return bool(_route_env("LSP_SERVERS", "") or _route_env("LSP_COMMAND", ""))
 
 
 def _broker_base_params() -> dict[str, object]:
     chain = _ensure_chain_configs()
-    language = _profile_env("LSP_LANGUAGE", "").strip()
+    language = _route_env("LSP_LANGUAGE", "").strip()
     project_markers = _project_markers()
     config_language = language
     if project_markers:
@@ -1143,7 +1143,7 @@ def _render_bus_scope(item: dict[str, object]) -> str:
 # Project-root detection. Plugins contribute markers via LSP_PROJECT_MARKERS.
 # Default: .git alone (universal). Python plugins add pyproject.toml etc.
 def _project_markers() -> list[str]:
-    raw = _profile_env("LSP_PROJECT_MARKERS", ".git").strip()
+    raw = _route_env("LSP_PROJECT_MARKERS", ".git").strip()
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
@@ -1188,13 +1188,13 @@ def _is_empty_result(result: Any) -> bool:
 
 
 def _parse_warmup_patterns() -> list[str]:
-    raw = _profile_env("LSP_WARMUP_PATTERNS", "").strip()
+    raw = _route_env("LSP_WARMUP_PATTERNS", "").strip()
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
 def _warmup_max_files() -> int:
     try:
-        return max(0, int(_profile_env("LSP_WARMUP_MAX_FILES", "500")))
+        return max(0, int(_route_env("LSP_WARMUP_MAX_FILES", "500")))
     except ValueError:
         return 500
 
@@ -1203,7 +1203,7 @@ _WARMUP_ALWAYS_EXCLUDE = {".venv", "venv", "__pycache__", "node_modules", ".git"
 
 
 def _parse_warmup_exclude() -> set[str]:
-    raw = _profile_env("LSP_WARMUP_EXCLUDE", "").strip()
+    raw = _route_env("LSP_WARMUP_EXCLUDE", "").strip()
     custom = {p.strip() for p in raw.split(",") if p.strip()}
     return _WARMUP_ALWAYS_EXCLUDE | custom
 
@@ -1318,7 +1318,7 @@ _SLOW_TIMEOUT = 300.0
 async def _request(method: str, params: dict | None, *, uri: str | None = None) -> Any:
     """Route a request through the chain. Caches which server handles each method."""
     global _last_server
-    _activate_profile_for_uri(uri)
+    _activate_route_for_uri(uri)
     _ensure_chain_configs()
     if _broker_enabled():
         try:
@@ -3124,7 +3124,7 @@ async def _do_move(files: list[tuple[str, str]]) -> str:
     # bridge fill in. Gated by LSP_LANGUAGE so we don't Python-stuff other
     # languages' moves.
     lsp_edits = _collect_edit_files(result)
-    if not lsp_edits and _profile_env("LSP_LANGUAGE", "").strip().lower() == "python":
+    if not lsp_edits and _route_env("LSP_LANGUAGE", "").strip().lower() == "python":
         workspace_folders = set(await _known_workspace_roots())
 
         rewriter_changes: dict = {"changes": {}}
@@ -3487,7 +3487,7 @@ async def lsp_session(action: str = "status", path: str = "", server: str = "") 
     """
     act = (action or "status").lower()
     try:
-        _activate_profile_for_uri(file_uri(path) if path else None)
+        _activate_route_for_uri(file_uri(path) if path else None)
     except RuntimeError as e:
         if act == "status":
             return str(e)
@@ -3727,10 +3727,10 @@ async def _session_status() -> str:
         pass
 
     broker_state = "enabled" if _broker_enabled() else "disabled"
-    if _auto_profiles_enabled() and not _explicit_lsp_configured():
-        profile = _current_hsp_profile()
-        profile_label = profile.profile_id if profile is not None else _bound_profile_id()
-        lines.append(f"profile: {profile_label} (auto)")
+    if _router_enabled() and not _explicit_lsp_configured():
+        route = _current_language_route()
+        route_label = route.route_id if route is not None else _bound_route_id()
+        lines.append(f"route: {route_label} (router)")
     lines.append(f"broker: {_broker_mode()} ({broker_state})")
     broker_status = await _broker_lsp_status() if _broker_enabled() else None
     if broker_status:

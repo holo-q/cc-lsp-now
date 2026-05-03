@@ -5,8 +5,8 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
-class HspProfile:
-    profile_id: str
+class LanguageRoute:
+    route_id: str
     language: str
     display_name: str
     extensions: tuple[str, ...]
@@ -22,9 +22,9 @@ PYTHON_PREFER = (
 )
 
 
-BUILTIN_PROFILES: dict[str, HspProfile] = {
-    "python": HspProfile(
-        profile_id="python",
+BUILTIN_ROUTES: dict[str, LanguageRoute] = {
+    "python": LanguageRoute(
+        route_id="python",
         language="python",
         display_name="Python",
         extensions=(".py", ".pyi"),
@@ -38,8 +38,8 @@ BUILTIN_PROFILES: dict[str, HspProfile] = {
             "LSP_LANGUAGE": "python",
         },
     ),
-    "csharp": HspProfile(
-        profile_id="csharp",
+    "csharp": LanguageRoute(
+        route_id="csharp",
         language="csharp",
         display_name="C#",
         extensions=(".cs",),
@@ -76,22 +76,22 @@ def find_project_root(file_path: str, markers: list[str] | tuple[str, ...]) -> s
     return None
 
 
-def resolve_profile_id_for_path(file_path: str, profiles: dict[str, HspProfile] | None = None) -> str | None:
-    profile_map = profiles or BUILTIN_PROFILES
+def resolve_route_id_for_path(file_path: str, routes: dict[str, LanguageRoute] | None = None) -> str | None:
+    route_map = routes or BUILTIN_ROUTES
     suffix = Path(file_path).suffix.lower()
-    for profile in profile_map.values():
-        if suffix and suffix in profile.extensions:
-            return profile.profile_id
+    for route in route_map.values():
+        if suffix and suffix in route.extensions:
+            return route.route_id
 
     matches: list[str] = []
-    for profile in profile_map.values():
-        specific_markers = tuple(marker for marker in profile.markers if marker != ".git")
+    for route in route_map.values():
+        specific_markers = tuple(marker for marker in route.markers if marker != ".git")
         if specific_markers and find_project_root(file_path, specific_markers):
-            matches.append(profile.profile_id)
+            matches.append(route.route_id)
     if len(matches) == 1:
         return matches[0]
     return None
 
 
-def get_profile(profile_id: str) -> HspProfile | None:
-    return BUILTIN_PROFILES.get(profile_id)
+def get_route(route_id: str) -> LanguageRoute | None:
+    return BUILTIN_ROUTES.get(route_id)

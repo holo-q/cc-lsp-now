@@ -12,7 +12,7 @@ from hsp.alias_coordinator import AliasCoordinator, AliasTouchResult
 from hsp.broker_session import SessionKey, SessionRegistry, config_hash, session_to_dict
 from hsp.chain_server import ChainServer
 from hsp.lsp import LspClient, LspError
-from hsp.profiles import find_project_root
+from hsp.router import find_project_root
 from hsp.render_memory import AliasIdentity, AliasResolution
 
 
