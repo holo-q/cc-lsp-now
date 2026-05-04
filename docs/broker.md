@@ -127,7 +127,7 @@ Session identity should be explicit and debuggable:
 
 ```text
 language=csharp
-root=/home/nuck/holoq/repo-kit
+root=~/holoq/repo-kit
 command=csharp-ls
 config_hash=...
 started_at=...
