@@ -7,7 +7,7 @@
   },
   "repository": "https://github.com/holo-q/hsp",
   "license": "MIT",
-  "keywords": ["hsp", "lsp", "language-server", "python", "csharp", "mcp"],
+  "keywords": ["hsp", "lsp", "language-server", "python", "csharp", "rust", "mcp"],
   "lspServers": {
     "ty": {
       "command": "ty",
@@ -30,6 +30,13 @@
       "args": [],
       "extensionToLanguage": {
         ".cs": "csharp"
+      }
+    },
+    "rust-analyzer": {
+      "command": "rust-analyzer",
+      "args": [],
+      "extensionToLanguage": {
+        ".rs": "rust"
       }
     }
   },

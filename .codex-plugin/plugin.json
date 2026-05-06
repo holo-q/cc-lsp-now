@@ -1,18 +1,18 @@
 {
   "name": "hsp",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Harness Server Protocol: one MCP plugin that selects the right LSP for the workspace",
   "author": {
     "name": "holo-q"
   },
   "repository": "https://github.com/holo-q/hsp.git",
   "license": "MIT",
-  "keywords": ["hsp", "lsp", "language-server", "python", "csharp", "mcp"],
+  "keywords": ["hsp", "lsp", "language-server", "python", "csharp", "rust", "mcp"],
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "HSP",
     "shortDescription": "LSP-as-MCP bridge with workspace-aware language server selection",
-    "longDescription": "Harness Server Protocol exposes language server protocol operations (definition, references, hover, workspace symbols, call hierarchy, diagnostics) as MCP tools. Auto-selects the right LSP per file extension across Python (ty/basedpyright) and C# (csharp-ls) — install one plugin, get semantic code intelligence everywhere.",
+    "longDescription": "Harness Server Protocol exposes language server protocol operations (definition, references, hover, workspace symbols, call hierarchy, diagnostics) as MCP tools. Auto-selects the right LSP per file extension across Python (ty/basedpyright), C# (csharp-ls), and Rust (rust-analyzer) — install one plugin, get semantic code intelligence everywhere.",
     "developerName": "holo-q",
     "category": "Coding"
   }

@@ -89,6 +89,16 @@ class HspRouterResolutionTests(unittest.TestCase):
             self.assertIs(server._ensure_chain_configs(), python_chain)
             self.assertEqual(server._method_handler["workspace/willRenameFiles"], 1)
 
+    def test_missing_router_env_still_uses_builtin_routes(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            route_id = server._select_route_id_for_uri(file_uri(str(self.root / "src" / "lib.rs")))
+            self.assertEqual(route_id, "rust")
+
+    def test_router_can_be_explicitly_disabled_for_legacy_configs(self) -> None:
+        with patch.dict("os.environ", {"HSP_ROUTER": "off"}, clear=True):
+            route_id = server._select_route_id_for_uri(file_uri(str(self.root / "src" / "lib.rs")))
+            self.assertEqual(route_id, "legacy")
+
     def test_explicit_lsp_servers_keep_legacy_single_chain_mode(self) -> None:
         with patch.dict("os.environ", {"HSP_ROUTER": "1", "LSP_SERVERS": "fake-ls"}, clear=True):
             route_id = server._select_route_id_for_uri(file_uri(str(self.root / "pkg" / "model.py")))

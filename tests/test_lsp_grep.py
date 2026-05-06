@@ -1,7 +1,9 @@
 import unittest
 import asyncio
 from pathlib import Path
+from unittest.mock import patch
 
+from hsp import server as _server
 from hsp.server import (
     SemanticGrepGroup,
     SemanticGrepHit,
@@ -47,11 +49,18 @@ def _make_ref(path: str, line: int, character: int = 8) -> dict:
 
 
 class LspGrepTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._env_patch = patch.dict("os.environ", {"HSP_ROUTER": "off", "HSP_BROKER": "off"}, clear=False)
+        self._env_patch.start()
+        _server._bind_route_runtime("legacy")
+
     def tearDown(self) -> None:
         # Each test must start from an empty graph so that bare-line and
         # graph-index lookups can't leak state between cases.
+        _server._bind_route_runtime("legacy")
         _record_semantic_nav_context("", [])
         _local_alias_coordinator.clear_epoch()
+        self._env_patch.stop()
 
     def test_text_hits_use_identifier_boundaries_and_utf16_columns(self) -> None:
         fixture = Path("tmp/test_lsp_grep_fixture.cs")

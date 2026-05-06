@@ -61,6 +61,7 @@ import inspect
 import unittest
 from collections.abc import Coroutine
 from typing import Any
+from unittest.mock import patch
 
 from hsp.candidate import Candidate
 from hsp.candidate_kind import CandidateKind
@@ -501,6 +502,9 @@ class LspFixLivePathTests(unittest.TestCase):
     def setUp(self) -> None:
         if not _has_fix():
             self.skipTest(_FIX_HOOK_MSG)
+        self._env_patch = patch.dict("os.environ", {"HSP_ROUTER": "off", "HSP_BROKER": "off"}, clear=False)
+        self._env_patch.start()
+        _server._bind_route_runtime("legacy")
 
         # Snapshot module-level seams so we can restore in tearDown without
         # leaking a fake into other test files.
@@ -583,6 +587,8 @@ class LspFixLivePathTests(unittest.TestCase):
         setattr(_server, "_get_client", self._saved_get_client)
         setattr(_server, "_request", self._saved_request)
         _server._pending = self._prior_pending
+        _server._bind_route_runtime("legacy")
+        self._env_patch.stop()
 
     def test_diagnostic_index_out_of_range_returns_error_and_clears_pending(self) -> None:
         # Pre-stage something so we can prove the OOB path clears _pending.

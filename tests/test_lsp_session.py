@@ -250,6 +250,9 @@ class LspSessionDefensiveSurfaceTests(unittest.TestCase):
 
 class LspSessionLifecycleHelperTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._env_patch = patch.dict("os.environ", {"HSP_ROUTER": "off", "HSP_BROKER": "off"}, clear=False)
+        self._env_patch.start()
+        _server._bind_route_runtime("legacy")
         self._chain_configs = list(_server._chain_configs)
         self._chain_clients = list(_server._chain_clients)
         self._method_handler = dict(_server._method_handler)
@@ -269,6 +272,8 @@ class LspSessionLifecycleHelperTests(unittest.TestCase):
         _server._folder_warmup_stats.update(self._folder_warmup_stats)
         setattr(_server, "_get_client", self._get_client)
         setattr(_server, "_warmup_folder", self._warmup_folder)
+        _server._bind_route_runtime("legacy")
+        self._env_patch.stop()
 
     def test_server_filter_accepts_label_command_or_name(self) -> None:
         _server._chain_configs[:] = [

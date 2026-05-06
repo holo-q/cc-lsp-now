@@ -297,6 +297,10 @@ def _explicit_lsp_configured() -> bool:
 
 def _router_enabled() -> bool:
     raw = os.environ.get("HSP_ROUTER", "").strip().lower()
+    if raw in {"0", "false", "no", "off", "disabled", "legacy"}:
+        return False
+    if not raw:
+        return True
     return raw in {"1", "true", "yes", "on", "enabled", "builtin", "auto"}
 
 
