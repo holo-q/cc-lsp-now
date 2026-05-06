@@ -42,6 +42,30 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("open questions: 0", out)
         self.assertIn("recent: 0", out)
 
+    def test_workgroup_command_reports_root_and_bus_logs(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run(["workgroup", root], root=root)
+
+        self.assertIn(f"workgroup: {Path(root).resolve()}", out)
+        self.assertIn("workspace_id:", out)
+        self.assertIn("append log:", out)
+        self.assertIn("broker: disabled", out)
+
+    def test_workgroup_command_counts_append_log_events(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            path = Path(root) / "tmp" / "hsp-bus.jsonl"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps({"event_id": "E1", "kind": "note.posted"}) + "\n"
+                + json.dumps({"event_id": "E2", "kind": "note.posted"}) + "\n",
+                encoding="utf-8",
+            )
+
+            out = self._run(["workgroup", root], root=root)
+
+        self.assertIn("append log:", out)
+        self.assertIn("2 event(s), last=E2", out)
+
     def test_log_hook_requires_kind(self) -> None:
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory(dir="tmp") as root:

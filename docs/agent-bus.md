@@ -346,6 +346,7 @@ hsp log hook --kind edit.after --files src/server.py
 hsp log hook --kind commit.after --commit d796fc8
 hsp hook --kind edit.after < "$CLAUDE_HOOK_PAYLOAD"
 hsp run -- cargo test
+hsp workgroup . ../other-repo --limit 5
 ```
 
 Each subcommand prints a compact bus-stop notice or stays silent when no
@@ -492,12 +493,17 @@ a single `hsp` binary. The shape is:
    `journal`, `recent`, `settle`, `ticket`, `chat`, `note`, `ask`, `reply`,
    `hook`, `precommit`, `postcommit`, `event`). Build gating is not a public
    log action; it is driven by `hsp hook` build-command detection and `hsp run`.
-3. Bundled plugin hooks are opt-in with `HSP_HOOKS=1` and no-op otherwise.
-4. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
+3. `hsp workgroup [locations...]` is the non-mutating debugger for "where is
+   this agent's team state?" It prints the resolved workgroup root, workspace
+   id, broker socket/log, append-log paths, live broker weather if reachable,
+   and optional LSP session status with `--lsp`. It does not auto-start a
+   broker unless `--start-broker` is passed.
+4. Bundled plugin hooks are opt-in with `HSP_HOOKS=1` and no-op otherwise.
+5. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
    before/after, test result, git commit before/after, and push before/after.
    The broker decides per-stop whether the digest is worth printing; silent
    exit is the common case.
-5. Stays warn-first by default: no file claims and no edit denial unless
+6. Stays warn-first by default: no file claims and no edit denial unless
    `HSP_REQUIRE_TICKET_FOR_EDITS=1` is set. The build gate is the implicit
    quiet build stop. `hsp run` and detected build-command before hooks are
    allowed to wait or time out; hook bodies that pipe other `hsp log` output

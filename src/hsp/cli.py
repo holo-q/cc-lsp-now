@@ -15,9 +15,13 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, cast
 
 from hsp import server
+from hsp.broker import BrokerError, broker_log_path, socket_path
+from hsp.broker_client import BrokerClient
+from hsp.bus_registry import BrokerMode, log_path_for, workspace_id_for
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"", "0", "false", "no", "off"}
@@ -68,6 +72,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_hook(ns, parser)
     if ns.command == "run":
         return _run_command(ns, parser)
+    if ns.command == "workgroup":
+        return _run_workgroup(ns)
     parser.error(f"unknown command: {ns.command!r}")
     return 2
 
@@ -120,6 +126,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--message", default="")
     run.add_argument("--no-log", action="store_true")
     run.add_argument("argv", nargs=argparse.REMAINDER)
+
+    workgroup = subcommands.add_parser(
+        "workgroup",
+        help="debug workgroup root, broker, and bus status from one or more locations",
+    )
+    workgroup.add_argument(
+        "locations",
+        nargs="*",
+        help="directories or files to evaluate; defaults to the current directory",
+    )
+    workgroup.add_argument("--limit", type=int, default=8)
+    workgroup.add_argument("--start-broker", action="store_true")
+    workgroup.add_argument("--lsp", action="store_true", help="include lsp_session status for each location")
     return parser
 
 
@@ -245,6 +264,139 @@ def _run_command(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int
             )
         )
     return int(completed.returncode)
+
+
+def _run_workgroup(ns: argparse.Namespace) -> int:
+    locations = cast(list[str], ns.locations) or ["."]
+    blocks = [
+        _workgroup_block(
+            location=location,
+            limit=max(0, int(ns.limit)),
+            start_broker=bool(ns.start_broker),
+            include_lsp=bool(ns.lsp),
+        )
+        for location in locations
+    ]
+    print("\n\n".join(blocks))
+    return 0
+
+
+def _workgroup_block(
+    *,
+    location: str,
+    limit: int,
+    start_broker: bool,
+    include_lsp: bool,
+) -> str:
+    root = _workgroup_root_for_location(location)
+    wsid = workspace_id_for(root)
+    lines = [
+        f"workgroup: {root}",
+        f"location: {Path(location).expanduser()}",
+        f"workspace_id: {wsid}",
+        f"env LSP_ROOT: {os.environ.get('LSP_ROOT', '(unset)')}",
+        f"broker mode: {server._broker_mode()}",
+        f"broker socket: {socket_path()}",
+        f"broker log: {broker_log_path()}",
+    ]
+    lines.extend(_workgroup_log_lines(root))
+    lines.extend(_workgroup_broker_lines(root, limit=limit, start_broker=start_broker))
+    if include_lsp:
+        lines.append("lsp:")
+        lines.extend(f"  {line}" for line in _workgroup_lsp_status(root).splitlines())
+    return "\n".join(lines)
+
+
+def _workgroup_root_for_location(location: str) -> str:
+    path = Path(location or ".").expanduser()
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    try:
+        resolved = absolute.resolve(strict=False)
+    except OSError:
+        resolved = absolute.absolute()
+    if resolved.exists() and resolved.is_file():
+        resolved = resolved.parent
+    return str(resolved)
+
+
+def _workgroup_log_lines(root: str) -> list[str]:
+    append_log = Path(root) / "tmp" / "hsp-bus.jsonl"
+    direct_log = log_path_for(root, BrokerMode.DIRECT)
+    broker_log = log_path_for(root, BrokerMode.BROKER)
+    return [
+        _jsonl_status_line("append log", append_log),
+        _jsonl_status_line("direct registry log", direct_log),
+        _jsonl_status_line("broker registry log", broker_log),
+    ]
+
+
+def _jsonl_status_line(label: str, path: Path) -> str:
+    count, last = _jsonl_count_and_last(path)
+    if count == 0:
+        return f"{label}: {path} (missing or empty)"
+    return f"{label}: {path} ({count} event(s), last={last or '?'})"
+
+
+def _jsonl_count_and_last(path: Path) -> tuple[int, str]:
+    try:
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return 0, ""
+    last_id = ""
+    for line in reversed(lines):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            value = payload.get("event_id") or payload.get("id") or payload.get("seq")
+            last_id = str(value) if value is not None else ""
+            break
+    return len(lines), last_id
+
+
+def _workgroup_broker_lines(root: str, *, limit: int, start_broker: bool) -> list[str]:
+    if server._broker_mode() == "off":
+        return ["broker: disabled"]
+    try:
+        with BrokerClient() as client:
+            started = client.connect_or_start() if start_broker else _connect_existing_broker(client)
+            status = client.request("bus.status", {"workspace_root": root})
+            weather = client.request("bus.weather", {"workspace_root": root, "limit": limit})
+    except BrokerError as e:
+        return [f"broker: unreachable ({e.code}: {e})"]
+    except OSError as e:
+        return [f"broker: unreachable ({type(e).__name__}: {e})"]
+    lines = [f"broker: reachable{' (started)' if started else ''}"]
+    if isinstance(status, dict):
+        lines.append(
+            "bus: "
+            f"events={status.get('event_count', 0)} "
+            f"last={status.get('last_event_id', 'E0') or 'E0'} "
+            f"open_questions={status.get('open_question_count', 0)}"
+        )
+    if isinstance(weather, dict):
+        lines.append("weather:")
+        rendered = server._render_bus_weather(cast(dict[str, object], weather))
+        lines.extend(f"  {line}" for line in rendered.splitlines())
+    return lines
+
+
+def _connect_existing_broker(client: BrokerClient) -> bool:
+    client.connect()
+    return False
+
+
+def _workgroup_lsp_status(root: str) -> str:
+    old_root = os.environ.get("LSP_ROOT")
+    os.environ["LSP_ROOT"] = root
+    try:
+        return asyncio.run(server.lsp_session(action="status"))
+    finally:
+        if old_root is None:
+            os.environ.pop("LSP_ROOT", None)
+        else:
+            os.environ["LSP_ROOT"] = old_root
 
 
 def _command_argv(argv: list[str]) -> list[str]:
