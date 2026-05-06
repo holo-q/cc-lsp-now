@@ -474,6 +474,26 @@ class AgentBus:
                 "last_event_id": self._events[-1].event_id if self._events else "",
             }
 
+    def recent_all(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return broker-wide event rows for traffic watches.
+
+        Normal journal and recent calls stay workspace-scoped so workgroup
+        weather does not leak across domains. A watch command is different:
+        it is an operator lens over every hook/tool broadcast the broker saw.
+        """
+        self.settle(params)
+        after_id = _int(params.get("after_id"), 0)
+        limit = max(1, min(_int(params.get("limit"), DEFAULT_RECENT_LIMIT), 200))
+
+        with self._lock:
+            events = [event for event in self._events if event.seq > after_id]
+            selected = events[-limit:]
+            return {
+                "events": [_event_wire(event) for event in selected],
+                "truncated": len(events) > len(selected),
+                "last_event_id": self._events[-1].event_id if self._events else "",
+            }
+
     def precommit(self, params: dict[str, Any]) -> dict[str, Any]:
         recent = self.recent({**params, "limit": params.get("limit", 10)})
         return {"recent": recent["events"], "suggested": _suggest_checks(recent["events"])}

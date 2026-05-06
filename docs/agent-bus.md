@@ -363,11 +363,20 @@ hsp hook --kind edit.after < "$CLAUDE_HOOK_PAYLOAD"
 hsp run -- cargo test
 hsp
 hsp workgroup . ../other-repo --limit 5
+hsp watch
+hsp watch --global
+hsp watch --once --limit 10
 ```
 
 Each subcommand prints a compact bus-stop notice or stays silent when no
 related motion is nearby. Silence is part of the interface; harness hooks
 should pass output straight through without prefixing or summarizing it.
+
+`hsp watch` is the live operator lens for hook/tool traffic. Without flags it
+tails the current workgroup's broker bus; with `--global` it asks the broker for
+all event rows it has received across workgroups and prefixes each row with the
+workspace root. `--once` prints one snapshot and exits for scripts, debugging
+prompts, and regression tests.
 
 The CLI stays warn-first at this layer too. `hsp log` never blocks the
 caller, never claims a file, and never returns a non-zero exit code to gate an

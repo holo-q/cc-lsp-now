@@ -347,6 +347,8 @@ class BrokerDaemon:
                 raise BrokerError("invalid_params", str(e)) from None
         if method == "bus.recent":
             return self.bus.recent(params)
+        if method == "bus.recent_all":
+            return self.bus.recent_all(params)
         if method == "bus.settle":
             return self.bus.settle(params)
         if method == "bus.precommit":

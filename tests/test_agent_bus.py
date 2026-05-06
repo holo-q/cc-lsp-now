@@ -87,6 +87,23 @@ class AgentBusPureTests(unittest.TestCase):
         events = cast(list[dict[str, object]], recent["events"])
         self.assertEqual([event["message"] for event in events], ["b"])
 
+    def test_recent_all_keeps_broker_wide_watch_order(self) -> None:
+        bus = AgentBus()
+        bus.note({"workspace_root": "/workspace/a", "message": "a"})
+        bus.note({"workspace_root": "/workspace/b", "message": "b"})
+
+        all_events = bus.recent_all({"after_id": 0})
+        after_first = bus.recent_all({"after_id": 1})
+
+        self.assertEqual(
+            [event["workspace_root"] for event in cast(list[dict[str, object]], all_events["events"])],
+            ["/workspace/a", "/workspace/b"],
+        )
+        self.assertEqual(
+            [event["workspace_root"] for event in cast(list[dict[str, object]], after_first["events"])],
+            ["/workspace/b"],
+        )
+
     def test_heartbeat_registers_presence_without_recent_event_noise(self) -> None:
         bus = AgentBus()
 

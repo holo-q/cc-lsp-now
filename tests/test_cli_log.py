@@ -199,6 +199,83 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("agents: 1", out)
         self.assertIn("E2 note.posted done", out)
 
+    def test_watch_once_renders_workgroup_events(self) -> None:
+        class FakeBroker:
+            hsp_started = False
+
+            def __enter__(self) -> FakeBroker:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+                self.method = method
+                self.params = params
+                return {
+                    "events": [
+                        {
+                            "event_id": "E7",
+                            "event_type": "tool.before",
+                            "workspace_root": "/workspace/domain",
+                            "agent_id": "agent-a",
+                            "message": "Bash cargo check",
+                            "files": ["src/lib.py"],
+                        }
+                    ],
+                    "last_event_id": "E7",
+                }
+
+        broker = FakeBroker()
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            with patch("hsp.cli._open_cli_broker", return_value=broker):
+                out = self._run_with_env(
+                    ["watch", "--once", root],
+                    {
+                        "HSP_BROKER": "auto",
+                        "LSP_ROOT": root,
+                        "HSP_WORKGROUP_ROOT": root,
+                    },
+                )
+
+        self.assertEqual(broker.method, "bus.recent")
+        self.assertIn("watch: broker=", out)
+        self.assertIn("E7 tool.before Bash cargo check", out)
+        self.assertIn("[files=src/lib.py]", out)
+
+    def test_watch_global_once_uses_broker_wide_recent(self) -> None:
+        class FakeBroker:
+            hsp_started = False
+
+            def __enter__(self) -> FakeBroker:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+                self.method = method
+                self.params = params
+                return {
+                    "events": [
+                        {
+                            "event_id": "E8",
+                            "event_type": "hook.received",
+                            "workspace_root": "/workspace/domain",
+                            "message": "PostToolUse Edit",
+                        }
+                    ],
+                    "last_event_id": "E8",
+                }
+
+        broker = FakeBroker()
+        with patch("hsp.cli._open_cli_broker", return_value=broker):
+            out = self._run_with_env(["watch", "--global", "--once"], {"HSP_BROKER": "auto"})
+
+        self.assertEqual(broker.method, "bus.recent_all")
+        self.assertIn("scope=global", out)
+        self.assertIn("/workspace/domain E8 hook.received PostToolUse Edit", out)
+
     def test_global_command_reports_lsp_sources(self) -> None:
         class FakeBroker:
             hsp_started = False

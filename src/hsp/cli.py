@@ -162,6 +162,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_hook(ns, parser)
     if ns.command == "run":
         return _run_command(ns, parser)
+    if ns.command == "watch":
+        return _run_watch(ns)
     parser.error(f"unknown command: {ns.command!r}")
     return 2
 
@@ -230,6 +232,26 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--message", default="")
     run.add_argument("--no-log", action="store_true")
     run.add_argument("argv", nargs=argparse.REMAINDER)
+
+    watch = subcommands.add_parser(
+        "watch",
+        help="watch hook, tool, and bus traffic received by the HSP broker",
+    )
+    watch.add_argument(
+        "locations",
+        nargs="*",
+        help="workgroup locations to watch; defaults to the current directory",
+    )
+    watch.add_argument(
+        "--global",
+        dest="global_events",
+        action="store_true",
+        help="watch all broker events",
+    )
+    watch.add_argument("--limit", type=int, default=25)
+    watch.add_argument("--interval", type=float, default=0.5)
+    watch.add_argument("--once", action="store_true", help="print one snapshot and exit")
+    watch.add_argument("--start-broker", action="store_true")
 
     workgroup = subcommands.add_parser(
         "workgroup",
@@ -485,6 +507,108 @@ def _run_workgroup(ns: argparse.Namespace) -> int:
 def _run_global(ns: argparse.Namespace) -> int:
     print(_global_block(start_broker=bool(ns.start_broker)))
     return 0
+
+
+def _run_watch(ns: argparse.Namespace) -> int:
+    if _broker_mode() == "off":
+        print("watch: broker disabled")
+        return 1
+    limit = max(1, int(ns.limit))
+    interval = max(0.1, float(ns.interval))
+    locations = cast(list[str], ns.locations) or ["."]
+    roots = (
+        []
+        if bool(ns.global_events)
+        else [_workgroup_root_for_location(location) for location in locations]
+    )
+    try:
+        with _open_cli_broker(start_broker=bool(ns.start_broker)) as client:
+            started = bool(getattr(client, "hsp_started", False))
+            scope = "global" if bool(ns.global_events) else ",".join(roots)
+            print(
+                f"watch: broker={_broker_socket_path()}"
+                f"{' started' if started else ''} scope={scope} interval={interval:g}s"
+            )
+            after_id = 0
+            while True:
+                rows = _watch_events(
+                    client,
+                    roots=roots,
+                    global_events=bool(ns.global_events),
+                    limit=limit,
+                    after_id=after_id,
+                )
+                if rows:
+                    after_id = max(after_id, *(_event_seq(event) for event in rows))
+                    for event in rows:
+                        print(_watch_event_label(event, include_workspace=bool(ns.global_events)), flush=True)
+                elif bool(ns.once):
+                    print("watch: no events")
+                if bool(ns.once):
+                    return 0
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        return 130
+    except _CliBrokerError as e:
+        print(f"watch: broker unreachable ({e.code}: {e})")
+        return 1
+    except OSError as e:
+        print(f"watch: broker unreachable ({type(e).__name__}: {e})")
+        return 1
+
+
+def _watch_events(
+    client: Any,
+    *,
+    roots: list[str],
+    global_events: bool,
+    limit: int,
+    after_id: int,
+) -> list[dict[str, object]]:
+    if global_events:
+        result = client.request("bus.recent_all", {"after_id": after_id, "limit": limit})
+        return _watch_result_events(result)
+    events: list[dict[str, object]] = []
+    for root in dict.fromkeys(roots):
+        result = client.request(
+            "bus.recent",
+            {"workspace_root": root, "after_id": after_id, "limit": limit},
+        )
+        events.extend(_watch_result_events(result))
+    return sorted(events, key=_event_seq)[-limit:]
+
+
+def _watch_result_events(result: object) -> list[dict[str, object]]:
+    if not isinstance(result, dict):
+        return []
+    return [
+        cast(dict[str, object], event)
+        for event in _wire_list(cast(dict[str, object], result), "events")
+        if isinstance(event, dict)
+    ]
+
+
+def _watch_event_label(event: dict[str, object], *, include_workspace: bool) -> str:
+    label = _event_label(event)
+    if not include_workspace:
+        return label
+    workspace_root = str(event.get("workspace_root") or "")
+    if not workspace_root:
+        return label
+    return f"{workspace_root} {label}"
+
+
+def _event_seq(event: dict[str, object]) -> int:
+    value = event.get("seq")
+    if isinstance(value, int):
+        return value
+    event_id = str(event.get("event_id") or "")
+    if event_id.startswith("E"):
+        event_id = event_id[1:]
+    try:
+        return int(event_id)
+    except ValueError:
+        return 0
 
 
 def _workgroup_block(
