@@ -160,6 +160,75 @@ class AgentBusPureTests(unittest.TestCase):
         self.assertTrue(all_waiting["unlocked"])
         self.assertEqual(all_waiting["reason"], "all_waiting")
 
+    def test_scoped_build_gate_ignores_unrelated_ticket_files(self) -> None:
+        bus = AgentBus()
+        bus.ticket({
+            "workspace_root": "/repo",
+            "agent_id": "agent-a",
+            "message": "edit docs",
+            "files": ["docs/guide.md"],
+        })
+
+        gate = bus.build_gate({
+            "workspace_root": "/repo",
+            "files": ["src/server.py"],
+            "full_workspace": False,
+        })
+
+        self.assertTrue(gate["unlocked"])
+        self.assertEqual(gate["holders"], [])
+        self.assertEqual(gate["active_tickets"], [])
+
+    def test_scoped_build_gate_waits_on_overlapping_ticket_files(self) -> None:
+        bus = AgentBus()
+        bus.ticket({
+            "workspace_root": "/repo",
+            "agent_id": "agent-a",
+            "message": "edit server",
+            "files": ["src/server.py"],
+        })
+
+        gate = bus.build_gate({
+            "workspace_root": "/repo",
+            "agent_id": "agent-b",
+            "files": ["src"],
+            "full_workspace": False,
+        })
+
+        self.assertFalse(gate["unlocked"])
+        self.assertEqual(gate["holders"], ["agent-a"])
+
+    def test_scoped_build_gate_matches_absolute_and_relative_paths(self) -> None:
+        bus = AgentBus()
+        bus.ticket({
+            "workspace_root": "/repo",
+            "agent_id": "agent-a",
+            "message": "edit server",
+            "files": ["src/server.py"],
+        })
+
+        gate = bus.build_gate({
+            "workspace_root": "/repo",
+            "files": ["/repo/src/server.py"],
+            "full_workspace": False,
+        })
+
+        self.assertFalse(gate["unlocked"])
+        self.assertEqual(gate["holders"], ["agent-a"])
+
+    def test_scoped_build_gate_waits_on_unknown_scope_tickets(self) -> None:
+        bus = AgentBus()
+        bus.ticket({"workspace_root": "/repo", "agent_id": "agent-a", "message": "editing"})
+
+        gate = bus.build_gate({
+            "workspace_root": "/repo",
+            "files": ["src/server.py"],
+            "full_workspace": False,
+        })
+
+        self.assertFalse(gate["unlocked"])
+        self.assertEqual(gate["holders"], ["agent-a"])
+
     def test_new_ticket_clears_stale_build_wait_state_for_agent(self) -> None:
         bus = AgentBus()
         bus.ticket({"workspace_root": "/repo", "agent_id": "agent-a", "message": "old ticket"})

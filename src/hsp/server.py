@@ -1158,6 +1158,12 @@ def _render_build_gate(result: dict[str, object]) -> str:
     reason = str(result.get("reason", ""))
     head = "build gate: unlocked" if unlocked else "build gate: waiting"
     lines = [f"{head} ({reason})"]
+    full_workspace = bool(result.get("full_workspace", True))
+    files = _wire_list(result, "files")
+    if full_workspace:
+        lines.append("scope: workspace")
+    elif files:
+        lines.append("scope: " + ", ".join(str(item) for item in files[:5]))
     holders = _wire_list(result, "holders")
     waiting = _wire_list(result, "waiting")
     if holders:
@@ -4001,22 +4007,30 @@ async def chat(message: str, id: str = "") -> str:
     return _render_bus_result("chat", result)
 
 
-async def implicit_build_gate(command: str = "", timeout: str = "2m") -> str:
+async def implicit_build_gate(
+    command: str = "",
+    timeout: str = "2m",
+    files: str = "",
+    symbols: str = "",
+    aliases: str = "",
+    full_workspace: bool = True,
+) -> str:
     """Wait for hook/wrapper-detected build commands without exposing an MCP tool."""
     timeout_seconds = _parse_bus_duration(timeout, default=120.0)
     if isinstance(timeout_seconds, str):
         return timeout_seconds
     params = _bus_params(
         message=command,
-        files="",
-        symbols="",
-        aliases="",
+        files=files,
+        symbols=symbols,
+        aliases=aliases,
         question_id="",
         timeout="",
         status="",
         targets="",
         action="build_gate",
     )
+    params["full_workspace"] = full_workspace
     result = await _wait_for_build_gate(params, timeout_seconds)
     if isinstance(result, str):
         return result

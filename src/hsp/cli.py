@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -31,8 +32,11 @@ EDIT_DENY_REASON = (
     "\"...\"`, then retry the edit."
 )
 BUILD_FIRST_TOKENS = {
+    "bun",
     "cargo",
     "cmake",
+    "composer",
+    "deno",
     "dotnet",
     "go",
     "gradle",
@@ -40,10 +44,13 @@ BUILD_FIRST_TOKENS = {
     "make",
     "mvn",
     "ninja",
+    "nox",
     "npm",
+    "npx",
     "pnpm",
     "pytest",
     "rk",
+    "tox",
     "uv",
     "yarn",
 }
@@ -61,6 +68,51 @@ BUILD_SUBCOMMANDS = {
     "test",
     "verify",
 }
+DIRECT_CHECKER_TOKENS = {
+    "biome",
+    "black",
+    "eslint",
+    "flake8",
+    "mypy",
+    "phpstan",
+    "phpunit",
+    "prettier",
+    "pylint",
+    "pyright",
+    "pytest",
+    "ruff",
+    "isort",
+    "shellcheck",
+    "stylelint",
+    "ty",
+}
+PYTHON_MODULE_CHECKERS = {"mypy", "pytest", "ruff", "unittest"}
+RUNNER_TOKENS = {"npx", "poetry", "pipenv", "uv"}
+PATHY_OPTIONS_WITH_VALUE = {
+    "--config",
+    "--config-file",
+    "--directory",
+    "--extra",
+    "--group",
+    "--manifest-path",
+    "--only-group",
+    "--package",
+    "--python",
+    "--project",
+    "--target",
+    "--target-dir",
+    "--with",
+    "--with-editable",
+    "--with-requirements",
+    "--without",
+}
+
+
+@dataclass(frozen=True)
+class CommandGateSpec:
+    argv: tuple[str, ...]
+    full_workspace: bool
+    files: tuple[str, ...] = ()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -198,10 +250,14 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             _write_hook_denial(_edit_denial_reason(gate))
             return 0
     if _is_build_before_hook(kind, payload, command):
+        gate_spec = _command_gate_spec(command)
+        assert gate_spec is not None
         gate = asyncio.run(
             server.implicit_build_gate(
                 command,
                 timeout=os.environ.get("HSP_BUILD_GATE_TIMEOUT", "2m"),
+                files=",".join(gate_spec.files),
+                full_workspace=gate_spec.full_workspace,
             )
         )
         if "build gate: unlocked" not in gate:
@@ -242,8 +298,14 @@ def _run_command(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int
         parser.error("hsp run requires a command after --")
 
     message = str(ns.message).strip() or " ".join(argv)
+    gate_spec = _gate_spec_for_argv(argv)
     gate = asyncio.run(
-        server.implicit_build_gate(message, timeout=str(ns.timeout))
+        server.implicit_build_gate(
+            message,
+            timeout=str(ns.timeout),
+            files=",".join(gate_spec.files) if gate_spec else str(ns.files),
+            full_workspace=gate_spec.full_workspace if gate_spec else not str(ns.files).strip(),
+        )
     )
     if "build gate: unlocked" not in gate:
         print(gate, file=sys.stderr)
@@ -541,24 +603,194 @@ def _hook_tool_name(payload: dict[str, object]) -> str:
 
 
 def _is_build_command(command: str) -> bool:
+    return _command_gate_spec(command) is not None
+
+
+def _command_gate_spec(command: str) -> CommandGateSpec | None:
     try:
         argv = shlex.split(command)
     except ValueError:
         argv = command.split()
+    return _gate_spec_for_argv(argv)
+
+
+def _gate_spec_for_argv(argv: list[str]) -> CommandGateSpec | None:
     if not argv:
-        return False
+        return None
+    argv = _strip_env_assignments(argv)
+    if not argv:
+        return None
     first = os.path.basename(argv[0])
-    if first not in BUILD_FIRST_TOKENS:
-        return False
-    if first in {"pytest", "make", "just", "ninja"}:
-        return True
+    if first in RUNNER_TOKENS:
+        nested = _runner_inner_argv(first, argv)
+        if nested:
+            return _gate_spec_for_argv(nested)
+    if first == "python" and len(argv) >= 3 and argv[1] == "-m":
+        module = argv[2]
+        if module in PYTHON_MODULE_CHECKERS:
+            return _path_scoped_spec(argv, argv[3:])
+    if first in DIRECT_CHECKER_TOKENS:
+        return _path_scoped_spec(argv, argv[1:])
+    if first in {"make", "just", "ninja", "cmake", "gradle", "mvn", "rk", "xcodebuild"}:
+        return CommandGateSpec(tuple(argv), full_workspace=True)
     if first == "uv":
-        return len(argv) >= 2 and argv[1] in {"run", "tool"}
+        nested = _runner_inner_argv(first, argv)
+        return _gate_spec_for_argv(nested) if nested else None
     if first in {"npm", "pnpm", "yarn"}:
-        return len(argv) >= 2 and argv[1] in {"run", "test", "build", "lint", "publish"}
-    if len(argv) == 1:
+        return _node_gate_spec(first, argv)
+    if first == "bun":
+        return _bun_gate_spec(argv)
+    if first == "deno":
+        return _deno_gate_spec(argv)
+    if first == "go":
+        return _go_gate_spec(argv)
+    if first == "cargo":
+        return _subcommand_gate_spec(argv)
+    if first in {"dotnet", "swift"}:
+        return _subcommand_gate_spec(argv)
+    if first in {"tox", "nox", "composer"}:
+        return CommandGateSpec(tuple(argv), full_workspace=True)
+    if first not in BUILD_FIRST_TOKENS:
+        return None
+    if len(argv) > 1 and argv[1] in BUILD_SUBCOMMANDS:
+        return CommandGateSpec(tuple(argv), full_workspace=True)
+    return None
+
+
+def _strip_env_assignments(argv: list[str]) -> list[str]:
+    idx = 0
+    while idx < len(argv) and "=" in argv[idx] and not argv[idx].startswith("-"):
+        name, _value = argv[idx].split("=", 1)
+        if not name.replace("_", "").isalnum():
+            break
+        idx += 1
+    return argv[idx:]
+
+
+def _runner_inner_argv(first: str, argv: list[str]) -> list[str]:
+    if first == "uv":
+        if len(argv) < 2 or argv[1] not in {"run", "tool"}:
+            return []
+        return _skip_runner_options(argv[2:])
+    if first in {"poetry", "pipenv"}:
+        if len(argv) < 2 or argv[1] != "run":
+            return []
+        return _skip_runner_options(argv[2:])
+    if first == "npx":
+        return _skip_runner_options(argv[1:])
+    return []
+
+
+def _skip_runner_options(argv: list[str]) -> list[str]:
+    idx = 0
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg == "--":
+            return argv[idx + 1:]
+        if not arg.startswith("-"):
+            return argv[idx:]
+        idx += 2 if _option_takes_value(arg) and idx + 1 < len(argv) else 1
+    return []
+
+
+def _node_gate_spec(first: str, argv: list[str]) -> CommandGateSpec | None:
+    if len(argv) < 2:
+        return None
+    sub = argv[1]
+    if first == "npm" and sub in {"test", "build", "lint", "publish"}:
+        return CommandGateSpec(tuple(argv), full_workspace=True)
+    if sub in {"test", "build", "lint", "publish"}:
+        return CommandGateSpec(tuple(argv), full_workspace=True)
+    if sub in {"run", "exec", "dlx"} and len(argv) >= 3:
+        if sub == "run":
+            return CommandGateSpec(tuple(argv), full_workspace=True)
+        return _gate_spec_for_argv(argv[2:])
+    return None
+
+
+def _go_gate_spec(argv: list[str]) -> CommandGateSpec | None:
+    if len(argv) < 2 or argv[1] not in {"test", "build", "vet", "list"}:
+        return None
+    paths = _command_paths(argv[2:])
+    if _paths_cover_workspace(paths):
+        return CommandGateSpec(tuple(argv), full_workspace=True)
+    return CommandGateSpec(tuple(argv), full_workspace=not paths, files=tuple(paths))
+
+
+def _bun_gate_spec(argv: list[str]) -> CommandGateSpec | None:
+    if len(argv) < 2:
+        return None
+    sub = argv[1]
+    if sub == "test":
+        paths = _command_paths(argv[2:])
+        if _paths_cover_workspace(paths):
+            return CommandGateSpec(tuple(argv), full_workspace=True)
+        return CommandGateSpec(tuple(argv), full_workspace=not paths, files=tuple(paths))
+    if sub in {"run", "build"}:
+        return CommandGateSpec(tuple(argv), full_workspace=True)
+    return None
+
+
+def _deno_gate_spec(argv: list[str]) -> CommandGateSpec | None:
+    if len(argv) < 2 or argv[1] not in {"check", "fmt", "lint", "test"}:
+        return None
+    paths = _command_paths(argv[2:])
+    if _paths_cover_workspace(paths):
+        return CommandGateSpec(tuple(argv), full_workspace=True)
+    return CommandGateSpec(tuple(argv), full_workspace=not paths, files=tuple(paths))
+
+
+def _subcommand_gate_spec(argv: list[str]) -> CommandGateSpec | None:
+    if len(argv) < 2 or argv[1] not in BUILD_SUBCOMMANDS:
+        return None
+    return CommandGateSpec(tuple(argv), full_workspace=True)
+
+
+def _path_scoped_spec(argv: list[str], args: list[str]) -> CommandGateSpec:
+    paths = _command_paths(args)
+    if _paths_cover_workspace(paths):
+        return CommandGateSpec(tuple(argv), full_workspace=True)
+    return CommandGateSpec(tuple(argv), full_workspace=not paths, files=tuple(paths))
+
+
+def _paths_cover_workspace(paths: list[str]) -> bool:
+    return any(path in {".", "./", "./...", "..."} for path in paths)
+
+
+def _command_paths(args: list[str]) -> list[str]:
+    paths: list[str] = []
+    idx = 0
+    after_double_dash = False
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "--":
+            after_double_dash = True
+            idx += 1
+            continue
+        if not after_double_dash and arg.startswith("-"):
+            idx += 2 if _option_takes_value(arg) and idx + 1 < len(args) else 1
+            continue
+        if _looks_like_path(arg):
+            paths.append(arg)
+        idx += 1
+    return _dedupe(paths)
+
+
+def _option_takes_value(arg: str) -> bool:
+    return arg in PATHY_OPTIONS_WITH_VALUE and "=" not in arg
+
+
+def _looks_like_path(arg: str) -> bool:
+    if not arg or arg.startswith("-"):
         return False
-    return argv[1] in BUILD_SUBCOMMANDS
+    if arg in {".", ".."}:
+        return True
+    return (
+        "/" in arg
+        or arg.startswith(".")
+        or Path(arg).suffix != ""
+        or Path(arg).exists()
+    )
 
 
 def _build_status(status: str) -> str:

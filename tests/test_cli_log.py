@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+from hsp import cli as hsp_cli
 from hsp import main as hsp_main
 from hsp import server
 from hsp.agent_bus import AgentBus
@@ -65,6 +66,64 @@ class CliLogTests(unittest.TestCase):
 
         self.assertIn("append log:", out)
         self.assertIn("2 event(s), last=E2", out)
+
+    def test_command_gate_detector_covers_common_checker_ecosystems(self) -> None:
+        cases = [
+            "cargo check",
+            "cargo clippy --all-targets",
+            "go test ./...",
+            "go vet ./pkg",
+            "uv run ruff check src",
+            "python -m pytest tests/test_cli_log.py",
+            "npm test",
+            "pnpm run lint",
+            "yarn build",
+            "dotnet test",
+            "rk test",
+            "make test",
+            "just lint",
+            "mvn test",
+            "gradle check",
+            "eslint src/hsp",
+            "npx eslint src/hsp",
+            "biome check src",
+            "prettier --check src/hsp/cli.py",
+            "shellcheck scripts/hsp.sh",
+            "deno lint src",
+            "bun test src",
+            "tox",
+            "nox",
+        ]
+
+        for command in cases:
+            with self.subTest(command=command):
+                self.assertTrue(hsp_cli._is_build_command(command))
+
+    def test_command_gate_detector_marks_cargo_check_as_workspace_wide(self) -> None:
+        spec = hsp_cli._command_gate_spec("cargo check")
+
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertTrue(spec.full_workspace)
+        self.assertEqual(spec.files, ())
+
+    def test_command_gate_detector_extracts_checker_paths(self) -> None:
+        spec = hsp_cli._command_gate_spec("ruff check src/hsp/cli.py")
+
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertFalse(spec.full_workspace)
+        self.assertEqual(spec.files, ("src/hsp/cli.py",))
+
+    def test_command_gate_detector_marks_dot_scopes_as_workspace_wide(self) -> None:
+        for command in ("ruff check .", "go test ./..."):
+            with self.subTest(command=command):
+                spec = hsp_cli._command_gate_spec(command)
+
+                self.assertIsNotNone(spec)
+                assert spec is not None
+                self.assertTrue(spec.full_workspace)
+                self.assertEqual(spec.files, ())
 
     def test_log_hook_requires_kind(self) -> None:
         stderr = io.StringIO()
@@ -235,6 +294,44 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertFalse(path.exists())
 
+    def test_build_before_hook_recognizes_cargo_check(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo check"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run_hook(["hook", "--kind", "tool.before"], root=root, stdin=payload, enabled=True)
+
+        self.assertEqual(out, "")
+
+    def test_scoped_checker_hook_does_not_wait_on_unrelated_ticket(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ruff check src"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            Path(root, "src").mkdir()
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "other-agent",
+                "message": "docs edit",
+                "files": ["docs/readme.md"],
+            })
+            code, out, err = self._run_hook_code(
+                ["hook", "--kind", "tool.before"],
+                root=root,
+                stdin=payload,
+                enabled=True,
+                extra_env={"HSP_BUILD_GATE_TIMEOUT": "1ms"},
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+
     def test_build_before_hook_timeout_blocks_command_without_new_board_event(self) -> None:
         payload = json.dumps({
             "hookEventName": "PreToolUse",
@@ -260,6 +357,33 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(code, 124)
         self.assertIn("build gate timed out", err)
         self.assertEqual(event["kind"], "ticket.started")
+
+    def test_scoped_checker_hook_waits_on_overlapping_ticket(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ruff check src"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            Path(root, "src").mkdir()
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "other-agent",
+                "message": "src edit",
+                "files": ["src/hsp/server.py"],
+            })
+            code, _out, err = self._run_hook_code(
+                ["hook", "--kind", "tool.before"],
+                root=root,
+                stdin=payload,
+                enabled=True,
+                extra_env={"HSP_BUILD_GATE_TIMEOUT": "1ms"},
+            )
+
+        self.assertEqual(code, 124)
+        self.assertIn("build gate timed out", err)
+        self.assertIn("scope: src", err)
 
     def test_build_after_hook_records_test_result(self) -> None:
         payload = json.dumps({

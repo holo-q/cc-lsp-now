@@ -168,11 +168,17 @@ the harness hook, or use `hsp run -- <command>` from shell scripts:
 hsp run -- cargo test
 ```
 
-The internal gate returns `unlocked` when there are no active ticket holders, or
-when every current holder has also reached the build gate and is waiting. That
-second case prevents deadlock: if all agents independently arrived at "I need
-the build", the build can proceed. Checking the gate is not written to the
-journal and is not broadcast; it should not rush active editors.
+The internal gate returns `unlocked` when there are no active ticket holders
+covering the checker scope, or when every current overlapping holder has also
+reached the build gate and is waiting. Workspace-wide commands such as
+`cargo check` with no path arguments cover the full workgroup. Path-scoped
+commands such as `ruff check src/hsp/cli.py`, `pytest tests/foo.py`, or
+`go test ./pkg` wait only on active tickets whose files/symbols overlap that
+scope. Unknown-scope tickets still block scoped checkers because HSP cannot
+prove the command is unrelated. The all-waiting case prevents deadlock: if all
+agents independently arrived at "I need the build", the build can proceed.
+Checking the gate is not written to the journal and is not broadcast; it should
+not rush active editors.
 
 When an agent starts a new ticket, its stale build-wait marker is cleared. This
 keeps an old "waiting for build" state from accidentally unlocking a later
@@ -404,12 +410,14 @@ queued for that scope. The same broker decides whether to surface an open
 question, a settled digest, a related commit, or nothing.
 
 Generic Bash hooks also recognize common build/verifier commands such as
-`cargo test`, `cargo check`, `uv run ...`, `pytest`, `npm test`, `pnpm run`,
-`go test`, `make`, `just`, `dotnet test`, `rk test`, and similar first-token /
-subcommand pairs. On the before hook they run the quiet build gate and do not
-append a journal row; on the after hook they record `test.ran` with normalized
-`passed` / `failed` status. Set `HSP_BUILD_GATE_TIMEOUT` to tune the hook wait
-window; the default is `2m`.
+`cargo test`, `cargo check`, `cargo clippy`, `uv run ...`, `python -m pytest`,
+`ruff check`, `mypy`, `eslint`, `prettier --check`, `biome check`, `shellcheck`,
+`npm test`, `pnpm run`, `yarn build`, `bun test`, `deno lint`, `go test`,
+`go vet`, `make`, `just`, `dotnet test`, `rk test`, `tox`, `nox`, and similar
+first-token / subcommand pairs across common ecosystems. On the before hook
+they run the quiet build gate and do not append a journal row; on the after hook
+they record `test.ran` with normalized `passed` / `failed` status. Set
+`HSP_BUILD_GATE_TIMEOUT` to tune the hook wait window; the default is `2m`.
 
 When `HSP_REQUIRE_TICKET_FOR_EDITS=1`, edit before hooks become hard gates.
 They use the same broker bus and return a harness-native denial payload rather

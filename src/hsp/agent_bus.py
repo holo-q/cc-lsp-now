@@ -32,6 +32,9 @@ class BusTicket:
     message: str
     workspace_root: str
     opened_at: float
+    files: tuple[str, ...] = ()
+    symbols: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
     holders: dict[str, float] = field(default_factory=dict)
     closed_at: float | None = None
 
@@ -47,6 +50,9 @@ class BusTicket:
             "workspace_root": self.workspace_root,
             "opened_at": self.opened_at,
             "closed_at": self.closed_at,
+            "files": list(self.files),
+            "symbols": list(self.symbols),
+            "aliases": list(self.aliases),
             "holder_count": len(self.holders),
             "holders": [
                 {
@@ -179,6 +185,9 @@ class AgentBus:
                 and current.message == message
             ):
                 now = time.time()
+                current.files = _merge_scope(current.files, _strings(params.get("files")))
+                current.symbols = _merge_scope(current.symbols, _strings(params.get("symbols")))
+                current.aliases = _merge_scope(current.aliases, _strings(params.get("aliases")))
                 current.holders[agent_id] = now
                 return {
                     "ticket": current.to_wire(now),
@@ -199,9 +208,16 @@ class AgentBus:
                     message=message,
                     workspace_root=root,
                     opened_at=now,
+                    files=tuple(_strings(params.get("files"))),
+                    symbols=tuple(_strings(params.get("symbols"))),
+                    aliases=tuple(_strings(params.get("aliases"))),
                 )
                 self._tickets[ticket_id] = ticket
                 kind = BusEventKind.TICKET_STARTED.value
+            else:
+                ticket.files = _merge_scope(ticket.files, _strings(params.get("files")))
+                ticket.symbols = _merge_scope(ticket.symbols, _strings(params.get("symbols")))
+                ticket.aliases = _merge_scope(ticket.aliases, _strings(params.get("aliases")))
             ticket.holders[agent_id] = now
             self._agent_tickets[agent_id] = ticket.ticket_id
             self._append_locked(
@@ -275,10 +291,26 @@ class AgentBus:
     def build_gate(self, params: dict[str, Any]) -> dict[str, Any]:
         root = _workspace_root(params)
         agent_id = _agent_id(params)
+        files = _strings(params.get("files"))
+        symbols = _strings(params.get("symbols"))
+        aliases = _strings(params.get("aliases"))
+        full_workspace = bool(params.get("full_workspace", False)) or not (files or symbols or aliases)
         with self._lock:
             if agent_id:
                 self._build_waiters.setdefault(root, set()).add(agent_id)
-            tickets = [ticket for ticket in self._tickets.values() if ticket.workspace_root == root and ticket.is_open]
+            tickets = [
+                ticket
+                for ticket in self._tickets.values()
+                if ticket.workspace_root == root
+                and ticket.is_open
+                and _ticket_blocks_scope(
+                    ticket,
+                    full_workspace=full_workspace,
+                    files=files,
+                    symbols=symbols,
+                    aliases=aliases,
+                )
+            ]
             holders = sorted({agent for ticket in tickets for agent in ticket.holders})
             waiters = self._build_waiters.get(root, set())
             unlocked = not holders or all(agent in waiters for agent in holders)
@@ -290,6 +322,10 @@ class AgentBus:
                 "holders": holders,
                 "waiting": waiting_holders,
                 "active_tickets": [ticket.to_wire() for ticket in tickets],
+                "full_workspace": full_workspace,
+                "files": files,
+                "symbols": symbols,
+                "aliases": aliases,
             }
 
     def edit_gate(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -636,6 +672,59 @@ def _strings(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item)]
     return []
+
+
+def _merge_scope(existing: tuple[str, ...], incoming: list[str]) -> tuple[str, ...]:
+    items = list(existing)
+    for item in incoming:
+        if item not in items:
+            items.append(item)
+    return tuple(items)
+
+
+def _ticket_blocks_scope(
+    ticket: BusTicket,
+    *,
+    full_workspace: bool,
+    files: list[str],
+    symbols: list[str],
+    aliases: list[str],
+) -> bool:
+    if full_workspace:
+        return True
+    if not (ticket.files or ticket.symbols or ticket.aliases):
+        return True
+    return _scope_items_overlap(ticket.files, files) or _scope_items_overlap(
+        ticket.symbols,
+        symbols,
+    ) or _scope_items_overlap(ticket.aliases, aliases)
+
+
+def _scope_items_overlap(left: tuple[str, ...], right: list[str]) -> bool:
+    if not left or not right:
+        return False
+    return any(_scope_item_overlaps(a, b) for a in left for b in right)
+
+
+def _scope_item_overlaps(left: str, right: str) -> bool:
+    a = left.strip()
+    b = right.strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if "/" not in a and "/" not in b:
+        return False
+    a_tail = a.lstrip("./")
+    b_tail = b.lstrip("./")
+    if a_tail and b_tail and (
+        a_tail.endswith("/" + b_tail)
+        or b_tail.endswith("/" + a_tail)
+    ):
+        return True
+    a_prefix = a.rstrip("/") + "/"
+    b_prefix = b.rstrip("/") + "/"
+    return a.startswith(b_prefix) or b.startswith(a_prefix)
 
 
 def _string(value: Any) -> str:
