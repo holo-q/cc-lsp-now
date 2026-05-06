@@ -176,6 +176,81 @@ class BrokerBusLifecycleTests(unittest.TestCase):
             self.assertEqual(result["open_questions"], [])
             self.assertEqual(result["workspace_root"], root)
 
+    def test_ticket_journal_and_build_gate_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            daemon = BrokerDaemon()
+            for agent_id in ("agent-a", "agent-b"):
+                response = _run(daemon.handle_request({
+                    "id": f"ticket-{agent_id}",
+                    "method": "bus.ticket",
+                    "params": {
+                        "workspace_root": root,
+                        "agent_id": agent_id,
+                        "message": "coordinate build gate",
+                    },
+                }))
+                self.assertIn("ticket", _result(response))
+
+            first_gate = _run(daemon.handle_request({
+                "id": "gate-a",
+                "method": "bus.build_gate",
+                "params": {"workspace_root": root, "agent_id": "agent-a"},
+            }))
+            second_gate = _run(daemon.handle_request({
+                "id": "gate-b",
+                "method": "bus.build_gate",
+                "params": {"workspace_root": root, "agent_id": "agent-b"},
+            }))
+            journal = _run(daemon.handle_request({
+                "id": "journal",
+                "method": "bus.journal",
+                "params": {"workspace_root": root, "limit": 25},
+            }))
+
+            self.assertFalse(_result(first_gate)["unlocked"])
+            self.assertTrue(_result(second_gate)["unlocked"])
+            events = cast(list[dict[str, Any]], _result(journal)["events"])
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["ticket.started", "ticket.joined"],
+            )
+
+    def test_chat_reply_closes_ask_through_broker(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            daemon = BrokerDaemon()
+            opened = _run(daemon.handle_request({
+                "id": "ask",
+                "method": "bus.ask",
+                "params": {
+                    "workspace_root": root,
+                    "agent_id": "agent-a",
+                    "message": "build?",
+                    "timeout": "30s",
+                },
+            }))
+            qid = cast(str, cast(dict[str, Any], _result(opened)["question"])["question_id"])
+
+            replied = _run(daemon.handle_request({
+                "id": "chat",
+                "method": "bus.chat",
+                "params": {
+                    "workspace_root": root,
+                    "agent_id": "agent-b",
+                    "id": qid,
+                    "message": "go",
+                },
+            }))
+            status = _run(daemon.handle_request({
+                "id": "question",
+                "method": "bus.question",
+                "params": {"workspace_root": root, "id": qid},
+            }))
+
+            chat_question = cast(dict[str, Any], _result(replied)["question"])
+            replies = cast(list[dict[str, Any]], _result(status)["replies"])
+            self.assertIsNotNone(chat_question["closed_at"])
+            self.assertEqual([reply["event_type"] for reply in replies], ["bus.reply"])
+
 
 class BrokerBusWorkspaceScopingTests(unittest.TestCase):
     """Bus must key by workspace root, not LSP config_hash."""

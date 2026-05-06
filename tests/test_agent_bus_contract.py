@@ -80,7 +80,8 @@ def _broker_has_method(method: str) -> bool:
     error = response.get("error")
     if not isinstance(error, dict):
         return True
-    return error.get("code") != "unknown_method"
+    typed_error = cast(dict[str, Any], error)
+    return typed_error.get("code") != "unknown_method"
 
 
 def _run(coro: Coroutine[Any, Any, Any]) -> Any:
@@ -363,6 +364,11 @@ class BrokerBusMethodSurfaceTests(unittest.TestCase):
         "bus.note",
         "bus.ask",
         "bus.reply",
+        "bus.chat",
+        "bus.ticket",
+        "bus.journal",
+        "bus.question",
+        "bus.build_gate",
         "bus.recent",
         "bus.settle",
         "bus.precommit",
@@ -518,7 +524,7 @@ def _call_presence(bus: AgentBus, *, workspace_root: str, now_offset: float = 0.
             )
         )
         return response.get("result", {})
-    params = {"workspace_root": workspace_root}
+    params: dict[str, Any] = {"workspace_root": workspace_root}
     if now_offset:
         params["now_offset"] = now_offset
     return fn(params)

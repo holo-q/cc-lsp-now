@@ -760,6 +760,11 @@ _BUS_ACTIONS: tuple[str, ...] = (
     "note",
     "ask",
     "reply",
+    "chat",
+    "ticket",
+    "journal",
+    "question",
+    "build_gate",
     "recent",
     "settle",
     "precommit",
@@ -779,6 +784,10 @@ _BUS_KINDS: tuple[str, ...] = (
     "agent.heartbeat",
     "session.start",
     "session.stop",
+    "ticket.started",
+    "ticket.joined",
+    "ticket.released",
+    "ticket.closed",
     "prompt",
     "user.prompt",
     "task.intent",
@@ -801,6 +810,7 @@ _BUS_KINDS: tuple[str, ...] = (
     "push.before",
     "push.after",
     "note.posted",
+    "chat.message",
     "bus.ask",
     "bus.reply",
     "bus.closed",
@@ -937,6 +947,16 @@ def _local_bus_dispatch(action: str, params: dict[str, object]) -> dict[str, obj
             return bus.event(params)
         if action == "heartbeat":
             return bus.heartbeat(params)
+        if action == "ticket":
+            return bus.ticket(params)
+        if action == "journal":
+            return bus.journal(params)
+        if action == "chat":
+            return bus.chat(params)
+        if action == "question":
+            return bus.question(params)
+        if action == "build_gate":
+            return bus.build_gate(params)
         if action == "note":
             return bus.note(params)
         if action == "ask":
@@ -991,6 +1011,16 @@ def _render_bus_result(action: str, result: dict[str, object]) -> str:
         return _render_bus_weather(result)
     if action in {"presence", "workgroup"}:
         return _render_bus_presence(result)
+    if action == "ticket":
+        return _render_bus_ticket(result)
+    if action == "journal":
+        return _render_bus_journal(result)
+    if action == "chat":
+        return _render_bus_chat(result)
+    if action == "question":
+        return json.dumps(result, indent=2, sort_keys=True)
+    if action == "build_gate":
+        return _render_build_gate(result)
     if action == "recent":
         return _render_bus_recent(result)
     if action == "settle":
@@ -1032,6 +1062,95 @@ def _render_bus_status(result: dict[str, object]) -> str:
         f"last={last or 'E0'} "
         f"open_questions={result.get('open_question_count', 0)}"
     )
+
+
+def _render_bus_ticket(result: dict[str, object]) -> str:
+    released = _wire_list(result, "released")
+    ticket = _wire_dict(result, "ticket")
+    if released:
+        lines = ["ticket released:"]
+        for event_obj in released:
+            if isinstance(event_obj, dict):
+                lines.append(f"  {_event_label(cast(dict[str, object], event_obj))}")
+    elif ticket:
+        lines = [f"ticket {ticket.get('ticket_id', '')}: {ticket.get('message', '')}"]
+        holders = _wire_list(ticket, "holders")
+        if holders:
+            holder_ids = [
+                str(cast(dict[str, object], h).get("agent_id", "?"))
+                for h in holders
+                if isinstance(h, dict)
+            ]
+            lines.append("holders: " + ", ".join(holder_ids))
+    else:
+        lines = ["ticket: none"]
+    active = _wire_list(result, "active_tickets")
+    lines.append(f"active tickets: {len(active)}")
+    for t_obj in active[:5]:
+        if isinstance(t_obj, dict):
+            t = cast(dict[str, object], t_obj)
+            holders = _wire_list(t, "holders")
+            holder_label = ",".join(
+                str(cast(dict[str, object], h).get("agent_id", "?"))
+                for h in holders
+                if isinstance(h, dict)
+            )
+            lines.append(_compact_line(f"  {t.get('ticket_id', '')} {t.get('message', '')} [{holder_label}]", 220))
+    return "\n".join(lines)
+
+
+def _render_bus_journal(result: dict[str, object]) -> str:
+    lines: list[str] = []
+    tickets = _wire_list(result, "active_tickets")
+    questions = _wire_list(result, "open_questions")
+    if tickets:
+        lines.append(f"tickets: {len(tickets)}")
+        for t_obj in tickets[:5]:
+            if isinstance(t_obj, dict):
+                t = cast(dict[str, object], t_obj)
+                lines.append(_compact_line(f"  {t.get('ticket_id', '')} {t.get('message', '')}", 180))
+    if questions:
+        lines.append(f"questions: {len(questions)}")
+        for q_obj in questions[:5]:
+            if isinstance(q_obj, dict):
+                q = cast(dict[str, object], q_obj)
+                lines.append(_compact_line(f"  {q.get('question_id', '')} {q.get('message', '')}", 180))
+    events = _wire_list(result, "events")
+    lines.append(f"journal: {len(events)}")
+    for e_obj in events:
+        if isinstance(e_obj, dict):
+            lines.append(f"  {_event_label(cast(dict[str, object], e_obj))}")
+    return "\n".join(lines)
+
+
+def _render_bus_chat(result: dict[str, object]) -> str:
+    event = _wire_dict(result, "event")
+    question = _wire_dict(result, "question")
+    lines = [_render_logged_event(event)]
+    if question:
+        lines.append(f"unlocked {question.get('question_id', '')}")
+    journal = _wire_dict(result, "journal")
+    if journal:
+        lines.append(_render_bus_journal(journal))
+    return "\n".join(line for line in lines if line)
+
+
+def _render_build_gate(result: dict[str, object]) -> str:
+    unlocked = bool(result.get("unlocked", False))
+    reason = str(result.get("reason", ""))
+    head = "build gate: unlocked" if unlocked else "build gate: waiting"
+    lines = [f"{head} ({reason})"]
+    holders = _wire_list(result, "holders")
+    waiting = _wire_list(result, "waiting")
+    if holders:
+        lines.append("holders: " + ", ".join(str(h) for h in holders))
+    if waiting:
+        lines.append("waiting: " + ", ".join(str(w) for w in waiting))
+    for t_obj in _wire_list(result, "active_tickets")[:5]:
+        if isinstance(t_obj, dict):
+            t = cast(dict[str, object], t_obj)
+            lines.append(_compact_line(f"  {t.get('ticket_id', '')} {t.get('message', '')}", 180))
+    return "\n".join(lines)
 
 
 def _render_bus_weather(result: dict[str, object]) -> str:
@@ -1156,6 +1275,45 @@ def _render_bus_scope(item: dict[str, object]) -> str:
         if isinstance(values, list) and values:
             parts.append(f"{key}=" + ",".join(str(v) for v in values[:5]))
     return " ".join(parts)
+
+
+async def _dispatch_bus_action(
+    act: str,
+    params: dict[str, object],
+) -> dict[str, object] | str:
+    method = f"bus.{act}"
+    if _broker_enabled():
+        wire = _broker_base_params()
+        wire.update(params)
+        try:
+            result = await _broker_bus_call(method, wire)
+        except BrokerError as e:
+            if _broker_mode() == "on" or not _broker_unavailable(e):
+                return f"broker {method} failed: {e.code}: {e}"
+            agent_log(f"broker {method} unreachable ({e.code}); using local bus")
+            return _local_bus_dispatch(act, params)
+        if not isinstance(result, dict):
+            return f"broker {method} returned {type(result).__name__}: {result!r}"
+        return cast(dict[str, object], result)
+    return _local_bus_dispatch(act, params)
+
+
+async def _wait_for_build_gate(
+    params: dict[str, object],
+    timeout_seconds: float,
+) -> dict[str, object] | str:
+    deadline = time.time() + timeout_seconds
+    delay = min(0.5, max(0.05, timeout_seconds / 20.0 if timeout_seconds else 0.05))
+    last: dict[str, object] | str = {}
+    while True:
+        last = await _dispatch_bus_action("build_gate", params)
+        if isinstance(last, str):
+            return last
+        if bool(last.get("unlocked", False)):
+            return last
+        if time.time() >= deadline:
+            return last
+        await asyncio.sleep(delay)
 
 
 # Project-root detection. Plugins contribute markers via LSP_PROJECT_MARKERS.
@@ -3658,28 +3816,159 @@ async def lsp_log(
         action=act,
     )
 
-    method = f"bus.{act}"
-    if _broker_enabled():
-        wire = _broker_base_params()
-        wire.update(params)
-        try:
-            result = await _broker_bus_call(method, wire)
-        except BrokerError as e:
-            if _broker_mode() == "on" or not _broker_unavailable(e):
-                return f"broker {method} failed: {e.code}: {e}"
-            agent_log(f"broker {method} unreachable ({e.code}); using local bus")
-            local = _local_bus_dispatch(act, params)
-            if isinstance(local, str):
-                return local
-            return _render_bus_result(act, local)
-        if not isinstance(result, dict):
-            return f"broker {method} returned {type(result).__name__}: {result!r}"
-        return _render_bus_result(act, cast(dict[str, object], result))
+    if act == "build_gate":
+        result = await _wait_for_build_gate(params, timeout_seconds)
+        if isinstance(result, str):
+            return result
+        text = _render_bus_result(act, result)
+        if not bool(result.get("unlocked", False)):
+            text = f"build gate timed out after {timeout}\n{text}"
+        return text
 
-    local = _local_bus_dispatch(act, params)
-    if isinstance(local, str):
-        return local
-    return _render_bus_result(act, local)
+    result = await _dispatch_bus_action(act, params)
+    if isinstance(result, str):
+        return result
+    return _render_bus_result(act, result)
+
+
+async def ticket(message: str = "", files: str = "", symbols: str = "") -> str:
+    """Acquire or release this agent's current work ticket.
+
+    ``ticket("...")`` marks the current agent as working on a ticket and
+    broadcasts the start/join event. ``ticket("")`` releases the agent's
+    current ticket. Active tickets are the build gate's stop signal.
+    """
+    params = _bus_params(
+        message=message,
+        files=files,
+        symbols=symbols,
+        aliases="",
+        question_id="",
+        timeout="",
+        status="",
+        targets="",
+        action="ticket",
+    )
+    result = await _dispatch_bus_action("ticket", params)
+    if isinstance(result, str):
+        return result
+    return _render_bus_result("ticket", result)
+
+
+async def journal(limit: int = 25) -> str:
+    """Show the compact workgroup journal plus open tickets/questions."""
+    params = _bus_params(
+        message="",
+        files="",
+        symbols="",
+        aliases="",
+        question_id="",
+        timeout="",
+        status="",
+        targets="",
+        action="journal",
+    )
+    params["limit"] = limit
+    result = await _dispatch_bus_action("journal", params)
+    if isinstance(result, str):
+        return result
+    return _render_bus_result("journal", result)
+
+
+async def ask(message: str, files: str = "", symbols: str = "", timeout: str = "2m") -> str:
+    """Open a question and wait until chat replies or the timeout expires."""
+    if not message.strip():
+        return 'ask requires message="..."'
+    timeout_seconds = _parse_bus_duration(timeout, default=120.0)
+    if isinstance(timeout_seconds, str):
+        return timeout_seconds
+    params = _bus_params(
+        message=message,
+        files=files,
+        symbols=symbols,
+        aliases="",
+        question_id="",
+        timeout=timeout,
+        status="",
+        targets="",
+        action="ask",
+    )
+    opened = await _dispatch_bus_action("ask", params)
+    if isinstance(opened, str):
+        return opened
+    question = _wire_dict(opened, "question")
+    qid = str(question.get("question_id", "")) if question else ""
+    if not qid:
+        return _render_bus_result("ask", opened)
+
+    deadline = time.time() + timeout_seconds
+    delay = min(0.25, max(0.01, timeout_seconds / 20.0 if timeout_seconds else 0.01))
+    while time.time() < deadline:
+        await asyncio.sleep(delay)
+        status_result = await _dispatch_bus_action("question", {**params, "id": qid})
+        if isinstance(status_result, str):
+            return status_result
+        q = _wire_dict(status_result, "question")
+        replies = _wire_list(status_result, "replies")
+        if replies or (q and q.get("closed_at") not in {"", None}):
+            lines = [f"ask {qid} answered"]
+            for e_obj in replies:
+                if isinstance(e_obj, dict):
+                    lines.append(f"  {_event_label(cast(dict[str, object], e_obj))}")
+            journal_result = await _dispatch_bus_action("journal", {**params, "limit": 25})
+            if isinstance(journal_result, dict):
+                lines.append(_render_bus_journal(journal_result))
+            return "\n".join(lines)
+
+    journal_result = await _dispatch_bus_action("journal", {**params, "limit": 25})
+    journal_text = journal_result if isinstance(journal_result, str) else _render_bus_journal(journal_result)
+    return f"ask {qid} timed out after {timeout}\n{journal_text}"
+
+
+async def chat(message: str, id: str = "") -> str:
+    """Post a chat row, optionally replying to and unlocking an ask id."""
+    if not message.strip():
+        return 'chat requires message="..."'
+    params = _bus_params(
+        message=message,
+        files="",
+        symbols="",
+        aliases="",
+        question_id=id,
+        timeout="",
+        status="",
+        targets="",
+        action="chat",
+    )
+    result = await _dispatch_bus_action("chat", params)
+    if isinstance(result, str):
+        return result
+    return _render_bus_result("chat", result)
+
+
+async def build_gate(command: str = "", timeout: str = "2m") -> str:
+    """Wait until a build may proceed without broadcasting pressure."""
+    timeout_seconds = _parse_bus_duration(timeout, default=120.0)
+    if isinstance(timeout_seconds, str):
+        return timeout_seconds
+    params = _bus_params(
+        message=command,
+        files="",
+        symbols="",
+        aliases="",
+        question_id="",
+        timeout="",
+        status="",
+        targets="",
+        action="build_gate",
+    )
+    result = await _wait_for_build_gate(params, timeout_seconds)
+    if isinstance(result, str):
+        return result
+    text = _render_bus_result("build_gate", result)
+    if not bool(result.get("unlocked", False)):
+        text = f"build gate timed out after {timeout}\n{text}"
+    return text
 
 
 async def lsp_memory(action: str = "status", target: str = "", mode: str = "") -> str:
@@ -5332,6 +5621,11 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "confirm": (lsp_confirm, "hsp/confirm"),
     "session": (lsp_session, "hsp/session"),
     "log": (lsp_log, "hsp/log"),
+    "ticket": (ticket, "hsp/ticket"),
+    "journal": (journal, "hsp/journal"),
+    "ask": (ask, "hsp/ask"),
+    "chat": (chat, "hsp/chat"),
+    "build_gate": (build_gate, "hsp/build_gate"),
     "memory": (lsp_memory, "hsp/memory"),
 }
 
@@ -5381,6 +5675,11 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "confirm": None,
     "session": None,
     "log": None,
+    "ticket": None,
+    "journal": None,
+    "ask": None,
+    "chat": None,
+    "build_gate": None,
     "memory": None,
 }
 

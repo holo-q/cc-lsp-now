@@ -305,6 +305,25 @@ class BrokerDaemon:
                 raise BrokerError("invalid_params", str(e)) from None
         if method == "bus.heartbeat":
             return self.bus.heartbeat(params)
+        if method == "bus.ticket":
+            try:
+                return self.bus.ticket(params)
+            except ValueError as e:
+                raise BrokerError("invalid_params", str(e)) from None
+        if method == "bus.journal":
+            return self.bus.journal(params)
+        if method == "bus.chat":
+            try:
+                return self.bus.chat(params)
+            except ValueError as e:
+                raise BrokerError("invalid_params", str(e)) from None
+        if method == "bus.question":
+            try:
+                return self.bus.question(params)
+            except ValueError as e:
+                raise BrokerError("invalid_params", str(e)) from None
+        if method == "bus.build_gate":
+            return self.bus.build_gate(params)
         if method == "bus.note":
             return self.bus.note(params)
         if method == "bus.ask":

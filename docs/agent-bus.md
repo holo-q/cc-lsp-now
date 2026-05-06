@@ -8,18 +8,21 @@ needing a lock ritual.
 The core idea is simple:
 
 ```text
-append events -> open timed questions -> inject compact digests at bus stops
+append events -> hold tickets -> ask/chat -> inject compact digests at bus stops
 ```
 
-No hard blocking is part of the first slice. Claims, leases, and permission
-gates are the wrong default because they invite bypass behavior and agent
-fights. The bus changes the environment by making the relevant nearby motion
-visible.
+The bus is not a file lock manager. Tickets are project-level work signals:
+they tell other agents "someone is actively changing the substrate" and let
+build wrappers wait for a quiet or mutually-waiting moment. The build gate is
+the one intentional stop sign, and it is silent: it does not append a board
+event or broadcast pressure to hurry a worker.
 
 ## Goals
 
 - Give parallel agents a compressed signal about overlapping work.
 - Let agents ask short coordination questions with a timeout.
+- Let agents announce and release active work without claiming files.
+- Keep build commands from racing active edits unless every holder is waiting.
 - Surface related edits, tests, commits, notes, and replies at hook boundaries.
 - Keep the public model line-oriented and easy for an agent to scan.
 - Preserve provenance: workspace, git head, agent/session, files, symbols, and
@@ -76,6 +79,11 @@ Initial event types:
 | `test.ran` | A verifier command ran with pass/fail and target names. |
 | `commit.created` | Git history advanced. |
 | `note.posted` | Human or agent message intended for nearby workers. |
+| `ticket.started` | First agent began working on a project ticket. |
+| `ticket.joined` | Another agent joined an existing ticket with the same message. |
+| `ticket.released` | An agent released its current ticket. |
+| `ticket.closed` | The last holder released a ticket. |
+| `chat.message` | Workgroup chat row not attached to a question. |
 | `bus.ask` | Timed coordination question opened. |
 | `bus.reply` | Reply attached to an open question. |
 | `bus.closed` | Question timeout elapsed and digest was emitted. |
@@ -127,6 +135,69 @@ suggest:
 
 The timeout is coordination pressure, not a lock. If nobody replies, the opener
 still gets useful telemetry about what moved nearby during the window.
+
+## Tickets And Build Gate
+
+Every active worker should hold one current ticket. Starting a ticket is the
+agent's "I am changing the project" signal:
+
+```text
+hsp.ticket("wire workgroup ticket state", files="src/hsp/agent_bus.py")
+```
+
+Passing an empty message releases the agent's current ticket:
+
+```text
+hsp.ticket("")
+```
+
+The broker coalesces identical messages in the same workspace. The first holder
+emits `ticket.started`; later holders emit `ticket.joined`; release emits
+`ticket.released`; the last release also emits `ticket.closed`. The current
+implementation intentionally keeps one ticket per agent because the ergonomic
+unit is "what am I doing now?", not a stack of claims to remember.
+
+Build wrappers call the gate before running expensive or state-sensitive
+commands:
+
+```text
+hsp.build_gate("cargo test", timeout="2m")
+```
+
+The tool waits and returns `unlocked` when there are no active ticket holders, or when
+every current holder has also reached the build gate and is waiting. That second
+case prevents deadlock: if all agents independently arrived at "I need the
+build", the build can proceed. Calling the gate is not written to the journal
+and is not broadcast; it should not rush active editors.
+
+When an agent starts a new ticket, its stale build-wait marker is cleared. This
+keeps an old "waiting for build" state from accidentally unlocking a later
+build while the same agent is editing again.
+
+## Journal And Chat
+
+`hsp.journal()` displays the compact shared board: open tickets, open questions,
+and the latest rows, defaulting to roughly the last 25 events. Rows should stay
+one line where possible:
+
+```text
+journal: 4
+  E1 ticket.started wire workgroup ticket state [files=src/hsp/agent_bus.py]
+  E2 note.posted lsp route warmed
+```
+
+`hsp.chat("...")` is the workgroup chat verb. With no id it appends
+`chat.message`; with an ask id it records `bus.reply` and closes the question
+immediately:
+
+```text
+hsp.chat("all ticket holders are waiting", id="Q3")
+```
+
+`hsp.ask("...", timeout="2m")` is the waiting form for agents that need a reply.
+It opens `bus.ask`, waits until a matching `chat(..., id="Qn")` arrives or the
+timeout elapses, and returns the latest journal on timeout. This makes
+coordination a treadmill: ask, wait briefly, read the board, continue.
 
 ## Board Messages
 
@@ -184,6 +255,10 @@ small:
 | `note` | Post a visible note without a timeout. |
 | `ask` | Open a timed bus question. |
 | `reply` | Attach a reply to an open question. |
+| `chat` | Post a chat row, optionally replying to and closing an ask id. |
+| `ticket` | Start/join this agent's current work ticket, or release with an empty message. |
+| `journal` | Show open tickets/questions and the latest compact event rows. |
+| `build_gate` | Quietly wait until a build can proceed or the timeout elapses. |
 | `recent` | Show recent related bus activity. |
 | `settle` | Close expired questions and show pending digests. |
 | `precommit` | Summarize touched files, overlaps, related edits, and suggested checks. |
@@ -220,6 +295,11 @@ event stream.
 hsp log weather
 hsp log recent
 hsp log settle
+hsp log ticket --message "wire workgroup ticket state" --files src/hsp/agent_bus.py
+hsp log ticket --message ""
+hsp log journal
+hsp log chat --id Q3 --message "all holders waiting"
+hsp log build_gate --message "cargo test" --timeout 2m
 hsp log note --message "..." --files src/server.py
 hsp log ask --message "Anyone touching server.py?" --files src/server.py --timeout 3m
 hsp log reply --id Q3 --message "done"
@@ -332,9 +412,12 @@ The initial implementation is broker-backed and intentionally advisory:
    append-only JSONL persistence at `tmp/hsp-bus.jsonl`, and compact
    digest queries.
 3. `BrokerDaemon` exposes `bus.event`, `bus.note`, `bus.ask`, `bus.reply`,
-   `bus.recent`, `bus.settle`, `bus.precommit`, `bus.postcommit`,
-   `bus.weather`, and `bus.status`.
-4. The MCP surface is `lsp_log(action="event|note|ask|reply|recent|settle|precommit|postcommit|weather")`.
+   `bus.chat`, `bus.ticket`, `bus.journal`, `bus.build_gate`, `bus.recent`,
+   `bus.settle`, `bus.precommit`, `bus.postcommit`, `bus.weather`, and
+   `bus.status`.
+4. The MCP surface is `lsp_log(action="event|note|ask|reply|chat|ticket|journal|build_gate|recent|settle|precommit|postcommit|weather")`,
+   plus short tools `hsp.ticket`, `hsp.journal`, `hsp.ask`, `hsp.chat`, and
+   `hsp.build_gate`.
 5. `LSP_DEVTOOLS=1` registers the live broker, bus, registry, and LSP
    manager with `python-devtools` under app id `hsp-broker` by default,
    so agents can inspect daemon state without adding bespoke debug endpoints.
@@ -348,17 +431,18 @@ a single `hsp` binary. The shape is:
 1. No new binary. `log` and `hook` are subcommands on `hsp`; there is no
    `hsp-log` or `hsp-hook`. One entrypoint keeps install paths, broker
    discovery, and socket auth identical between the MCP server and hooks.
-2. The subcommand mirrors `lsp_log` actions one-to-one (`weather`, `recent`,
-   `settle`, `note`, `ask`, `reply`, `hook`, `precommit`, `postcommit`,
-   `event`), so any MCP example translates directly to a shell hook body.
+2. The subcommand mirrors `lsp_log` actions one-to-one (`weather`, `journal`,
+   `recent`, `settle`, `ticket`, `chat`, `note`, `ask`, `reply`, `hook`,
+   `build_gate`, `precommit`, `postcommit`, `event`), so any MCP example
+   translates directly to a shell hook body.
 3. Bundled plugin hooks are opt-in with `HSP_HOOKS=1` and no-op otherwise.
 4. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
    before/after, test result, git commit before/after, and push before/after.
    The broker decides per-stop whether the digest is worth printing; silent
    exit is the common case.
-5. Stays warn-only: no claims, no blocking, no non-zero exit codes for
-   coordination. Hook bodies that pipe `hsp log` output through must
-   not interpret it as a gate.
+5. Stays warn-first: no file claims and no edit denial. `build_gate` is the
+   explicit quiet build stop; hook bodies that pipe other `hsp log` output
+   through must not interpret it as a gate.
 6. Timed questions (`ask`/`reply`) layer on top of the same stops: open
    questions whose scope overlaps the current stop append a compact reminder,
    and at timeout the next stop emits the closing digest.

@@ -23,6 +23,40 @@ from hsp.bus_presence import PresenceEntry, PresenceTracker
 
 
 DEFAULT_RECENT_LIMIT = 20
+DEFAULT_JOURNAL_LIMIT = 25
+
+
+@dataclass
+class BusTicket:
+    ticket_id: str
+    message: str
+    workspace_root: str
+    opened_at: float
+    holders: dict[str, float] = field(default_factory=dict)
+    closed_at: float | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.closed_at is None
+
+    def to_wire(self, now: float | None = None) -> dict[str, Any]:
+        now = time.time() if now is None else now
+        return {
+            "ticket_id": self.ticket_id,
+            "message": self.message,
+            "workspace_root": self.workspace_root,
+            "opened_at": self.opened_at,
+            "closed_at": self.closed_at,
+            "holder_count": len(self.holders),
+            "holders": [
+                {
+                    "agent_id": agent_id,
+                    "started_at": started_at,
+                    "seconds": max(0.0, now - started_at),
+                }
+                for agent_id, started_at in sorted(self.holders.items())
+            ],
+        }
 
 
 @dataclass
@@ -75,9 +109,13 @@ class AgentBus:
     def __init__(self) -> None:
         self._events: list[BusEvent] = []
         self._questions: dict[str, BusQuestion] = {}
+        self._tickets: dict[str, BusTicket] = {}
+        self._agent_tickets: dict[str, str] = {}
+        self._build_waiters: dict[str, set[str]] = {}
         self._presence = PresenceTracker()
         self._next_event_id = 1
         self._next_question_id = 1
+        self._next_ticket_id = 1
         self._lock = RLock()
 
     def status(self) -> dict[str, Any]:
@@ -88,6 +126,7 @@ class AgentBus:
                 "last_event_id": self._events[-1].event_id if self._events else "",
                 "open_question_count": len(open_questions),
                 "open_questions": [q.to_wire() for q in open_questions],
+                "open_ticket_count": len([t for t in self._tickets.values() if t.is_open]),
                 "agent_count": len(self._presence.visible(time.time())),
             }
 
@@ -122,6 +161,136 @@ class AgentBus:
 
     def note(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"event": _event_wire(self._append(BusEventKind.NOTE_POSTED.value, params))}
+
+    def ticket(self, params: dict[str, Any]) -> dict[str, Any]:
+        root = _workspace_root(params)
+        agent_id = _agent_id(params)
+        message = _string(params.get("message")).strip()
+        if not agent_id:
+            raise ValueError("ticket requires agent_id, client_id, or session_id")
+        with self._lock:
+            if not message:
+                return self._release_agent_ticket_locked(root, agent_id, params)
+            current = self._tickets.get(self._agent_tickets.get(agent_id, ""))
+            if (
+                current is not None
+                and current.is_open
+                and current.workspace_root == root
+                and current.message == message
+            ):
+                now = time.time()
+                current.holders[agent_id] = now
+                return {
+                    "ticket": current.to_wire(now),
+                    "active_tickets": self._active_ticket_wires_locked(root, now),
+                }
+            self._release_agent_ticket_locked(root, agent_id, params)
+            waiters = self._build_waiters.get(root)
+            if waiters is not None:
+                waiters.discard(agent_id)
+            ticket = self._find_ticket_locked(root, message)
+            now = time.time()
+            kind = BusEventKind.TICKET_JOINED.value
+            if ticket is None:
+                ticket_id = f"T{self._next_ticket_id}"
+                self._next_ticket_id += 1
+                ticket = BusTicket(
+                    ticket_id=ticket_id,
+                    message=message,
+                    workspace_root=root,
+                    opened_at=now,
+                )
+                self._tickets[ticket_id] = ticket
+                kind = BusEventKind.TICKET_STARTED.value
+            ticket.holders[agent_id] = now
+            self._agent_tickets[agent_id] = ticket.ticket_id
+            self._append_locked(
+                kind,
+                {
+                    **params,
+                    "workspace_root": root,
+                    "message": message,
+                    "metadata": {"ticket_id": ticket.ticket_id},
+                },
+                now=now,
+            )
+            return {
+                "ticket": ticket.to_wire(now),
+                "active_tickets": self._active_ticket_wires_locked(root, now),
+            }
+
+    def journal(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.settle(params)
+        root = _workspace_root(params)
+        limit = max(1, min(_int(params.get("limit"), DEFAULT_JOURNAL_LIMIT), 100))
+        with self._lock:
+            events = [event for event in self._events if event.workspace_root == root]
+            return {
+                "workspace_root": root,
+                "events": [_event_wire(event) for event in events[-limit:]],
+                "active_tickets": self._active_ticket_wires_locked(root),
+                "open_questions": [
+                    question.to_wire()
+                    for question in self._questions.values()
+                    if question.is_open and question.workspace_root == root
+                ],
+            }
+
+    def chat(self, params: dict[str, Any]) -> dict[str, Any]:
+        question_id = _string(params.get("id")) or _string(params.get("question_id"))
+        if question_id:
+            with self._lock:
+                question = self._questions.get(question_id)
+                if question is None:
+                    raise ValueError(f"unknown question: {question_id}")
+                params = dict(params)
+                params["question_id"] = question_id
+                event = self._append_locked(BusEventKind.BUS_REPLY.value, params)
+                question.replies.append(event.seq)
+                question.closed_at = event.timestamp
+                return {
+                    "event": _event_wire(event),
+                    "question": question.to_wire(event.timestamp),
+                    "journal": self.journal(params),
+                }
+        event = self._append(BusEventKind.CHAT_MESSAGE.value, params)
+        return {"event": _event_wire(event), "journal": self.journal(params)}
+
+    def question(self, params: dict[str, Any]) -> dict[str, Any]:
+        question_id = _string(params.get("id")) or _string(params.get("question_id"))
+        if not question_id:
+            raise ValueError("question requires id or question_id")
+        with self._lock:
+            question = self._questions.get(question_id)
+            if question is None:
+                raise ValueError(f"unknown question: {question_id}")
+            replies = [
+                _event_wire(event)
+                for event in self._events
+                if event.question_id == question_id
+                and event.kind is BusEventKind.BUS_REPLY
+            ]
+            return {"question": question.to_wire(), "replies": replies}
+
+    def build_gate(self, params: dict[str, Any]) -> dict[str, Any]:
+        root = _workspace_root(params)
+        agent_id = _agent_id(params)
+        with self._lock:
+            if agent_id:
+                self._build_waiters.setdefault(root, set()).add(agent_id)
+            tickets = [ticket for ticket in self._tickets.values() if ticket.workspace_root == root and ticket.is_open]
+            holders = sorted({agent for ticket in tickets for agent in ticket.holders})
+            waiters = self._build_waiters.get(root, set())
+            unlocked = not holders or all(agent in waiters for agent in holders)
+            waiting_holders = sorted(agent for agent in waiters if agent in holders)
+            return {
+                "workspace_root": root,
+                "unlocked": unlocked,
+                "reason": "clear" if not holders else "all_waiting" if unlocked else "active_tickets",
+                "holders": holders,
+                "waiting": waiting_holders,
+                "active_tickets": [ticket.to_wire() for ticket in tickets],
+            }
 
     def ask(self, params: dict[str, Any]) -> dict[str, Any]:
         timeout_seconds = _timeout_seconds(params.get("timeout"), default=180.0)
@@ -307,6 +476,67 @@ class AgentBus:
         _append_jsonl(root, event.to_wire())
         return event
 
+    def _find_ticket_locked(self, root: str, message: str) -> BusTicket | None:
+        for ticket in self._tickets.values():
+            if ticket.workspace_root == root and ticket.message == message and ticket.is_open:
+                return ticket
+        return None
+
+    def _release_agent_ticket_locked(
+        self,
+        root: str,
+        agent_id: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        ticket_id = self._agent_tickets.pop(agent_id, "")
+        if not ticket_id:
+            return {"released": [], "active_tickets": self._active_ticket_wires_locked(root)}
+        ticket = self._tickets.get(ticket_id)
+        if ticket is None or not ticket.is_open:
+            return {"released": [], "active_tickets": self._active_ticket_wires_locked(root)}
+        ticket.holders.pop(agent_id, None)
+        now = time.time()
+        event_root = ticket.workspace_root
+        event = self._append_locked(
+            BusEventKind.TICKET_RELEASED.value,
+            {
+                **params,
+                "workspace_root": event_root,
+                "message": ticket.message,
+                "metadata": {"ticket_id": ticket.ticket_id},
+            },
+            now=now,
+        )
+        closed_event: BusEvent | None = None
+        if not ticket.holders:
+            ticket.closed_at = now
+            closed_event = self._append_locked(
+                BusEventKind.TICKET_CLOSED.value,
+                {
+                    **params,
+                    "workspace_root": event_root,
+                    "message": ticket.message,
+                    "metadata": {"ticket_id": ticket.ticket_id},
+                },
+                now=now,
+            )
+        return {
+            "released": [_event_wire(event), *([_event_wire(closed_event)] if closed_event else [])],
+            "ticket": ticket.to_wire(now),
+            "active_tickets": self._active_ticket_wires_locked(root, now),
+        }
+
+    def _active_ticket_wires_locked(
+        self,
+        root: str,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        return [
+            ticket.to_wire(now)
+            for ticket in self._tickets.values()
+            if ticket.workspace_root == root and ticket.is_open
+        ]
+
     def _digest_for_question(
         self,
         question: BusQuestion,
@@ -354,6 +584,14 @@ def _strings(value: Any) -> list[str]:
 
 def _string(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _agent_id(params: dict[str, Any]) -> str:
+    return (
+        _string(params.get("agent_id"))
+        or _string(params.get("client_id"))
+        or _string(params.get("session_id"))
+    )
 
 
 def _metadata(value: Any) -> dict[str, Any]:
@@ -466,4 +704,4 @@ def _append_jsonl(workspace_root: str, payload: dict[str, Any]) -> None:
         return
 
 
-__all__ = ["AgentBus", "BusEvent", "BusQuestion"]
+__all__ = ["AgentBus", "BusEvent", "BusQuestion", "BusTicket"]

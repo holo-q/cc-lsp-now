@@ -166,6 +166,23 @@ class LspLogRegistryTests(unittest.TestCase):
             "means the tool registers a stale alias",
         )
 
+    def test_team_tools_register_as_hsp_capability_free_verbs(self) -> None:
+        expected = {
+            "ticket": "hsp/ticket",
+            "journal": "hsp/journal",
+            "ask": "hsp/ask",
+            "chat": "hsp/chat",
+            "build_gate": "hsp/build_gate",
+        }
+        for name, method in expected.items():
+            with self.subTest(name=name):
+                self.assertIn(name, _ALL_TOOLS)
+                func, registered = _ALL_TOOLS[name]
+                self.assertIs(func, getattr(_server, name))
+                self.assertEqual(registered, method)
+                self.assertIn(name, TOOL_CAPABILITIES)
+                self.assertIsNone(TOOL_CAPABILITIES[name])
+
 
 class LspLogDefensiveTests(_LocalBusFixture):
     """Bad input from an agent (or hook) must surface as a string so the
@@ -278,6 +295,67 @@ class LspLogAskFlowTests(_LocalBusFixture):
         ))
         # Bubbles ValueError("unknown question: ...") from AgentBus.reply.
         self.assertIn("QNOPE", result)
+
+
+class TeamToolFlowTests(_LocalBusFixture):
+    """The short MCP names are the agent treadmill surface.
+
+    ``ticket`` announces work and feeds the build gate, ``journal`` is the
+    compact board, and ``chat(id=Qn)`` is the reply that wakes a waiting ask.
+    """
+
+    def test_ticket_journal_and_build_gate_short_tools(self) -> None:
+        ticket = _run(_server.ticket("wire build gate", files="src/hsp/server.py"))
+        gate = _run(_server.build_gate("uv run python -m unittest"))
+        journal = _run(_server.journal(limit=10))
+
+        self.assertIn("ticket T1", ticket)
+        self.assertIn("active tickets: 1", ticket)
+        self.assertIn("build gate: unlocked", gate)
+        self.assertIn("journal:", journal)
+        self.assertIn("ticket.started", journal)
+
+    def test_lsp_log_ticket_action_releases_current_ticket(self) -> None:
+        _run(_server.lsp_log(action="ticket", message="wire release"))
+
+        released = _run(_server.lsp_log(action="ticket", message=""))
+
+        self.assertIn("ticket released", released)
+        self.assertIn("ticket.closed", released)
+
+    def test_chat_short_tool_unlocks_question(self) -> None:
+        opened = _run(_server.lsp_log(action="ask", message="Proceed?", timeout="30s"))
+        qid = next(token.strip("():,") for token in opened.split() if token.startswith("Q"))
+
+        reply = _run(_server.chat("go", id=qid))
+
+        self.assertIn(f"unlocked {qid}", reply)
+        self.assertIn("bus.reply", reply)
+
+    def test_ask_short_tool_times_out_with_latest_journal(self) -> None:
+        result = _run(_server.ask("Anybody still editing?", timeout="1ms"))
+
+        self.assertIn("timed out", result)
+        self.assertIn("journal:", result)
+
+    def test_build_gate_times_out_when_ticket_holders_are_still_editing(self) -> None:
+        assert _server._local_bus is not None
+        _server._local_bus.ticket({
+            "workspace_root": os.getcwd(),
+            "agent_id": "agent-a",
+            "message": "edit a",
+        })
+        _server._local_bus.ticket({
+            "workspace_root": os.getcwd(),
+            "agent_id": "agent-b",
+            "message": "edit b",
+        })
+
+        result = _run(_server.build_gate("cargo test", timeout="1ms"))
+
+        self.assertIn("timed out", result)
+        self.assertIn("build gate: waiting", result)
+        self.assertIn("active_tickets", result)
 
 
 class LspLogBrokerRoutingTests(unittest.TestCase):
