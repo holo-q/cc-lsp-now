@@ -26,6 +26,7 @@ from hsp import server
 from hsp.broker import BrokerError, broker_log_path, socket_path
 from hsp.broker_client import BrokerClient
 from hsp.bus_registry import BrokerMode, log_path_for, workspace_id_for
+from hsp.workgroup import ScopeContext, project_root_for, scope_context_for
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"", "0", "false", "no", "off"}
@@ -378,17 +379,22 @@ def _workgroup_block(
     start_broker: bool,
     include_lsp: bool,
 ) -> str:
-    root = _workgroup_root_for_location(location)
+    scope = scope_context_for(location)
+    root = scope.active_workgroup_root
     wsid = workspace_id_for(root)
     lines = [
         f"workgroup: {root}",
         f"location: {Path(location).expanduser()}",
+        f"workgroup_source: {'fallback' if scope.fallback_workgroup else 'marker'}",
         f"workspace_id: {wsid}",
+        f"project: {scope.project_root}",
+        "gate policy: build=project checker=file/project journal=workgroup",
         f"env LSP_ROOT: {os.environ.get('LSP_ROOT', '(unset)')}",
         f"broker mode: {server._broker_mode()}",
         f"broker socket: {socket_path()}",
         f"broker log: {broker_log_path()}",
     ]
+    lines.extend(_workgroup_stack_lines(scope))
     lines.extend(_workgroup_log_lines(root))
     lines.extend(_workgroup_broker_lines(root, limit=limit, start_broker=start_broker))
     if include_lsp:
@@ -397,16 +403,18 @@ def _workgroup_block(
     return "\n".join(lines)
 
 
+def _workgroup_stack_lines(scope: ScopeContext) -> list[str]:
+    if not scope.workgroups:
+        return ["workgroup_stack: (none; ephemeral fallback)"]
+    lines = ["workgroup_stack:"]
+    for index, item in enumerate(scope.workgroups):
+        role = "active" if index == len(scope.workgroups) - 1 else "parent"
+        lines.append(f"  {role} {item.level} {item.name}: {item.root}")
+    return lines
+
+
 def _workgroup_root_for_location(location: str) -> str:
-    path = Path(location or ".").expanduser()
-    absolute = path if path.is_absolute() else Path.cwd() / path
-    try:
-        resolved = absolute.resolve(strict=False)
-    except OSError:
-        resolved = absolute.absolute()
-    if resolved.exists() and resolved.is_file():
-        resolved = resolved.parent
-    return str(resolved)
+    return scope_context_for(location).active_workgroup_root
 
 
 def _workgroup_log_lines(root: str) -> list[str]:
@@ -551,7 +559,7 @@ def _run_authoritative_build_batch(
     files: str,
     full_workspace: bool,
 ) -> dict[str, object]:
-    root = Path(os.environ.get("LSP_ROOT", os.getcwd())).resolve()
+    root = Path(project_root_for(os.environ.get("LSP_ROOT", os.getcwd()))).resolve()
     directory = root / "tmp" / "hsp-build-batches"
     directory.mkdir(parents=True, exist_ok=True)
     key = hashlib.sha256(f"{root}\n{command}\n{gate}".encode("utf-8")).hexdigest()[:24]
@@ -643,7 +651,7 @@ def _build_batch_denial_reason(result: dict[str, object]) -> str:
     stdout = _truncate_capture(str(result.get("stdout", "")))
     stderr = _truncate_capture(str(result.get("stderr", "")))
     lines = [
-        f"HSP build mutex {action} for the workgroup and denied duplicate Bash execution.",
+        f"HSP build mutex {action} for the project and denied duplicate Bash execution.",
         f"$ {command}",
         f"exit: {returncode}",
     ]

@@ -32,6 +32,7 @@ class BusTicket:
     message: str
     workspace_root: str
     opened_at: float
+    projects: tuple[str, ...] = ()
     files: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
@@ -50,6 +51,8 @@ class BusTicket:
             "workspace_root": self.workspace_root,
             "opened_at": self.opened_at,
             "closed_at": self.closed_at,
+            "projects": list(self.projects),
+            "project_roots": list(self.projects),
             "files": list(self.files),
             "symbols": list(self.symbols),
             "aliases": list(self.aliases),
@@ -188,15 +191,14 @@ class AgentBus:
                 current.files = _merge_scope(current.files, _strings(params.get("files")))
                 current.symbols = _merge_scope(current.symbols, _strings(params.get("symbols")))
                 current.aliases = _merge_scope(current.aliases, _strings(params.get("aliases")))
+                current.projects = _merge_scope(current.projects, _project_roots(params))
                 current.holders[agent_id] = now
                 return {
                     "ticket": current.to_wire(now),
                     "active_tickets": self._active_ticket_wires_locked(root, now),
                 }
             self._release_agent_ticket_locked(root, agent_id, params)
-            waiters = self._build_waiters.get(root)
-            if waiters is not None:
-                waiters.discard(agent_id)
+            self._discard_build_waiter_locked(root, agent_id)
             ticket = self._find_ticket_locked(root, message)
             now = time.time()
             kind = BusEventKind.TICKET_JOINED.value
@@ -208,6 +210,7 @@ class AgentBus:
                     message=message,
                     workspace_root=root,
                     opened_at=now,
+                    projects=tuple(_project_roots(params)),
                     files=tuple(_strings(params.get("files"))),
                     symbols=tuple(_strings(params.get("symbols"))),
                     aliases=tuple(_strings(params.get("aliases"))),
@@ -218,6 +221,7 @@ class AgentBus:
                 ticket.files = _merge_scope(ticket.files, _strings(params.get("files")))
                 ticket.symbols = _merge_scope(ticket.symbols, _strings(params.get("symbols")))
                 ticket.aliases = _merge_scope(ticket.aliases, _strings(params.get("aliases")))
+                ticket.projects = _merge_scope(ticket.projects, _project_roots(params))
             ticket.holders[agent_id] = now
             self._agent_tickets[agent_id] = ticket.ticket_id
             self._append_locked(
@@ -294,15 +298,18 @@ class AgentBus:
         files = _strings(params.get("files"))
         symbols = _strings(params.get("symbols"))
         aliases = _strings(params.get("aliases"))
+        projects = _project_roots(params)
+        gate_key = _build_gate_key(root, projects)
         full_workspace = bool(params.get("full_workspace", False)) or not (files or symbols or aliases)
         with self._lock:
             if agent_id:
-                self._build_waiters.setdefault(root, set()).add(agent_id)
+                self._build_waiters.setdefault(gate_key, set()).add(agent_id)
             tickets = [
                 ticket
                 for ticket in self._tickets.values()
                 if ticket.workspace_root == root
                 and ticket.is_open
+                and _ticket_blocks_project(ticket, projects)
                 and _ticket_blocks_scope(
                     ticket,
                     full_workspace=full_workspace,
@@ -312,17 +319,20 @@ class AgentBus:
                 )
             ]
             holders = sorted({agent for ticket in tickets for agent in ticket.holders})
-            waiters = self._build_waiters.get(root, set())
+            waiters = self._build_waiters.get(gate_key, set())
             unlocked = not holders or all(agent in waiters for agent in holders)
             waiting_holders = sorted(agent for agent in waiters if agent in holders)
             return {
                 "workspace_root": root,
+                "gate_key": gate_key,
                 "unlocked": unlocked,
                 "reason": "clear" if not holders else "all_waiting" if unlocked else "active_tickets",
                 "holders": holders,
                 "waiting": waiting_holders,
                 "active_tickets": [ticket.to_wire() for ticket in tickets],
                 "full_workspace": full_workspace,
+                "projects": projects,
+                "project_roots": projects,
                 "files": files,
                 "symbols": symbols,
                 "aliases": aliases,
@@ -610,6 +620,14 @@ class AgentBus:
             "active_tickets": self._active_ticket_wires_locked(root, now),
         }
 
+    def _discard_build_waiter_locked(self, root: str, agent_id: str) -> None:
+        prefix = f"{root}\n"
+        for key, waiters in list(self._build_waiters.items()):
+            if key == root or key.startswith(prefix):
+                waiters.discard(agent_id)
+                if not waiters:
+                    self._build_waiters.pop(key, None)
+
     def _active_ticket_wires_locked(
         self,
         root: str,
@@ -680,6 +698,27 @@ def _merge_scope(existing: tuple[str, ...], incoming: list[str]) -> tuple[str, .
         if item not in items:
             items.append(item)
     return tuple(items)
+
+
+def _project_roots(params: dict[str, Any]) -> list[str]:
+    roots = _strings(params.get("project_roots"))
+    if roots:
+        return roots
+    return _strings(params.get("projects"))
+
+
+def _build_gate_key(root: str, projects: list[str]) -> str:
+    if not projects:
+        return root
+    return root + "\n" + "\n".join(sorted(projects))
+
+
+def _ticket_blocks_project(ticket: BusTicket, projects: list[str]) -> bool:
+    if not projects:
+        return True
+    if not ticket.projects:
+        return True
+    return _scope_items_overlap(ticket.projects, projects)
 
 
 def _ticket_blocks_scope(

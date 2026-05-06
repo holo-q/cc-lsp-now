@@ -61,15 +61,15 @@ Status legend:
 
 ## Current Workgroup Detection
 
-The team bus does not currently walk for `workgroup.toml`. The bus key is:
+HSP now discovers a workgroup stack by walking upward for `workgroup.toml` or
+`.hsp/workgroup.toml`. The deepest marker is the active workgroup; parent
+markers remain visible as escalation context. If no marker exists, the process
+cwd or `$LSP_ROOT` becomes an ephemeral single-session workgroup.
 
-```text
-workspace_root = $LSP_ROOT if set, otherwise os.getcwd()
-```
-
-That root owns tickets, journal, presence, ask/chat, gates, and
-`tmp/hsp-bus.jsonl`. The LSP side separately detects project/session roots with
-route markers such as:
+The active workgroup owns presence, journal, tickets, ask/chat, and the bus log.
+Build and checker gates use the same workgroup for social context, but narrow
+their mutex key to the detected project/check scope. Project roots are detected
+separately from language/build markers such as:
 
 | Route | Markers |
 |-------|---------|
@@ -77,16 +77,21 @@ route markers such as:
 | C# | `*.sln`, `*.csproj`, `Directory.Build.props`, `global.json`, `.git` |
 | Rust | `Cargo.toml`, `rust-project.json`, `.git` |
 
-If no explicit workgroup marker exists, HSP still has a workspace: the process
-cwd or `LSP_ROOT`. If the broker is enabled and reachable, agents with the same
-root share the workgroup. If broker mode is off or falls back locally, the
-workgroup is process-local and effectively ephemeral.
+`hsp` prints both layers so agents can see the current policy:
+
+```text
+workgroup_stack:
+  parent umbrella umbrella: /workspace
+  active domain domain: /workspace/domain
+project: /workspace/domain/app
+gate policy: build=project checker=file/project journal=workgroup
+```
 
 ## Ticket Register
 
 | Ticket | Priority | Status | Description |
 |--------|----------|--------|-------------|
-| `WG-001` | high | open | Add explicit workgroup discovery (`workgroup.toml` / `.hsp/workgroup.toml`) and make bus root selection visible in `weather`. Decide precedence against `$LSP_ROOT` and LSP route roots. |
+| `WG-001` | high | wired | Explicit workgroup discovery (`workgroup.toml` / `.hsp/workgroup.toml`) and visible hierarchy in `hsp workgroup`; remaining work is richer config policy. |
 | `WG-002` | high | open | Define a Codex `apply_patch` interception strategy. Current HSP cannot deny Codex edits because no repo hook path observes that tool. |
 | `WG-003` | high | open | Add an HSP Codex hook/plugin adapter if the harness supports shell/tool hooks; map shell commands to `hsp hook` and document unsupported events. |
 | `WG-004` | high | open | Make tool-output traffic injection explicit: one compact workgroup header/digest per HSP tool result, with a frontier to avoid repeated journal spam. |

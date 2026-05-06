@@ -60,7 +60,7 @@ class _LocalBusFixture(unittest.TestCase):
     def setUp(self) -> None:
         self._env_patch = patch.dict(
             os.environ,
-            {"HSP_BROKER": "off", "LSP_ROOT": os.getcwd()},
+            {"HSP_BROKER": "off", "LSP_ROOT": os.getcwd(), "HSP_WORKGROUP_ROOT": os.getcwd()},
             clear=False,
         )
         self._env_patch.start()
@@ -451,7 +451,12 @@ class LspLogBrokerRoutingTests(unittest.TestCase):
     def test_broker_on_failure_surfaces_error_string(self) -> None:
         with patch.dict(
             os.environ,
-            {"HSP_BROKER": "on", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
+            {
+                "HSP_BROKER": "on",
+                "LSP_SERVERS": "fake-ls",
+                "LSP_ROOT": os.getcwd(),
+                "HSP_WORKGROUP_ROOT": os.getcwd(),
+            },
             clear=False,
         ):
             with patch.object(
@@ -468,7 +473,12 @@ class LspLogBrokerRoutingTests(unittest.TestCase):
     def test_broker_auto_falls_back_to_local_bus(self) -> None:
         with patch.dict(
             os.environ,
-            {"HSP_BROKER": "auto", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
+            {
+                "HSP_BROKER": "auto",
+                "LSP_SERVERS": "fake-ls",
+                "LSP_ROOT": os.getcwd(),
+                "HSP_WORKGROUP_ROOT": os.getcwd(),
+            },
             clear=False,
         ):
             with patch.object(
@@ -485,7 +495,12 @@ class LspLogBrokerRoutingTests(unittest.TestCase):
     def test_broker_off_uses_local_bus_directly(self) -> None:
         with patch.dict(
             os.environ,
-            {"HSP_BROKER": "off", "LSP_SERVERS": "fake-ls", "LSP_ROOT": os.getcwd()},
+            {
+                "HSP_BROKER": "off",
+                "LSP_SERVERS": "fake-ls",
+                "LSP_ROOT": os.getcwd(),
+                "HSP_WORKGROUP_ROOT": os.getcwd(),
+            },
             clear=False,
         ):
             with patch.object(

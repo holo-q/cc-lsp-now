@@ -42,6 +42,7 @@ from hsp.pending_buffer import DEFAULT_STAGE_HANDLE, PendingBook, PendingBuffer
 from hsp.router import BUILTIN_ROUTES, LanguageRoute, get_route, has_marker, resolve_route_id_for_path
 from hsp.render_memory import AliasError, AliasIdentity, AliasKind, AliasRecord, RenderMemory
 from hsp.warmup_stats import WarmupStats
+from hsp.workgroup import scope_context_for
 
 log = logging.getLogger(__name__)
 
@@ -899,14 +900,16 @@ def _bus_params(
     ``commit`` similarly lands in ``metadata.commit`` so post-commit
     digests can name the SHA without inflating the top-level shape.
     """
+    scope = scope_context_for(os.environ.get("LSP_ROOT", os.getcwd()))
     payload: dict[str, object] = {
-        "workspace_root": os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd())),
+        "workspace_root": scope.active_workgroup_root,
         "agent_id": os.environ.get("HSP_AGENT_ID", _client_id),
         "session_id": _client_id,
         "message": message,
         "files": _parse_bus_scope(files),
         "symbols": _parse_bus_scope(symbols),
         "aliases": _parse_bus_scope(aliases),
+        "project_roots": [scope.project_root],
     }
     chosen_kind = kind or event_type
     if chosen_kind and action == "event":
@@ -925,6 +928,12 @@ def _bus_params(
         meta["targets"] = _parse_bus_scope(targets)
     if commit:
         meta["commit"] = commit
+    meta["project_roots"] = [scope.project_root]
+    if scope.workgroups:
+        meta["workgroup_stack"] = [
+            {"root": item.root, "name": item.name, "level": item.level}
+            for item in scope.workgroups
+        ]
     if meta:
         payload["metadata"] = meta
     return payload
@@ -1164,6 +1173,9 @@ def _render_build_gate(result: dict[str, object]) -> str:
         lines.append("scope: workspace")
     elif files:
         lines.append("scope: " + ", ".join(str(item) for item in files[:5]))
+    projects = _wire_list(result, "project_roots") or _wire_list(result, "projects")
+    if projects:
+        lines.append("projects: " + ", ".join(str(item) for item in projects[:5]))
     holders = _wire_list(result, "holders")
     waiting = _wire_list(result, "waiting")
     if holders:

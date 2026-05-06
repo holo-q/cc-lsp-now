@@ -229,6 +229,32 @@ class AgentBusPureTests(unittest.TestCase):
         self.assertFalse(gate["unlocked"])
         self.assertEqual(gate["holders"], ["agent-a"])
 
+    def test_build_gate_is_project_scoped_inside_one_workgroup(self) -> None:
+        bus = AgentBus()
+        bus.ticket({
+            "workspace_root": "/workspace/domain",
+            "agent_id": "agent-a",
+            "message": "edit app",
+            "project_roots": ["/workspace/domain/app"],
+        })
+
+        unrelated = bus.build_gate({
+            "workspace_root": "/workspace/domain",
+            "agent_id": "agent-b",
+            "project_roots": ["/workspace/domain/service"],
+        })
+        related = bus.build_gate({
+            "workspace_root": "/workspace/domain",
+            "agent_id": "agent-b",
+            "project_roots": ["/workspace/domain/app"],
+        })
+
+        self.assertTrue(unrelated["unlocked"])
+        self.assertEqual(unrelated["holders"], [])
+        self.assertFalse(related["unlocked"])
+        self.assertEqual(related["holders"], ["agent-a"])
+        self.assertEqual(related["project_roots"], ["/workspace/domain/app"])
+
     def test_new_ticket_clears_stale_build_wait_state_for_agent(self) -> None:
         bus = AgentBus()
         bus.ticket({"workspace_root": "/repo", "agent_id": "agent-a", "message": "old ticket"})

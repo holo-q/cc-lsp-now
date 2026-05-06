@@ -169,9 +169,10 @@ hsp run -- cargo test
 ```
 
 The internal gate returns `unlocked` when there are no active ticket holders
-covering the checker scope, or when every current overlapping holder has also
-reached the build gate and is waiting. Workspace-wide commands such as
-`cargo check` with no path arguments cover the full workgroup. Path-scoped
+covering the project/checker scope, or when every current overlapping holder
+has also reached the build gate and is waiting. Workspace-wide commands such as
+`cargo check` with no path arguments cover the detected project root, not the
+whole social workgroup. Path-scoped
 commands such as `ruff check src/hsp/cli.py`, `pytest tests/foo.py`, or
 `go test ./pkg` wait only on active tickets whose files/symbols overlap that
 scope. Unknown-scope tickets still block scoped checkers because HSP cannot
@@ -539,13 +540,23 @@ enough to be implementation detail, but durable enough that agents and broker
 code can rely on them without re-litigating. Cross-cutting acceptance lives in
 `tests/test_agent_bus_contract.py`.
 
-### Workspace Auto-Detection
+### Workgroup And Project Auto-Detection
 
-`workspace_root` is the only sharding key. It is auto-detected from `$LSP_ROOT`
-if set, otherwise from the agent's current working directory (resolved via
-`os.path.abspath`). `workspace_id` is a short SHA-1 digest of the resolved root
-so the broker, JSONL log, and digest-frontier state all agree without depending
-on path normalization elsewhere.
+`workspace_root` is the active workgroup root. HSP discovers it by walking
+upward from `$LSP_ROOT` or cwd for `workgroup.toml` / `.hsp/workgroup.toml` and
+choosing the deepest marker. Parent workgroup markers form an escalation stack.
+If no marker exists, the resolved cwd or `$LSP_ROOT` becomes an ephemeral
+workgroup.
+
+Build and checker gates additionally carry `project_roots`, derived from
+language/build markers such as `Cargo.toml`, `pyproject.toml`, `package.json`,
+or solution files. Tickets stay visible in the workgroup journal, but build
+waiters are keyed by workgroup plus project root so two projects inside one
+domain workgroup do not block each other's compiles.
+
+`workspace_id` is a short digest of the active workgroup root so the broker,
+JSONL log, and digest-frontier state all agree without depending on path
+normalization elsewhere.
 
 LSP `config_hash` deliberately does **not** shard the bus. Two agents running
 different chains in the same repo (e.g. one with `ty` only, another with

@@ -82,9 +82,42 @@ class CliLogTests(unittest.TestCase):
             out = self._run(["workgroup", root], root=root)
 
         self.assertIn(f"workgroup: {Path(root).resolve()}", out)
+        self.assertIn("workgroup_source: fallback", out)
+        self.assertIn("gate policy: build=project checker=file/project journal=workgroup", out)
         self.assertIn("workspace_id:", out)
         self.assertIn("append log:", out)
         self.assertIn("broker: disabled", out)
+
+    def test_workgroup_command_reports_nested_stack_and_project_root(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            umbrella = Path(root)
+            domain = umbrella / "domain"
+            project = domain / "app"
+            project.mkdir(parents=True)
+            (umbrella / "workgroup.toml").write_text(
+                "[workgroup]\nname = 'umbrella'\nlevel = 'umbrella'\n",
+                encoding="utf-8",
+            )
+            (domain / "workgroup.toml").write_text(
+                "[workgroup]\nname = 'domain'\nlevel = 'domain'\n",
+                encoding="utf-8",
+            )
+            (project / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
+
+            out = self._run_with_env(
+                ["workgroup", str(project)],
+                {
+                    "HSP_BROKER": "off",
+                    "LSP_ROOT": root,
+                    "HSP_WORKGROUP_BOUNDARY": root,
+                },
+            )
+
+        self.assertIn(f"workgroup: {domain.resolve()}", out)
+        self.assertIn("workgroup_source: marker", out)
+        self.assertIn(f"project: {project.resolve()}", out)
+        self.assertIn(f"parent umbrella umbrella: {umbrella.resolve()}", out)
+        self.assertIn(f"active domain domain: {domain.resolve()}", out)
 
     def test_workgroup_command_counts_append_log_events(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
@@ -162,7 +195,11 @@ class CliLogTests(unittest.TestCase):
     def test_log_hook_requires_kind(self) -> None:
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory(dir="tmp") as root:
-            with patch.dict(os.environ, {"HSP_BROKER": "off", "LSP_ROOT": root}, clear=False):
+            with patch.dict(
+                os.environ,
+                {"HSP_BROKER": "off", "LSP_ROOT": root, "HSP_WORKGROUP_ROOT": root},
+                clear=False,
+            ):
                 with contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as cm:
                         hsp_main(["log", "hook", "--files", "src/server.py"])
@@ -427,10 +464,21 @@ class CliLogTests(unittest.TestCase):
         })
         completed = subprocess.CompletedProcess("cargo check", 0, stdout="finished\n", stderr="")
         with tempfile.TemporaryDirectory(dir="tmp") as root:
+            Path(root, "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
             server._local_bus = AgentBus()
-            server._local_bus.ticket({"workspace_root": root, "agent_id": "agent-a", "message": "edit a"})
-            server._local_bus.ticket({"workspace_root": root, "agent_id": "agent-b", "message": "edit b"})
-            server._local_bus.build_gate({"workspace_root": root, "agent_id": "agent-b"})
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "agent-a",
+                "message": "edit a",
+                "project_roots": [root],
+            })
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "agent-b",
+                "message": "edit b",
+                "project_roots": [root],
+            })
+            server._local_bus.build_gate({"workspace_root": root, "agent_id": "agent-b", "project_roots": [root]})
             with patch("hsp.cli.subprocess.run", return_value=completed) as run:
                 code, out, err = self._run_hook_code(
                     ["hook", "--kind", "tool.before"],
@@ -473,10 +521,21 @@ class CliLogTests(unittest.TestCase):
         })
         completed = subprocess.CompletedProcess("cargo check", 0, stdout="shared\n", stderr="")
         with tempfile.TemporaryDirectory(dir="tmp") as root:
+            Path(root, "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
             server._local_bus = AgentBus()
-            server._local_bus.ticket({"workspace_root": root, "agent_id": "agent-a", "message": "edit a"})
-            server._local_bus.ticket({"workspace_root": root, "agent_id": "agent-b", "message": "edit b"})
-            server._local_bus.build_gate({"workspace_root": root, "agent_id": "agent-b"})
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "agent-a",
+                "message": "edit a",
+                "project_roots": [root],
+            })
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "agent-b",
+                "message": "edit b",
+                "project_roots": [root],
+            })
+            server._local_bus.build_gate({"workspace_root": root, "agent_id": "agent-b", "project_roots": [root]})
             with patch("hsp.cli.subprocess.run", return_value=completed):
                 first_code, first_out, _first_err = self._run_hook_code(
                     ["hook", "--kind", "tool.before"],
@@ -649,10 +708,26 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(code, 0)
         return out
 
+    def _run_with_env(self, argv: list[str], env: dict[str, str]) -> str:
+        out = io.StringIO()
+        err = io.StringIO()
+        with patch.dict(os.environ, env, clear=False):
+            with contextlib.redirect_stdout(out):
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as cm:
+                        hsp_main(argv)
+        code = cm.exception.code
+        self.assertEqual(code if isinstance(code, int) else int(code or 0), 0, err.getvalue())
+        return out.getvalue()
+
     def _run_code(self, argv: list[str], *, root: str) -> tuple[int, str, str]:
         out = io.StringIO()
         err = io.StringIO()
-        with patch.dict(os.environ, {"HSP_BROKER": "off", "LSP_ROOT": root}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"HSP_BROKER": "off", "LSP_ROOT": root, "HSP_WORKGROUP_ROOT": root},
+            clear=False,
+        ):
             with contextlib.redirect_stdout(out):
                 with contextlib.redirect_stderr(err):
                     with self.assertRaises(SystemExit) as cm:
@@ -693,6 +768,7 @@ class CliLogTests(unittest.TestCase):
         env = {
             "HSP_BROKER": "off",
             "LSP_ROOT": root,
+            "HSP_WORKGROUP_ROOT": root,
             "HSP_HOOKS": "1" if enabled else "0",
         }
         if extra_env:
