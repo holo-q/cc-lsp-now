@@ -30,7 +30,7 @@ File arguments may be full paths, relative paths, or unique basenames. For examp
 
 ## Plugin Install Shape
 
-HSP now ships as one plugin with a router for Python and C# language routes. The MCP server runs with `HSP_ROUTER=1`; each request chooses a route from the target file extension or workspace markers, then keeps that route's LSP chain, method cache, warmup state, and broker session separate.
+HSP now ships as one plugin with a router for Python, C#, and Rust language routes. The MCP server runs with `HSP_ROUTER=1`; each request chooses a route from the target file extension or workspace markers, then keeps that route's LSP chain, method cache, warmup state, and broker session separate.
 
 Built-in routes:
 
@@ -38,8 +38,9 @@ Built-in routes:
 |---------|-----------|-------------------|
 | Python | `ty server;basedpyright-langserver --stdio` | `.py`, `.pyi`, `pyproject.toml`, `setup.py`, `setup.cfg` |
 | C# | `csharp-ls` | `.cs`, `*.sln`, `*.csproj`, `Directory.Build.props`, `global.json` |
+| Rust | `rust-analyzer` | `.rs`, `Cargo.toml`, `rust-project.json` |
 
-Set `HSP_ROUTE=python` or `HSP_ROUTE=csharp` to force a route for workspace-level operations where no file URI is available. Explicit `LSP_SERVERS` or legacy `LSP_COMMAND` still wins and keeps the old single-chain mode, so the split plugin repos continue to work while users migrate to the unified `hsp` plugin.
+Set `HSP_ROUTE=python`, `HSP_ROUTE=csharp`, or `HSP_ROUTE=rust` to force a route for workspace-level operations where no file URI is available. Explicit `LSP_SERVERS` or legacy `LSP_COMMAND` still wins and keeps the old single-chain mode, so the split plugin repos continue to work while users migrate to the unified `hsp` plugin.
 
 ## Legacy Split Plugins using hsp
 
@@ -138,7 +139,7 @@ Set in the `env` block of your `mcpServers` entry:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `HSP_ROUTER` | No | Set `1`/`true`/`on` in the unified plugin to let HSP select a builtin language route by file extension or project markers. Explicit `LSP_SERVERS`/`LSP_COMMAND` disables router mode. |
-| `HSP_ROUTE` | No | Force one builtin route (`python` or `csharp`) when router mode is enabled and a request has no target file URI. |
+| `HSP_ROUTE` | No | Force one builtin route (`python`, `csharp`, or `rust`) when router mode is enabled and a request has no target file URI. |
 | `HSP_HOOKS` | No | Enables bundled ambient bus hooks when set to `1`/`true`/`on`. The hooks ship inside the plugin and no-op before launching `uvx` by default, so turning this on records session, prompt, and edit bus events without manual hook installation. |
 | `LSP_SERVERS` | Required only for custom/legacy plugin configs | `;`-separated chain in priority order. Each entry is `<command> <args...>`. First = primary. Example: `ty server;basedpyright-langserver --stdio;pyright-langserver --stdio` |
 | `LSP_ROOT` | No | Workspace root path (defaults to cwd) |

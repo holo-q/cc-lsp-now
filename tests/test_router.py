@@ -23,6 +23,7 @@ class HspRouterResolutionTests(unittest.TestCase):
     def test_extension_selects_builtin_language_route(self) -> None:
         self.assertEqual(resolve_route_id_for_path(str(self.root / "pkg" / "model.py")), "python")
         self.assertEqual(resolve_route_id_for_path(str(self.root / "src" / "Program.cs")), "csharp")
+        self.assertEqual(resolve_route_id_for_path(str(self.root / "src" / "lib.rs")), "rust")
 
     def test_marker_globs_detect_csharp_project_roots(self) -> None:
         project = self.root / "dotnet"
@@ -38,6 +39,17 @@ class HspRouterResolutionTests(unittest.TestCase):
             server._bind_route_runtime("legacy")
             self.assertEqual(server._find_project_root(str(target)), str(project))
 
+    def test_rust_markers_detect_cargo_project_roots(self) -> None:
+        project = self.root / "rust"
+        src = project / "src"
+        src.mkdir(parents=True)
+        (project / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
+        target = src / "query.txt"
+        target.write_text("", encoding="utf-8")
+
+        self.assertEqual(find_project_root(str(target), ("Cargo.toml", "rust-project.json")), str(project))
+        self.assertEqual(resolve_route_id_for_path(str(target)), "rust")
+
     def test_generic_git_marker_does_not_make_workspace_route_ambiguous(self) -> None:
         project = self.root / "python"
         package = project / "pkg"
@@ -47,10 +59,11 @@ class HspRouterResolutionTests(unittest.TestCase):
 
         self.assertEqual(resolve_route_id_for_path(str(package)), "python")
 
-    def test_router_sends_python_and_csharp_to_separate_chains(self) -> None:
+    def test_router_sends_python_csharp_and_rust_to_separate_chains(self) -> None:
         with patch.dict("os.environ", {"HSP_ROUTER": "1"}, clear=True):
             py_uri = file_uri(str(self.root / "pkg" / "model.py"))
             cs_uri = file_uri(str(self.root / "src" / "Program.cs"))
+            rs_uri = file_uri(str(self.root / "src" / "lib.rs"))
 
             server._activate_route_for_uri(py_uri)
             python_chain = server._ensure_chain_configs()
@@ -60,6 +73,11 @@ class HspRouterResolutionTests(unittest.TestCase):
             server._activate_route_for_uri(cs_uri)
             csharp_chain = server._ensure_chain_configs()
             self.assertEqual([cfg.command for cfg in csharp_chain], ["csharp-ls"])
+            self.assertNotIn("workspace/willRenameFiles", server._method_handler)
+
+            server._activate_route_for_uri(rs_uri)
+            rust_chain = server._ensure_chain_configs()
+            self.assertEqual([cfg.command for cfg in rust_chain], ["rust-analyzer"])
             self.assertNotIn("workspace/willRenameFiles", server._method_handler)
 
             server._activate_route_for_uri(py_uri)

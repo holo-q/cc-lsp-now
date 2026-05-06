@@ -52,6 +52,20 @@ BUILTIN_ROUTES: dict[str, LanguageRoute] = {
             "LSP_LANGUAGE": "csharp",
         },
     ),
+    "rust": LanguageRoute(
+        route_id="rust",
+        language="rust",
+        display_name="Rust",
+        extensions=(".rs",),
+        markers=("Cargo.toml", "rust-project.json", ".git"),
+        env={
+            "LSP_SERVERS": "rust-analyzer",
+            "LSP_PROJECT_MARKERS": "Cargo.toml,rust-project.json,.git",
+            "LSP_WARMUP_PATTERNS": "*.rs",
+            "LSP_WARMUP_EXCLUDE": "target,.git",
+            "LSP_LANGUAGE": "rust",
+        },
+    ),
 }
 
 
@@ -83,13 +97,19 @@ def resolve_route_id_for_path(file_path: str, routes: dict[str, LanguageRoute] |
         if suffix and suffix in route.extensions:
             return route.route_id
 
-    matches: list[str] = []
+    matches: list[tuple[str, Path]] = []
     for route in route_map.values():
         specific_markers = tuple(marker for marker in route.markers if marker != ".git")
-        if specific_markers and find_project_root(file_path, specific_markers):
-            matches.append(route.route_id)
+        root = find_project_root(file_path, specific_markers)
+        if specific_markers and root:
+            matches.append((route.route_id, Path(root)))
     if len(matches) == 1:
-        return matches[0]
+        return matches[0][0]
+    if matches:
+        deepest = max(len(root.parts) for _route_id, root in matches)
+        nearest = [route_id for route_id, root in matches if len(root.parts) == deepest]
+        if len(nearest) == 1:
+            return nearest[0]
     return None
 
 

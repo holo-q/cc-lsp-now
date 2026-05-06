@@ -9,7 +9,7 @@
   "homepage": "https://github.com/holo-q/hsp",
   "repository": "https://github.com/holo-q/hsp",
   "license": "MIT",
-  "keywords": ["hsp", "lsp", "language-server", "python", "csharp", "mcp"],
+  "keywords": ["hsp", "lsp", "language-server", "python", "csharp", "rust", "mcp"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "lspServers": {
@@ -35,12 +35,19 @@
       "extensionToLanguage": {
         ".cs": "csharp"
       }
+    },
+    "rust-analyzer": {
+      "command": "rust-analyzer",
+      "args": [],
+      "extensionToLanguage": {
+        ".rs": "rust"
+      }
     }
   },
   "interface": {
     "displayName": "HSP",
     "shortDescription": "LSP-backed code intelligence through one auto-selecting plugin",
-    "longDescription": "Adds HSP MCP tools for semantic navigation, diagnostics, references, rename, moves, and code actions. The runtime selects the Python or C# LSP chain from file extensions and workspace markers.",
+    "longDescription": "Adds HSP MCP tools for semantic navigation, diagnostics, references, rename, moves, and code actions. The runtime selects the Python, C#, or Rust LSP chain from file extensions and workspace markers.",
     "developerName": "holo-q",
     "category": "Development",
     "capabilities": ["Read", "Write"],
