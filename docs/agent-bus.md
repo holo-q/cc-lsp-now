@@ -229,8 +229,11 @@ hsp.chat("all ticket holders are waiting", id="Q3")
 
 `hsp.ask("...", timeout="2m")` is the waiting form for agents that need a reply.
 It opens `bus.ask`, waits until a matching `chat(..., id="Qn")` arrives or the
-timeout elapses, and returns the latest journal on timeout. This makes
-coordination a treadmill: ask, wait briefly, read the board, continue.
+timeout elapses, and returns the latest journal on timeout. If no agents are
+currently busy in the workgroup (no active ticket holders), it does not wait:
+the question is recorded, closed immediately, and the result says that no
+agents can reply. This makes coordination a treadmill: ask, wait briefly when
+there is someone to answer, read the board, continue.
 
 ## Board Messages
 
@@ -425,8 +428,10 @@ hsp log reply --id Q3 --message "done"
 `ask` returns the question id (`Q3`, etc.) so a worker can address replies
 without scraping `recent`. While the question is open, every hook stop above
 whose scope overlaps the question appends a compact "Q3 still open" line. At
-timeout, the next stop emits the digest described in *Bus Windows*. Nothing
-about this gates an edit; the timeout is coordination pressure, not a lock.
+timeout, the next stop emits the digest described in *Bus Windows*. If there
+are no active ticket holders when the question is opened, `ask` returns a
+no-replier notice instead of leaving a stale open question. Nothing about this
+gates an edit; the timeout is coordination pressure, not a lock.
 
 ### Wiring Notes
 

@@ -450,6 +450,19 @@ class BrokerBusMethodSurfaceTests(unittest.TestCase):
 
     def test_bus_ask_returns_question_id_for_subsequent_reply(self) -> None:
         daemon = BrokerDaemon()
+        _run(
+            daemon.handle_request(
+                {
+                    "id": "ticket",
+                    "method": "bus.ticket",
+                    "params": {
+                        "workspace_root": "/repo",
+                        "agent_id": "reverie",
+                        "message": "checking lsp_refs",
+                    },
+                }
+            )
+        )
         opened = _run(
             daemon.handle_request(
                 {

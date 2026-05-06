@@ -346,8 +346,23 @@ class AgentBus:
                 aliases=list(event.scope.aliases),
                 message=event.message,
             )
+            busy_agents = self._busy_agent_ids_locked(event.workspace_root)
+            no_repliers = not busy_agents
+            if no_repliers:
+                question.closed_at = now
             self._questions[qid] = question
-            return {"event": _event_wire(event), "question": question.to_wire(now)}
+            return {
+                "event": _event_wire(event),
+                "question": question.to_wire(now),
+                "no_repliers": no_repliers,
+                "notice": (
+                    "no agents can reply; no agents are currently busy in this workgroup"
+                    if no_repliers
+                    else ""
+                ),
+                "busy_agents": busy_agents,
+                "active_tickets": self._active_ticket_wires_locked(event.workspace_root, now),
+            }
 
     def reply(self, params: dict[str, Any]) -> dict[str, Any]:
         question_id = _string(params.get("id")) or _string(params.get("question_id"))
@@ -569,6 +584,14 @@ class AgentBus:
             for ticket in self._tickets.values()
             if ticket.workspace_root == root and ticket.is_open
         ]
+
+    def _busy_agent_ids_locked(self, root: str) -> list[str]:
+        return sorted({
+            agent_id
+            for ticket in self._tickets.values()
+            if ticket.workspace_root == root and ticket.is_open
+            for agent_id in ticket.holders
+        })
 
     def _digest_for_question(
         self,

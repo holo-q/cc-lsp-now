@@ -1043,6 +1043,14 @@ def _render_bus_result(action: str, result: dict[str, object]) -> str:
             left = _wire_float(question, "seconds_left")
             msg = question.get("message", "")
             scope = _render_bus_scope(question)
+            if result.get("no_repliers"):
+                notice = str(result.get("notice", "")).strip() or "no agents can reply"
+                return "\n".join([
+                    f"ask {qid} not waiting",
+                    f"notice: {notice}",
+                    f"question: {msg}",
+                    scope,
+                ]).strip()
             return "\n".join([
                 f"opened {qid} ({left:.0f}s)",
                 f"question: {msg}",
@@ -3921,6 +3929,11 @@ async def ask(message: str, files: str = "", symbols: str = "", timeout: str = "
     qid = str(question.get("question_id", "")) if question else ""
     if not qid:
         return _render_bus_result("ask", opened)
+    if opened.get("no_repliers"):
+        journal_result = await _dispatch_bus_action("journal", {**params, "limit": 25})
+        journal_text = journal_result if isinstance(journal_result, str) else _render_bus_journal(journal_result)
+        notice = str(opened.get("notice", "")).strip() or "no agents can reply"
+        return f"ask {qid} not waiting: {notice}\n{journal_text}"
 
     deadline = time.time() + timeout_seconds
     delay = min(0.25, max(0.01, timeout_seconds / 20.0 if timeout_seconds else 0.01))

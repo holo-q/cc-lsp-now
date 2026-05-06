@@ -85,6 +85,12 @@ class CliLogTests(unittest.TestCase):
 
     def test_log_ask_and_reply_round_trip_on_one_local_bus(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
+            self._run([
+                "log",
+                "ticket",
+                "--message",
+                "editing server",
+            ], root=root)
             ask = self._run([
                 "log",
                 "ask",

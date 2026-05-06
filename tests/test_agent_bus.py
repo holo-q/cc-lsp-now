@@ -29,6 +29,11 @@ class AgentBusPureTests(unittest.TestCase):
 
     def test_question_collects_related_events_and_settles(self) -> None:
         bus = AgentBus()
+        bus.ticket({
+            "workspace_root": "/repo",
+            "agent_id": "agent-b",
+            "message": "editing server",
+        })
         question_result = bus.ask({
             "workspace_root": "/repo",
             "message": "anyone touching server?",
@@ -54,6 +59,23 @@ class AgentBusPureTests(unittest.TestCase):
         events = cast(list[dict[str, object]], digest["events"])
         self.assertIn("file.touched", {event["event_type"] for event in events})
         self.assertIn("bus.reply", {event["event_type"] for event in events})
+
+    def test_ask_without_busy_agents_closes_immediately(self) -> None:
+        bus = AgentBus()
+
+        result = bus.ask({
+            "workspace_root": "/repo",
+            "agent_id": "agent-a",
+            "message": "anyone editing?",
+            "timeout": "2m",
+        })
+
+        question = cast(dict[str, object], result["question"])
+        journal = bus.journal({"workspace_root": "/repo"})
+        self.assertTrue(result["no_repliers"])
+        self.assertIn("no agents can reply", result["notice"])
+        self.assertIsNotNone(question["closed_at"])
+        self.assertEqual(cast(list[object], journal["open_questions"]), [])
 
     def test_recent_filters_by_scope(self) -> None:
         bus = AgentBus()
@@ -194,6 +216,7 @@ class AgentBusPureTests(unittest.TestCase):
 
     def test_chat_reply_closes_question_and_surfaces_in_journal(self) -> None:
         bus = AgentBus()
+        bus.ticket({"workspace_root": "/repo", "agent_id": "agent-b", "message": "editing"})
         opened = bus.ask({
             "workspace_root": "/repo",
             "agent_id": "agent-a",

@@ -255,6 +255,12 @@ class LspLogAskFlowTests(_LocalBusFixture):
     """
 
     def test_ask_returns_question_handle_and_reply_hint(self) -> None:
+        assert _server._local_bus is not None
+        _server._local_bus.ticket({
+            "workspace_root": os.getcwd(),
+            "agent_id": "agent-b",
+            "message": "editing server",
+        })
         result = _run(_server.lsp_log(
             action="ask",
             message="Anyone touching server.py?",
@@ -269,7 +275,25 @@ class LspLogAskFlowTests(_LocalBusFixture):
         # Question text is preserved verbatim
         self.assertIn("Anyone touching server.py?", result)
 
+    def test_ask_without_busy_agents_returns_no_replier_notice(self) -> None:
+        result = _run(_server.lsp_log(
+            action="ask",
+            message="Anyone touching server.py?",
+            files="src/server.py",
+            timeout="30s",
+        ))
+
+        self.assertIn("not waiting", result)
+        self.assertIn("no agents can reply", result)
+        self.assertNotIn("reply: lsp_log", result)
+
     def test_ask_then_reply_links_back_to_question(self) -> None:
+        assert _server._local_bus is not None
+        _server._local_bus.ticket({
+            "workspace_root": os.getcwd(),
+            "agent_id": "agent-b",
+            "message": "editing server",
+        })
         ask_result = _run(_server.lsp_log(
             action="ask",
             message="proceed?",
@@ -328,6 +352,12 @@ class TeamToolFlowTests(_LocalBusFixture):
         self.assertIn("ticket.closed", released)
 
     def test_chat_short_tool_unlocks_question(self) -> None:
+        assert _server._local_bus is not None
+        _server._local_bus.ticket({
+            "workspace_root": os.getcwd(),
+            "agent_id": "agent-b",
+            "message": "editing server",
+        })
         opened = _run(_server.lsp_log(action="ask", message="Proceed?", timeout="30s"))
         qid = next(token.strip("():,") for token in opened.split() if token.startswith("Q"))
 
@@ -337,9 +367,22 @@ class TeamToolFlowTests(_LocalBusFixture):
         self.assertIn("bus.reply", reply)
 
     def test_ask_short_tool_times_out_with_latest_journal(self) -> None:
+        assert _server._local_bus is not None
+        _server._local_bus.ticket({
+            "workspace_root": os.getcwd(),
+            "agent_id": "agent-b",
+            "message": "editing server",
+        })
         result = _run(_server.ask("Anybody still editing?", timeout="1ms"))
 
         self.assertIn("timed out", result)
+        self.assertIn("journal:", result)
+
+    def test_ask_short_tool_does_not_wait_without_busy_agents(self) -> None:
+        result = _run(_server.ask("Anybody still editing?", timeout="30s"))
+
+        self.assertIn("not waiting", result)
+        self.assertIn("no agents can reply", result)
         self.assertIn("journal:", result)
 
     def test_build_gate_times_out_when_ticket_holders_are_still_editing(self) -> None:

@@ -109,6 +109,15 @@ class BrokerBusLifecycleTests(unittest.TestCase):
     def test_ask_reply_settle_emits_close_digest(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             daemon = BrokerDaemon()
+            _run(daemon.handle_request({
+                "id": "ticket",
+                "method": "bus.ticket",
+                "params": {
+                    "workspace_root": root,
+                    "agent_id": "reverie",
+                    "message": "editing server",
+                },
+            }))
             opened = _run(daemon.handle_request({
                 "id": "1",
                 "method": "bus.ask",
@@ -218,6 +227,15 @@ class BrokerBusLifecycleTests(unittest.TestCase):
     def test_chat_reply_closes_ask_through_broker(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             daemon = BrokerDaemon()
+            _run(daemon.handle_request({
+                "id": "ticket",
+                "method": "bus.ticket",
+                "params": {
+                    "workspace_root": root,
+                    "agent_id": "agent-b",
+                    "message": "editing server",
+                },
+            }))
             opened = _run(daemon.handle_request({
                 "id": "ask",
                 "method": "bus.ask",
@@ -355,6 +373,15 @@ class BrokerBusStatusTests(unittest.TestCase):
     def test_lsp_status_response_carries_bus_summary(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             daemon = BrokerDaemon()
+            _run(daemon.handle_request({
+                "id": "ticket",
+                "method": "bus.ticket",
+                "params": {
+                    "workspace_root": root,
+                    "agent_id": "agent-b",
+                    "message": "editing status",
+                },
+            }))
             _run(daemon.handle_request({
                 "id": "a",
                 "method": "bus.ask",
