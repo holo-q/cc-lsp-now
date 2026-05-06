@@ -67,6 +67,8 @@ harness-native denial if the ticket policy fails. The plugin command checks
 `HSP_HOOKS` before launching `uvx`, so the shipped hooks are cheap and inert by
 default. There is no separate `hsp-log`, `hsp-hook`, or `hsp-run` binary; the
 MCP tool and CLI subcommands funnel into the broker's `bus.*` JSONL surface.
+MCP launch is explicit as `hsp mcp`; bare `hsp` is reserved for workgroup
+status/debug output.
 See `docs/agent-bus.md` for the ambient hook recipes.
 
 ## Raw Tool Cut Map

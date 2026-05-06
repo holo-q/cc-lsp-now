@@ -43,7 +43,7 @@
   "mcpServers": {
     "hsp": {
       "command": "uvx",
-      "args": ["--refresh", "--from", "git+https://github.com/holo-q/hsp", "hsp"],
+      "args": ["--refresh", "--from", "git+https://github.com/holo-q/hsp", "hsp", "mcp"],
       "env": {
         "HSP_ROUTER": "1"
       }

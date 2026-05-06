@@ -80,7 +80,7 @@ Standalone ComfyUI frontend built on AppKit.
 
 ## For LSP Plugin Authors
 
-hsp is the MCP server; your plugin bundles it. Users install one plugin (yours), get both the native `lspServers` integration (for hooks/diagnostics) *and* the graph-oriented MCP tool set.
+`hsp mcp` is the MCP server; your plugin bundles it. Users install one plugin (yours), get both the native `lspServers` integration (for hooks/diagnostics) *and* the graph-oriented MCP tool set.
 
 ### 1. Declare the MCP server in `plugin.json`
 
@@ -94,7 +94,7 @@ hsp is the MCP server; your plugin bundles it. Users install one plugin (yours),
   "mcpServers": {
     "ty-lsp-extended": {
       "command": "uvx",
-      "args": ["hsp"],
+      "args": ["hsp", "mcp"],
       "env": {
         "LSP_SERVERS": "ty server;basedpyright-langserver --stdio"
       }
@@ -168,19 +168,22 @@ Set in the `env` block of your `mcpServers` entry:
 ```bash
 uv tool install hsp     # or: pip install hsp
 
-LSP_COMMAND=ty LSP_ARGS=server hsp
-LSP_COMMAND=rust-analyzer hsp
-LSP_COMMAND=gopls LSP_ARGS=serve hsp
+LSP_COMMAND=ty LSP_ARGS=server hsp mcp
+LSP_COMMAND=rust-analyzer hsp mcp
+LSP_COMMAND=gopls LSP_ARGS=serve hsp mcp
 ```
 
-The MCP server speaks stdio — useful for testing or for non-plugin MCP clients.
+The MCP server speaks stdio through `hsp mcp` — useful for testing or for
+non-plugin MCP clients. Bare `hsp` is reserved for the workgroup status/debug
+surface, so an accidental terminal run shows the current bus/broker shape
+instead of blocking on stdio.
 
 ## Architecture
 
 ```
 Claude Code
     ↕ MCP (stdio)
-hsp
+hsp mcp
     ↕ JSONL / Unix socket  [broker mode, default]
 hsp-broker
     ↕ JSON-RPC / LSP (stdio)

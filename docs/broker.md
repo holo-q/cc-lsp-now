@@ -1,6 +1,6 @@
 # hsp-broker Design Note
 
-`hsp` currently runs as an MCP server that owns a short-lived chain of
+`hsp mcp` runs an MCP server that owns a short-lived chain of
 language-server clients inside one agent/plugin session. That is the right
 shape for today's Codex plugin, but agents change the value equation: multiple
 clients may ask the same workspace the same semantic questions, and repeatedly
@@ -190,7 +190,7 @@ Agent coordination needs provenance. Broker responses should eventually include:
 This lets agents say "these callsites were computed against snapshot X" and
 avoid confirming stale rename previews after unrelated edits.
 
-Direct `hsp` should grow the local version first: snapshot stamps on
+Direct HSP should grow the local version first: snapshot stamps on
 responses, named pending buffers, named semantic graph pins, and a mutation
 journal. Those primitives do not require a broker, and they make the later
 broker semantics concrete rather than speculative.
@@ -259,11 +259,13 @@ hard dependency.
 Wave 2 layers ambient harness hooks over the same broker. There is no separate
 `hsp-log`, `hsp-hook`, or `hsp-run` binary; `hsp log <action>` is the explicit
 shell mirror of `lsp_log`, bundled plugin hooks call `hsp hook --kind <kind>`
-with harness payloads on stdin, and `hsp run -- <command>` gates
+with harness payloads on stdin, `hsp mcp` runs the stdio MCP server, and
+`hsp run -- <command>` gates
 build/verifier commands before recording their result. The hook adapter is
 env-gated by `HSP_HOOKS` and no-ops before launching `uvx` by default. Session
 start, user prompt, edit before/after, generic tool before/after, and detected
-Bash build commands now ship inside the Claude plugin manifests. The CLI stays
+Bash build commands now ship inside the Claude plugin manifests. Bare `hsp`
+prints the workgroup status/debug surface instead of blocking on stdio. The CLI stays
 warn-first by default: ordinary log/hook rows do not block, while the explicit
 build gate path may wait or time out. Setting `HSP_REQUIRE_TICKET_FOR_EDITS=1`
 also turns edit-before hooks into hard denials when the workspace has no active

@@ -1,8 +1,9 @@
 """Command-line surface for hsp.
 
-The MCP server stays the default `hsp` behavior for Claude Code, while
-agent-bus hooks live under the same binary as `hsp log ...`. Keeping one
-entrypoint avoids install-path drift between MCP, broker, and harness hooks.
+Bare `hsp` is the workgroup querying surface for humans and agents. The MCP
+server is explicit as `hsp mcp`, while hooks and shell mirrors stay under the
+same binary as `hsp hook ...` and `hsp log ...`. Keeping one entrypoint avoids
+install-path drift between MCP, broker, and harness hooks.
 """
 
 from __future__ import annotations
@@ -123,21 +124,29 @@ class CommandGateSpec:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     ns = parser.parse_args(list(argv) if argv is not None else None)
+    if ns.command in {None, "workgroup"}:
+        return _run_workgroup(ns)
+    if ns.command == "mcp":
+        return _run_mcp()
     if ns.command == "log":
         return _run_log(ns, parser)
     if ns.command == "hook":
         return _run_hook(ns, parser)
     if ns.command == "run":
         return _run_command(ns, parser)
-    if ns.command == "workgroup":
-        return _run_workgroup(ns)
     parser.error(f"unknown command: {ns.command!r}")
     return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hsp")
-    subcommands = parser.add_subparsers(dest="command", required=True)
+    parser.set_defaults(command=None, locations=[], limit=8, start_broker=False, lsp=False)
+    subcommands = parser.add_subparsers(dest="command")
+
+    subcommands.add_parser(
+        "mcp",
+        help="run the HSP MCP server over stdio",
+    )
 
     log = subcommands.add_parser(
         "log",
@@ -197,6 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
     workgroup.add_argument("--start-broker", action="store_true")
     workgroup.add_argument("--lsp", action="store_true", help="include lsp_session status for each location")
     return parser
+
+
+def _run_mcp() -> int:
+    server.run()
+    return 0
 
 
 def _run_log(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:

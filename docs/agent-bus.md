@@ -360,6 +360,7 @@ hsp log hook --kind edit.after --files src/server.py
 hsp log hook --kind commit.after --commit d796fc8
 hsp hook --kind edit.after < "$CLAUDE_HOOK_PAYLOAD"
 hsp run -- cargo test
+hsp
 hsp workgroup . ../other-repo --limit 5
 ```
 
@@ -502,20 +503,23 @@ The initial implementation is broker-backed and intentionally advisory:
 Wave 2 wires the same broker substrate into harness-fired hook bodies through
 a single `hsp` binary. The shape is:
 
-1. No new binary. `log` and `hook` are subcommands on `hsp`; there is no
-   `hsp-log` or `hsp-hook`. One entrypoint keeps install paths, broker
+1. No new binary. `log`, `hook`, and `mcp` are subcommands on `hsp`; there is
+   no `hsp-log` or `hsp-hook`. One entrypoint keeps install paths, broker
    discovery, and socket auth identical between the MCP server and hooks.
 2. The subcommand mirrors public `lsp_log` actions where useful (`weather`,
    `journal`, `recent`, `settle`, `ticket`, `chat`, `note`, `ask`, `reply`,
    `hook`, `precommit`, `postcommit`, `event`). Build gating is not a public
    log action; it is driven by `hsp hook` build-command detection and `hsp run`.
-3. `hsp workgroup [locations...]` is the non-mutating debugger for "where is
-   this agent's team state?" It prints the resolved workgroup root, workspace
+3. Bare `hsp` is the non-mutating debugger for "where is this agent's team
+   state?" `hsp workgroup [locations...]` is the same query surface with
+   explicit locations/options. It prints the resolved workgroup root, workspace
    id, broker socket/log, append-log paths, live broker weather if reachable,
    and optional LSP session status with `--lsp`. It does not auto-start a
    broker unless `--start-broker` is passed.
-4. Bundled plugin hooks are opt-in with `HSP_HOOKS=1` and no-op otherwise.
-5. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
+4. MCP launch is explicit as `hsp mcp`; plugin manifests must pass that
+   subcommand so a terminal `hsp` never blocks on stdio by accident.
+5. Bundled plugin hooks are opt-in with `HSP_HOOKS=1` and no-op otherwise.
+6. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
    before/after, test result, git commit before/after, and push before/after.
    The broker decides per-stop whether the digest is worth printing; silent
    exit is the common case.

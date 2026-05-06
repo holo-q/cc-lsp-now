@@ -31,9 +31,43 @@ class CliLogTests(unittest.TestCase):
         data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         scripts = data["project"]["scripts"]
         self.assertIn("hsp", scripts)
+        self.assertEqual(scripts["hsp"], "hsp:main")
+        self.assertEqual(scripts["hsp-ty"], "hsp:mcp_main")
+        self.assertEqual(scripts["hsp-csharp"], "hsp:mcp_main")
         self.assertNotIn("hsp-log", scripts)
         self.assertNotIn("hsp-hook", scripts)
         self.assertNotIn("hsp-run", scripts)
+
+    def test_plugin_configs_run_mcp_subcommand(self) -> None:
+        configs = [
+            Path(".mcp.json"),
+            Path("plugins/hsp/.mcp.json"),
+            Path(".claude-plugin/plugin.json"),
+        ]
+        for path in configs:
+            with self.subTest(path=str(path)):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                server_cfg = data["mcpServers"]["hsp"]
+
+                self.assertEqual(server_cfg["command"], "uvx")
+                self.assertEqual(server_cfg["args"][-2:], ["hsp", "mcp"])
+
+    def test_bare_entrypoint_defaults_to_workgroup_status(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            with contextlib.chdir(root):
+                out = self._run([], root=root)
+
+        self.assertIn(f"workgroup: {Path(root).resolve()}", out)
+        self.assertIn("workspace_id:", out)
+        self.assertIn("broker: disabled", out)
+
+    def test_mcp_subcommand_runs_stdio_server(self) -> None:
+        with patch("hsp.cli.server.run") as run:
+            with self.assertRaises(SystemExit) as cm:
+                hsp_main(["mcp"])
+
+        self.assertEqual(cm.exception.code, 0)
+        run.assert_called_once_with()
 
     def test_entrypoint_dispatches_log_weather_without_starting_mcp_stdio(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
