@@ -1292,12 +1292,20 @@ def _event_label(event: dict[str, object] | None) -> str:
     event_id = str(eid)
     if event_id and not event_id.startswith("E"):
         event_id = f"E{event_id}"
-    head = f"{event_id} {event_type}".strip()
+    event_time = _event_timestamp_label(event)
+    head = " ".join(part for part in (event_id, event_time, str(event_type)) if part).strip()
     if message:
         head += f" {message}"
     if scope:
         head += f" [{scope}]"
     return _compact_line(head, 220)
+
+
+def _event_timestamp_label(event: dict[str, object]) -> str:
+    raw = event.get("timestamp")
+    if not isinstance(raw, int | float) or raw <= 0:
+        return ""
+    return time.strftime("%H:%M:%S", time.localtime(float(raw)))
 
 
 def _render_bus_scope(item: dict[str, object]) -> str:

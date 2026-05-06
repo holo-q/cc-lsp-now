@@ -75,7 +75,7 @@ class CliLogTests(unittest.TestCase):
             scope = self._require_dict(event, "scope")
             metadata = self._require_dict(event, "metadata")
 
-        self.assertIn("logged E1 edit.after", out)
+        self.assertRegex(out, r"logged E1 \d{2}:\d{2}:\d{2} edit\.after")
         self.assertEqual(event["kind"], "edit.after")
         self.assertEqual(scope["files"], ["src/server.py"])
         self.assertEqual(scope["symbols"], ["lsp_log"])

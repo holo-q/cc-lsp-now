@@ -217,8 +217,8 @@ one line where possible:
 
 ```text
 journal: 4
-  E1 ticket.started wire workgroup ticket state [files=src/hsp/agent_bus.py]
-  E2 note.posted lsp route warmed
+  E1 08:09:10 ticket.started wire workgroup ticket state [files=src/hsp/agent_bus.py]
+  E2 08:10:03 note.posted lsp route warmed
 ```
 
 `hsp.chat("...")` is the workgroup chat verb. With no id it appends

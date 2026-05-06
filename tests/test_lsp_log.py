@@ -408,6 +408,32 @@ class TeamToolFlowTests(_LocalBusFixture):
         self.assertIn("active_tickets", result)
 
 
+class BusEventRenderingTests(unittest.TestCase):
+    def test_event_labels_include_compact_local_time(self) -> None:
+        with patch("hsp.server.time.localtime", return_value=(2026, 5, 6, 8, 9, 10, 2, 126, -1)):
+            label = _server._event_label({
+                "event_id": "E7",
+                "event_type": "note.posted",
+                "timestamp": 1778054950.0,
+                "message": "mapped journal rendering",
+                "files": ["src/hsp/server.py"],
+            })
+
+        self.assertEqual(
+            label,
+            "E7 08:09:10 note.posted mapped journal rendering [files=src/hsp/server.py]",
+        )
+
+    def test_event_labels_tolerate_legacy_events_without_timestamp(self) -> None:
+        label = _server._event_label({
+            "event_id": "E8",
+            "event_type": "note.posted",
+            "message": "legacy row",
+        })
+
+        self.assertEqual(label, "E8 note.posted legacy row")
+
+
 class LspLogBrokerRoutingTests(unittest.TestCase):
     """The fallback policy is the load-bearing contract: ``HSP_BROKER=on``
     surfaces broker errors directly so a misconfigured deployment is loud,
