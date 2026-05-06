@@ -36,10 +36,17 @@ class BusEventKind(Enum):
     """
 
     AGENT_STARTED = "agent.started"
+    AGENT_HEARTBEAT = "agent.heartbeat"
     SESSION_START = "session.start"
+    SESSION_STOP = "session.stop"
     PROMPT = "prompt"
     USER_PROMPT = "user.prompt"
     TASK_INTENT = "task.intent"
+    TOOL_BEFORE = "tool.before"
+    TOOL_AFTER = "tool.after"
+    NOTIFICATION = "notification"
+    SUBAGENT_STOP = "subagent.stop"
+    COMPACT_BEFORE = "compact.before"
     EDIT_BEFORE = "edit.before"
     EDIT_AFTER = "edit.after"
     CONFIRM_BEFORE = "confirm.before"
@@ -57,6 +64,7 @@ class BusEventKind(Enum):
     BUS_ASK = "bus.ask"
     BUS_REPLY = "bus.reply"
     BUS_CLOSED = "bus.closed"
+    BABEL_EVENT = "babel.event"
 
     @classmethod
     def from_wire(cls, value: str) -> BusEventKind:
@@ -302,6 +310,13 @@ def _string_string_dict(value: object) -> dict[str, str]:
 
 _EVENT_KIND_ALIASES: Final[dict[str, str]] = {
     "prompt.start": BusEventKind.PROMPT.value,
+    "session.started": BusEventKind.SESSION_START.value,
+    "session.ended": BusEventKind.SESSION_STOP.value,
+    "stop": BusEventKind.SESSION_STOP.value,
+    "pre_tool": BusEventKind.TOOL_BEFORE.value,
+    "post_tool": BusEventKind.TOOL_AFTER.value,
+    "pre_compact": BusEventKind.COMPACT_BEFORE.value,
+    "subagent_stop": BusEventKind.SUBAGENT_STOP.value,
     "lsp_confirm.before": BusEventKind.CONFIRM_BEFORE.value,
     "lsp_confirm.after": BusEventKind.CONFIRM_AFTER.value,
     "test.result": BusEventKind.TEST.value,

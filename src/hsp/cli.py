@@ -109,6 +109,9 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
     payload = _read_hook_payload()
     message = str(ns.message) or _hook_message(payload)
+    if kind in {"prompt", "user.prompt"} and message.strip() == ".end":
+        kind = "session.stop"
+        message = ".end"
     files = _join_scope(str(ns.files), _hook_files(payload))
     symbols = _join_scope(str(ns.symbols), _hook_symbols(payload))
     aliases = _join_scope(str(ns.aliases), [])

@@ -51,6 +51,7 @@ class PresenceEntry:
     agent_id: str
     client_id: str
     session_id: str
+    workspace_root: str
     first_seen_at: float
     last_seen_at: float
     last_prompt_at: float = 0.0
@@ -71,19 +72,24 @@ class PresenceTracker:
 
     _entries: dict[str, PresenceEntry] = field(default_factory=dict)
 
-    def observe(self, event: BusEvent) -> PresenceEntry:
-        """Update presence from one event and return the (mutated) entry.
+    def observe(self, event: BusEvent) -> PresenceEntry | None:
+        """Update presence from one identified event and return the row.
 
         Called from the journal's append path so every durable event acts
-        as a heartbeat, not just explicit ``agent.started`` pings.
+        as a heartbeat, not just explicit ``agent.started`` pings. Events
+        without any agent/client/session identity are board weather only;
+        they must not create an anonymous workgroup row.
         """
         key = self._key_for(event)
+        if not key:
+            return None
         entry = self._entries.get(key)
         if entry is None:
             entry = PresenceEntry(
                 agent_id=event.agent_id,
                 client_id=event.client_id,
                 session_id=event.session_id,
+                workspace_root=event.workspace_root,
                 first_seen_at=event.timestamp,
                 last_seen_at=event.timestamp,
             )
@@ -98,9 +104,11 @@ class PresenceTracker:
             if event.session_id and not entry.session_id:
                 entry.session_id = event.session_id
         entry.last_event_id = event.event_id
-        if event.kind is BusEventKind.USER_PROMPT:
+        if event.kind is BusEventKind.SESSION_STOP:
+            entry.last_seen_at = min(entry.last_seen_at, event.timestamp - ACTIVE_WINDOW_SECONDS)
+        if event.kind in {BusEventKind.PROMPT, BusEventKind.USER_PROMPT}:
             entry.last_prompt_at = event.timestamp
-            entry.prompt_count += 1
+            entry.prompt_count = max(entry.prompt_count + 1, _prompt_count(event))
             if entry.prompt_count >= PIN_PROMPT_THRESHOLD:
                 entry.pinned = True
         return entry
@@ -140,6 +148,13 @@ class PresenceTracker:
 
     def _key_for(self, event: BusEvent) -> str:
         return event.client_id or event.agent_id or event.session_id
+
+
+def _prompt_count(event: BusEvent) -> int:
+    try:
+        return int(event.metadata.get("prompt_count", "0"))
+    except ValueError:
+        return 0
 
 
 __all__ = [

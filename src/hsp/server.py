@@ -765,6 +765,8 @@ _BUS_ACTIONS: tuple[str, ...] = (
     "precommit",
     "postcommit",
     "weather",
+    "presence",
+    "workgroup",
     "status",
 )
 
@@ -774,10 +776,17 @@ _BUS_ACTIONS: tuple[str, ...] = (
 # docs/agent-bus.md so the surface is self-describing for agents.
 _BUS_KINDS: tuple[str, ...] = (
     "agent.started",
+    "agent.heartbeat",
     "session.start",
+    "session.stop",
     "prompt",
     "user.prompt",
     "task.intent",
+    "tool.before",
+    "tool.after",
+    "notification",
+    "subagent.stop",
+    "compact.before",
     "edit.before",
     "edit.after",
     "confirm.before",
@@ -795,6 +804,7 @@ _BUS_KINDS: tuple[str, ...] = (
     "bus.ask",
     "bus.reply",
     "bus.closed",
+    "babel.event",
 )
 
 # Local fallback bus used when broker mode is "off" or unreachable. The
@@ -925,6 +935,8 @@ def _local_bus_dispatch(action: str, params: dict[str, object]) -> dict[str, obj
     try:
         if action == "event":
             return bus.event(params)
+        if action == "heartbeat":
+            return bus.heartbeat(params)
         if action == "note":
             return bus.note(params)
         if action == "ask":
@@ -941,6 +953,8 @@ def _local_bus_dispatch(action: str, params: dict[str, object]) -> dict[str, obj
             return bus.postcommit(params)
         if action == "weather":
             return bus.weather(params)
+        if action in {"presence", "workgroup"}:
+            return bus.presence(params)
         if action == "status":
             return bus.status()
     except ValueError as e:
@@ -948,11 +962,35 @@ def _local_bus_dispatch(action: str, params: dict[str, object]) -> dict[str, obj
     return f"local bus has no handler for action: {action!r}"
 
 
+async def _record_hsp_tool_heartbeat(method: str) -> None:
+    """Register the MCP client as present when it uses any HSP tool."""
+    params: dict[str, object] = {
+        "workspace_root": os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd())),
+        "agent_id": os.environ.get("HSP_AGENT_ID", _client_id),
+        "client_id": _client_id,
+        "session_id": _client_id,
+        "message": f"hsp tool {method}",
+        "metadata": {"source": "hsp", "tool": method},
+    }
+    if _broker_enabled():
+        try:
+            wire = _broker_base_params()
+            wire.update(params)
+            await _broker_bus_call("bus.heartbeat", wire)
+            return
+        except BrokerError:
+            if _broker_mode() == "on":
+                return
+    _local_bus_dispatch("heartbeat", params)
+
+
 def _render_bus_result(action: str, result: dict[str, object]) -> str:
     if action == "status":
         return _render_bus_status(result)
     if action == "weather":
         return _render_bus_weather(result)
+    if action in {"presence", "workgroup"}:
+        return _render_bus_presence(result)
     if action == "recent":
         return _render_bus_recent(result)
     if action == "settle":
@@ -998,6 +1036,12 @@ def _render_bus_status(result: dict[str, object]) -> str:
 
 def _render_bus_weather(result: dict[str, object]) -> str:
     lines = [f"workspace: {result.get('workspace_root', '')}"]
+    agents = _wire_list(result, "agents")
+    lines.append(f"agents: {len(agents)}")
+    for a_obj in agents[:8]:
+        if isinstance(a_obj, dict):
+            a = cast(dict[str, object], a_obj)
+            lines.append(f"  {_agent_label(a)}")
     questions = _wire_list(result, "open_questions")
     lines.append(f"open questions: {len(questions)}")
     for q_obj in questions[:5]:
@@ -1013,6 +1057,25 @@ def _render_bus_weather(result: dict[str, object]) -> str:
         if isinstance(e_obj, dict):
             lines.append(f"  {_event_label(cast(dict[str, object], e_obj))}")
     return "\n".join(lines)
+
+
+def _render_bus_presence(result: dict[str, object]) -> str:
+    agents = _wire_list(result, "agents")
+    lines = [f"workgroup: {result.get('workspace_root', '')}", f"agents: {len(agents)}"]
+    for a_obj in agents:
+        if isinstance(a_obj, dict):
+            lines.append(f"  {_agent_label(cast(dict[str, object], a_obj))}")
+    return "\n".join(lines)
+
+
+def _agent_label(agent: dict[str, object]) -> str:
+    aid = str(agent.get("agent_id") or agent.get("client_id") or agent.get("session_id") or "?")
+    state = str(agent.get("state") or agent.get("status") or "?")
+    idle = _wire_float(agent, "idle_seconds")
+    last = str(agent.get("last_event_id") or "")
+    prompt_count = agent.get("prompt_count", 0)
+    pin = " pinned" if agent.get("pinned") else ""
+    return _compact_line(f"{aid} {state} idle={idle:.0f}s prompts={prompt_count}{pin} last={last}", 180)
 
 
 def _render_bus_recent(result: dict[str, object]) -> str:
@@ -5284,6 +5347,7 @@ def _wrap_with_header(func: Any, method: str) -> Any:
         _just_started_this_call.clear()
         drain_agent_messages()  # clear leftovers from prior calls
 
+        await _record_hsp_tool_heartbeat(method)
         result = await func(*args, **kwargs)
         header = _header(method) if _last_server else f"[{method}]"
         prefix_lines: list[str] = [header]

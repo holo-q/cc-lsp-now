@@ -189,6 +189,7 @@ small:
 | `precommit` | Summarize touched files, overlaps, related edits, and suggested checks. |
 | `postcommit` | Record a commit and reset the local task digest frontier. |
 | `weather` | Compact workspace status for a new or resumed agent. |
+| `presence` / `workgroup` | Show the derived agent roster: active, asleep, and pinned rows. |
 
 Example precommit output:
 
@@ -246,14 +247,23 @@ env-gated twice: the bundled shell command drains stdin and exits before
 launching `uvx` when `HSP_HOOKS` is unset or false, and the Python adapter also
 no-ops defensively. Setting `HSP_HOOKS=1` turns the feature on.
 
-The first shipped hook slice records session start, user prompt, and edit
-before/after events. Test, commit, push, and `lsp_confirm` stops remain in the
-taxonomy below for the next hook expansion.
+The shipped Claude hook slice records every available lifecycle hook that the
+plugin can receive: session start/stop, user prompt, notification, subagent
+stop, pre-compact, generic tool before/after, and edit before/after. Test,
+commit, push, and `lsp_confirm` stops remain in the taxonomy below because
+they require shell/tool wrappers or HSP-internal hook points rather than native
+Claude hook events.
 
 | Stop | Hook kind | Example invocation |
 |------|-----------|--------------------|
 | session start | `session.start` | `hsp hook --kind session.start` |
+| session stop / `.end` | `session.stop` | `hsp hook --kind session.stop` |
 | user prompt | `prompt` | `hsp hook --kind prompt` |
+| tool start | `tool.before` | `hsp hook --kind tool.before` |
+| tool finish | `tool.after` | `hsp hook --kind tool.after` |
+| notification | `notification` | `hsp hook --kind notification` |
+| subagent stop | `subagent.stop` | `hsp hook --kind subagent.stop` |
+| pre-compact | `compact.before` | `hsp hook --kind compact.before` |
 | before edit | `edit.before` | `hsp hook --kind edit.before` |
 | after edit | `edit.after` | `hsp hook --kind edit.after` |
 | before `lsp_confirm` | `confirm.before` | `hsp hook --kind confirm.before` |
@@ -389,6 +399,11 @@ conversation thread:
 - `prompt_count <= 1` is treated as a single-shot or warm-up agent and follows
   the normal active/asleep/pruned decay below.
 
+If a prompt hook carries exactly `.end`, the hook adapter records
+`session.stop` instead of another prompt. That is the user-facing escape hatch
+for marking a thread done even when the harness does not provide a native exit
+hook.
+
 ### Presence Decay
 
 Presence is decided by the time since each agent's last bus event
@@ -405,6 +420,22 @@ Presence is decided by the time since each agent's last bus event
 visible regardless of how long it has been silent. These thresholds are cheap
 to revisit; the durable contract is the *shape* (three bands monotonic by
 recency, plus the prompt-count pin), not the exact second counts.
+
+Any HSP MCP tool call also sends a presence-only `agent.heartbeat` into the
+broker. Heartbeats update the workgroup roster without appending JSONL event
+noise, so agents appear as soon as they use the HSP tools even if their harness
+hooks are not enabled.
+
+## Babel Bridge
+
+HSP can ingest Babel's daemon event stream as an extrinsic source of truth.
+Set `HSP_BABEL_BRIDGE=1` on the broker process to subscribe to Babel's Unix
+socket (`$XDG_RUNTIME_DIR/babel.sock`, or `/tmp/babel-<uid>.sock`) and fold
+`session_state_changed`, `activity_pulse`, hook lifecycle, focus, and pane
+open/close events into the same bus. Babel events are stored with
+`metadata.source=babel` and `metadata.native_event=<event>`, while the bus kind
+is normalized to workgroup concepts such as `agent.heartbeat`, `session.start`,
+`session.stop`, `tool.before`, and `tool.after`.
 
 ## Later Work
 

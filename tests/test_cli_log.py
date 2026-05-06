@@ -139,16 +139,38 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(event["message"], "PostToolUse Edit")
         self.assertEqual(scope["files"], ["src/hsp/server.py"])
 
+    def test_prompt_end_command_records_session_stop(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "UserPromptSubmit",
+            "prompt": ".end",
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            self._run_hook(["hook", "--kind", "prompt"], root=root, stdin=payload, enabled=True)
+            event = self._read_last_event(root)
+
+        self.assertEqual(event["kind"], "session.stop")
+        self.assertEqual(event["message"], ".end")
+
     def test_claude_plugin_bundles_env_gated_bus_hooks(self) -> None:
         data = json.loads(Path(".claude-plugin/plugin.json").read_text(encoding="utf-8"))
         hooks = data["hooks"]
         self.assertIn("SessionStart", hooks)
         self.assertIn("UserPromptSubmit", hooks)
+        self.assertIn("Stop", hooks)
+        self.assertIn("Notification", hooks)
+        self.assertIn("SubagentStop", hooks)
+        self.assertIn("PreCompact", hooks)
         self.assertIn("PreToolUse", hooks)
         self.assertIn("PostToolUse", hooks)
         commands = "\n".join(_plugin_hook_commands(hooks))
         self.assertIn("hsp hook --kind session.start", commands)
         self.assertIn("hsp hook --kind prompt", commands)
+        self.assertIn("hsp hook --kind session.stop", commands)
+        self.assertIn("hsp hook --kind notification", commands)
+        self.assertIn("hsp hook --kind subagent.stop", commands)
+        self.assertIn("hsp hook --kind compact.before", commands)
+        self.assertIn("hsp hook --kind tool.before", commands)
+        self.assertIn("hsp hook --kind tool.after", commands)
         self.assertIn("hsp hook --kind edit.before", commands)
         self.assertIn("hsp hook --kind edit.after", commands)
         self.assertIn("HSP_HOOKS", commands)

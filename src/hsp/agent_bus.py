@@ -19,6 +19,7 @@ from threading import RLock
 from typing import Any
 
 from hsp.bus_event import BusEvent, BusEventKind, BusScope, truncate_message
+from hsp.bus_presence import PresenceEntry, PresenceTracker
 
 
 DEFAULT_RECENT_LIMIT = 20
@@ -74,6 +75,7 @@ class AgentBus:
     def __init__(self) -> None:
         self._events: list[BusEvent] = []
         self._questions: dict[str, BusQuestion] = {}
+        self._presence = PresenceTracker()
         self._next_event_id = 1
         self._next_question_id = 1
         self._lock = RLock()
@@ -86,11 +88,37 @@ class AgentBus:
                 "last_event_id": self._events[-1].event_id if self._events else "",
                 "open_question_count": len(open_questions),
                 "open_questions": [q.to_wire() for q in open_questions],
+                "agent_count": len(self._presence.visible(time.time())),
             }
 
     def event(self, params: dict[str, Any]) -> dict[str, Any]:
         event_type = _string(params.get("event_type")) or BusEventKind.TASK_INTENT.value
         return {"event": _event_wire(self._append(event_type, params))}
+
+    def heartbeat(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Register an agent without appending a durable event line."""
+        now = _now(params)
+        root = _workspace_root(params)
+        event = BusEvent(
+            seq=0,
+            event_id="heartbeat",
+            kind=BusEventKind.AGENT_HEARTBEAT,
+            timestamp=now,
+            workspace_id=_workspace_id(root),
+            workspace_root=root,
+            agent_id=_string(params.get("agent_id")),
+            client_id=_string(params.get("client_id")),
+            session_id=_string(params.get("session_id")),
+            task_id=_string(params.get("task_id")),
+            git_head=_string(params.get("git_head")),
+            dirty_hash=_string(params.get("dirty_hash")),
+            scope=BusScope(),
+            message=_string(params.get("message")),
+            metadata=_metadata(params.get("metadata")),
+        )
+        with self._lock:
+            entry = self._presence.observe(event)
+            return {"agent": _presence_wire(entry, now) if entry is not None else {}}
 
     def note(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"event": _event_wire(self._append(BusEventKind.NOTE_POSTED.value, params))}
@@ -194,6 +222,7 @@ class AgentBus:
     def weather(self, params: dict[str, Any]) -> dict[str, Any]:
         self.settle(params)
         workspace_root = _workspace_root(params)
+        now = _now(params)
         with self._lock:
             open_questions = [
                 q.to_wire()
@@ -205,12 +234,33 @@ class AgentBus:
                 for e in self._events
                 if e.workspace_root == workspace_root
             ][-10:]
+            agents = [
+                _presence_wire(entry, now)
+                for entry in self._presence.visible(now)
+                if entry.workspace_root == workspace_root
+            ]
         return {
             "workspace_root": workspace_root,
             "open_questions": open_questions,
             "recent": recent,
+            "agents": agents,
             "status": self.status(),
         }
+
+    def presence(self, params: dict[str, Any]) -> dict[str, Any]:
+        workspace_root = _workspace_root(params)
+        now = _now(params)
+        include_pruned = bool(params.get("include_pruned", False))
+        with self._lock:
+            entries = self._presence.snapshot(now) if include_pruned else self._presence.visible(now)
+            return {
+                "workspace_root": workspace_root,
+                "agents": [
+                    _presence_wire(entry, now)
+                    for entry in entries
+                    if entry.workspace_root == workspace_root
+                ],
+            }
 
     def _append(self, event_type: str, params: dict[str, Any]) -> BusEvent:
         with self._lock:
@@ -253,6 +303,7 @@ class AgentBus:
         )
         self._next_event_id += 1
         self._events.append(event)
+        self._presence.observe(event)
         _append_jsonl(root, event.to_wire())
         return event
 
@@ -340,6 +391,36 @@ def _timeout_seconds(value: Any, *, default: float) -> float:
         return max(0.0, float(raw) * scale)
     except ValueError:
         return default
+
+
+def _now(params: dict[str, Any]) -> float:
+    now = time.time()
+    offset = params.get("now_offset")
+    if offset is None:
+        return now
+    try:
+        return now + float(offset)
+    except (TypeError, ValueError):
+        return now
+
+
+def _presence_wire(entry: PresenceEntry, now: float) -> dict[str, Any]:
+    idle_seconds = max(0.0, now - entry.last_seen_at)
+    return {
+        "agent_id": entry.agent_id,
+        "client_id": entry.client_id,
+        "session_id": entry.session_id,
+        "workspace_root": entry.workspace_root,
+        "state": entry.status.value,
+        "status": entry.status.value,
+        "idle_seconds": idle_seconds,
+        "first_seen_at": entry.first_seen_at,
+        "last_seen_at": entry.last_seen_at,
+        "last_prompt_at": entry.last_prompt_at,
+        "prompt_count": entry.prompt_count,
+        "last_event_id": entry.last_event_id,
+        "pinned": entry.pinned,
+    }
 
 
 def _scope_matches(

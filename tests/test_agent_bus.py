@@ -65,6 +65,34 @@ class AgentBusPureTests(unittest.TestCase):
         events = cast(list[dict[str, object]], recent["events"])
         self.assertEqual([event["message"] for event in events], ["b"])
 
+    def test_heartbeat_registers_presence_without_recent_event_noise(self) -> None:
+        bus = AgentBus()
+
+        bus.heartbeat({
+            "workspace_root": "/repo",
+            "agent_id": "agent-tool",
+            "client_id": "client-1",
+        })
+
+        presence = bus.presence({"workspace_root": "/repo"})
+        agents = cast(list[dict[str, object]], presence["agents"])
+        recent = bus.recent({"workspace_root": "/repo"})
+        self.assertEqual(agents[0]["agent_id"], "agent-tool")
+        self.assertEqual(recent["events"], [])
+
+    def test_session_stop_goes_asleep_immediately(self) -> None:
+        bus = AgentBus()
+
+        bus.event({
+            "workspace_root": "/repo",
+            "agent_id": "agent-done",
+            "event_type": "session.stop",
+        })
+
+        presence = bus.presence({"workspace_root": "/repo"})
+        agents = cast(list[dict[str, object]], presence["agents"])
+        self.assertEqual(agents[0]["state"], "asleep")
+
 
 class BrokerBusWireTests(unittest.IsolatedAsyncioTestCase):
     async def test_broker_exposes_bus_methods(self) -> None:

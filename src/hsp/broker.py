@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import importlib
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ from pathlib import Path
 from typing import cast
 
 from hsp.agent_bus import AgentBus
+from hsp.babel_bridge import subscribe_babel_events
 from hsp.alias_coordinator import (
     alias_identity_from_wire,
     alias_record_to_wire,
@@ -79,6 +81,7 @@ DEVTOOLS_APP_ID_ENV = "LSP_DEVTOOLS_APP_ID"
 DEVTOOLS_HOST_ENV = "LSP_DEVTOOLS_HOST"
 DEVTOOLS_PORT_ENV = "LSP_DEVTOOLS_PORT"
 DEVTOOLS_READONLY_ENV = "LSP_DEVTOOLS_READONLY"
+BABEL_BRIDGE_ENV = "HSP_BABEL_BRIDGE"
 DEFAULT_IDLE_TTL_SECONDS = 4 * 60 * 60
 
 
@@ -210,6 +213,7 @@ class BrokerDaemon:
         self.bus = AgentBus()
         self.started_at: float = time.time()
         self.devtools = _maybe_start_devtools(self)
+        self.babel_bridge_task: asyncio.Task[None] | None = None
         # Set when a `shutdown` request is processed.  `serve_unix` waits
         # on this to break out of `serve_forever`.
         self._shutdown = asyncio.Event()
@@ -299,6 +303,8 @@ class BrokerDaemon:
                 return self.bus.event(params)
             except ValueError as e:
                 raise BrokerError("invalid_params", str(e)) from None
+        if method == "bus.heartbeat":
+            return self.bus.heartbeat(params)
         if method == "bus.note":
             return self.bus.note(params)
         if method == "bus.ask":
@@ -318,7 +324,10 @@ class BrokerDaemon:
             return self.bus.postcommit(params)
         if method == "bus.weather":
             return self.bus.weather(params)
+        if method == "bus.presence" or method == "bus.workgroup":
+            return self.bus.presence(params)
         if method == "shutdown":
+            self.stop_babel_bridge()
             await self.lsp.stop_all()
             if self.devtools is not None:
                 self.devtools.stop()
@@ -341,6 +350,7 @@ class BrokerDaemon:
             "sessions": [session_to_dict(s) for s in self.registry.all_sessions()],
             "bus": self.bus.status(),
             "devtools": _devtools_status(self.devtools),
+            "babel_bridge": self._babel_bridge_status(),
         }
 
     def _lsp_status(self) -> dict[str, object]:
@@ -355,9 +365,30 @@ class BrokerDaemon:
                 "idle_ttl_seconds": _idle_ttl_seconds(),
                 "bus": self.bus.status(),
                 "devtools": _devtools_status(self.devtools),
+                "babel_bridge": self._babel_bridge_status(),
             }
         )
         return status
+
+    def start_babel_bridge(self) -> None:
+        if self.babel_bridge_task is not None and not self.babel_bridge_task.done():
+            return
+        self.babel_bridge_task = asyncio.create_task(subscribe_babel_events(self.bus))
+        log.info("babel bridge enabled")
+
+    def stop_babel_bridge(self) -> None:
+        task = self.babel_bridge_task
+        if task is None:
+            return
+        task.cancel()
+
+    def _babel_bridge_status(self) -> dict[str, object]:
+        task = self.babel_bridge_task
+        return {
+            "enabled": _env_enabled(BABEL_BRIDGE_ENV),
+            "running": bool(task is not None and not task.done()),
+            "done": bool(task is not None and task.done()),
+        }
 
     def _session_get_or_create(self, params: dict[str, object]) -> dict[str, object]:
         root = _str_param(params, "root")
@@ -693,7 +724,7 @@ def _maybe_start_devtools(daemon: BrokerDaemon):
     if not _env_enabled(DEVTOOLS_ENV):
         return None
     try:
-        import python_devtools as devtools
+        devtools = importlib.import_module("python_devtools")
     except Exception as e:
         log.warning("LSP_DEVTOOLS requested but python_devtools import failed: %r", e)
         return None
@@ -771,6 +802,8 @@ async def serve_unix(
     if ready is not None:
         ready.set()
     log.info("hsp-broker listening on %s", path)
+    if _env_enabled(BABEL_BRIDGE_ENV):
+        daemon.start_babel_bridge()
 
     try:
         async with server:
@@ -787,6 +820,13 @@ async def serve_unix(
                 except (asyncio.CancelledError, Exception):
                     pass
     finally:
+        daemon.stop_babel_bridge()
+        task = daemon.babel_bridge_task
+        if task is not None:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         try:
             path.unlink()
         except OSError:
