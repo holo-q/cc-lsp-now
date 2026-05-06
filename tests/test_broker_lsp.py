@@ -13,7 +13,7 @@ from hsp.broker import BrokerDaemon
 from hsp.broker_lsp import BrokerLspManager, BrokerLspSession, chain_config_hash, chain_from_wire, chain_to_wire
 from hsp.broker_session import SessionRegistry
 from hsp.chain_server import ChainServer
-from hsp.lsp import LspClient
+from hsp.lsp import LspClient, LspError
 from hsp.render_memory import AliasIdentity, AliasKind
 
 
@@ -66,6 +66,39 @@ class FakeLspClient:
 
 
 class BrokerLspSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_reports_missing_lsp_binary_with_route_context(self) -> None:
+        chain = [
+            ChainServer(
+                command="definitely-missing-rust-analyzer",
+                args=[],
+                name="definitely-missing-rust-analyzer",
+                label="definitely-missing-rust-analyzer",
+            )
+        ]
+        session = BrokerLspSession("/repo", chain, language="rust", route_id="rust")
+
+        with self.assertRaises(LspError) as cm:
+            await session.request(
+                "textDocument/documentSymbol",
+                {"textDocument": {"uri": "file:///repo/src/lib.rs"}},
+                uri="file:///repo/src/lib.rs",
+                empty_fallback_methods=set(),
+            )
+
+        self.assertEqual(cm.exception.code, -32098)
+        self.assertIn("Missing LSP server binary for rust route", cm.exception.message)
+        self.assertIn("definitely-missing-rust-analyzer", cm.exception.message)
+
+    async def test_lsp_client_start_reports_missing_binary(self) -> None:
+        client = LspClient(["definitely-missing-lsp-binary"], "/repo")
+
+        with self.assertRaises(LspError) as cm:
+            await client.start()
+
+        self.assertEqual(cm.exception.code, -32098)
+        self.assertIn("Missing LSP server binary", cm.exception.message)
+        self.assertIn("definitely-missing-lsp-binary", cm.exception.message)
+
     async def test_request_starts_client_once_and_caches_method_handler(self) -> None:
         clients: list[FakeLspClient] = []
 

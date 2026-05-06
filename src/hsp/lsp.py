@@ -9,6 +9,7 @@ from typing import Any
 
 from hsp.agent_log import agent_log
 from hsp.file_watcher import FileWatcher
+from hsp.lsp_binary import missing_lsp_binary_message
 
 log = logging.getLogger(__name__)
 
@@ -126,12 +127,16 @@ class LspClient:
         if self._started:
             return
 
-        self._process = await asyncio.create_subprocess_exec(
-            *self._command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                *self._command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            command = self._command[0] if self._command else ""
+            raise LspError(-32098, missing_lsp_binary_message(command)) from e
         self._reader_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._stderr_loop())
         self._started = True

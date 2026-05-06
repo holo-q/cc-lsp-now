@@ -12,6 +12,7 @@ from hsp.alias_coordinator import AliasCoordinator, AliasTouchResult
 from hsp.broker_session import SessionKey, SessionRegistry, config_hash, session_to_dict
 from hsp.chain_server import ChainServer
 from hsp.lsp import LspClient, LspError
+from hsp.lsp_binary import lsp_command_available, missing_lsp_binary_message
 from hsp.router import find_project_root
 from hsp.render_memory import AliasIdentity, AliasResolution
 
@@ -145,6 +146,7 @@ class BrokerLspSession:
         self.project_markers = list(project_markers or _project_markers())
         self.pending_workspace_adds: list[str] = []
         self.lock = asyncio.Lock()
+        self.validates_binaries = client_factory is None
         self.client_factory = client_factory or (lambda command, root_path: LspClient(command, root_path))
         self.last_used_at = time.time()
         self.request_count = 0
@@ -245,6 +247,16 @@ class BrokerLspSession:
             async def get_client(idx: int) -> LspClient:
                 if self.clients[idx] is None:
                     cfg = self.chain[idx]
+                    if self.validates_binaries and not lsp_command_available(cfg.command):
+                        raise LspError(
+                            -32098,
+                            missing_lsp_binary_message(
+                                cfg.command,
+                                route_id=self.route_id,
+                                language=self.language,
+                                server_label=cfg.label,
+                            ),
+                        )
                     client = self.client_factory([cfg.command, *cfg.args], self.root)
                     await client.start()
                     self.clients[idx] = client
