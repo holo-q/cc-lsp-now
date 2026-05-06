@@ -209,6 +209,9 @@ class CliLogTests(unittest.TestCase):
             def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
                 pass
 
+            def connect(self) -> None:
+                pass
+
             def request(self, method: str, _params: dict[str, object]) -> dict[str, object]:
                 if method != "lsp.status":
                     raise AssertionError(method)
@@ -258,6 +261,47 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("sessions: 1", out)
         self.assertIn("source: route=rust language=rust reason=extension", out)
         self.assertIn("rust-analyzer live pid=456", out)
+
+    def test_global_command_warns_about_split_tmp_broker(self) -> None:
+        class FakeBroker:
+            hsp_started = False
+
+            def __enter__(self) -> FakeBroker:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def connect(self) -> None:
+                pass
+
+            def request(self, method: str, _params: dict[str, object]) -> dict[str, object]:
+                if method != "lsp.status":
+                    raise AssertionError(method)
+                return {"pid": 1, "uptime": 1.0, "idle_ttl_seconds": 1.0, "sessions": []}
+
+        class SplitBroker(FakeBroker):
+            def request(self, method: str, _params: dict[str, object]) -> dict[str, object]:
+                if method != "lsp.status":
+                    raise AssertionError(method)
+                return {"pid": 2, "sessions": [{"session_id": "s1"}]}
+
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            runtime = Path(root) / "runtime"
+            legacy_parent = Path(root) / "legacy"
+            runtime.mkdir()
+            legacy_parent.mkdir()
+            legacy = legacy_parent / "hsp-broker.sock"
+            legacy.touch()
+            with patch("hsp.cli._broker_socket_path", return_value=runtime / "hsp-broker.sock"):
+                with patch("hsp.cli._legacy_tmp_broker_socket_path", return_value=legacy):
+                    with patch("hsp.cli._open_cli_broker", return_value=FakeBroker()):
+                        with patch("hsp.cli._CliBrokerClient", return_value=SplitBroker()):
+                            out = self._run_with_env(["global"], {"HSP_BROKER": "auto"})
+
+        self.assertIn("split_broker_warning:", out)
+        self.assertIn("reachable alternate socket:", out)
+        self.assertIn("pid: 2 sessions: 1", out)
 
     def test_workgroup_command_counts_append_log_events(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:

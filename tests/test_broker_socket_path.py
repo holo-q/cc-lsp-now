@@ -10,10 +10,12 @@ contract is explicit:
    anyone who wants an isolated per-project broker.
 2. `XDG_RUNTIME_DIR` is preferred when available; the resulting path
    lives under that runtime dir.
-3. Without `XDG_RUNTIME_DIR`, the broker falls back to a per-user
+3. Without `XDG_RUNTIME_DIR`, `/run/user/<uid>` is still preferred when it
+   exists so stripped agent environments do not fork a second broker.
+4. Without any runtime dir, the broker falls back to a per-user
    `/tmp/hsp-broker-<user>/` so concurrent users don't share a
    socket.
-4. Calling `socket_path()` repeatedly with the same env returns the
+5. Calling `socket_path()` repeatedly with the same env returns the
    same `Path` — required for both the daemon's bind and the client's
    connect to land on the same file.
 """
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 from hsp.broker import (
     DEFAULT_SOCKET_NAME,
@@ -86,9 +89,24 @@ class SocketPathTests(unittest.TestCase):
                 "USER": "hsptester",
             }
         ):
-            p = socket_path()
+            with patch("hsp.broker.os.getuid", return_value=99999999):
+                p = socket_path()
             self.assertEqual(p.name, DEFAULT_SOCKET_NAME)
             self.assertEqual(str(p.parent), "/tmp/hsp-broker-hsptester")
+
+    def test_missing_xdg_uses_existing_run_user_dir(self) -> None:
+        run_user = f"/run/user/{os.getuid()}"
+        if not os.path.isdir(run_user):
+            self.skipTest(f"{run_user} does not exist")
+        with _EnvScope(
+            **{
+                SOCKET_ENV_OVERRIDE: None,
+                "XDG_RUNTIME_DIR": None,
+            }
+        ):
+            p = socket_path()
+            self.assertEqual(p.name, DEFAULT_SOCKET_NAME)
+            self.assertEqual(str(p.parent), run_user)
 
     def test_path_is_stable_across_calls(self) -> None:
         with _EnvScope(

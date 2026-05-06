@@ -288,11 +288,24 @@ def _broker_socket_path() -> Path:
     override = os.environ.get("HSP_BROKER_SOCKET")
     if override:
         return Path(override)
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    runtime = _user_runtime_dir()
     if runtime:
-        return Path(runtime) / BROKER_SOCKET_NAME
+        return runtime / BROKER_SOCKET_NAME
     user = os.environ.get("USER") or str(os.getuid())
     return Path(f"/tmp/hsp-broker-{user}") / BROKER_SOCKET_NAME
+
+
+def _legacy_tmp_broker_socket_path() -> Path:
+    user = os.environ.get("USER") or str(os.getuid())
+    return Path(f"/tmp/hsp-broker-{user}") / BROKER_SOCKET_NAME
+
+
+def _user_runtime_dir() -> Path | None:
+    raw = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if raw:
+        return Path(raw)
+    candidate = Path(f"/run/user/{os.getuid()}")
+    return candidate if candidate.exists() else None
 
 
 def _broker_log_path() -> Path:
@@ -590,7 +603,30 @@ def _global_block(*, start_broker: bool) -> str:
         lines.append(f"broker: invalid lsp.status ({type(status).__name__})")
         return "\n".join(lines)
     lines.extend(_render_global_status(cast(dict[str, object], status), started=started))
+    lines.extend(_split_broker_lines())
     return "\n".join(lines)
+
+
+def _split_broker_lines() -> list[str]:
+    current = _broker_socket_path()
+    legacy = _legacy_tmp_broker_socket_path()
+    if legacy == current or not legacy.exists():
+        return []
+    try:
+        with _CliBrokerClient(legacy) as client:
+            client.connect()
+            status = client.request("lsp.status", {})
+    except (_CliBrokerError, OSError):
+        return []
+    if not isinstance(status, dict):
+        return []
+    sessions = _wire_list(cast(dict[str, object], status), "sessions")
+    return [
+        "split_broker_warning:",
+        f"  reachable alternate socket: {legacy}",
+        f"  pid: {status.get('pid', '-')} sessions: {len(sessions)}",
+        "  restart old MCP clients or stop the alternate broker after migrating work.",
+    ]
 
 
 def _render_global_status(status: dict[str, object], *, started: bool) -> list[str]:

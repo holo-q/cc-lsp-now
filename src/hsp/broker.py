@@ -92,11 +92,13 @@ def socket_path() -> Path:
 
     1. `$HSP_BROKER_SOCKET` — explicit override, used in tests and by
        users who run an isolated broker for a single project.
-    2. `$XDG_RUNTIME_DIR/hsp-broker.sock` — the canonical location on
-       systemd-managed systems; the directory is already user-private and
-       cleaned on logout.
-    3. `/tmp/hsp-broker-<user>/hsp-broker.sock` — fallback for shells
-       without `$XDG_RUNTIME_DIR` (containers, minimal envs).  The parent
+    2. The user runtime dir (`$XDG_RUNTIME_DIR`, or `/run/user/<uid>` when the
+       env var is missing) — the canonical location on systemd-managed
+       systems.  Falling back to `/run/user/<uid>` prevents GUI/agent
+       subprocesses with stripped environments from starting split-brain
+       brokers.
+    3. `/tmp/hsp-broker-<user>/hsp-broker.sock` — fallback for systems without
+       a user runtime dir (containers, minimal envs).  The parent
        directory is created mode `0o700` so a multi-user box keeps
        per-user isolation.
 
@@ -107,9 +109,9 @@ def socket_path() -> Path:
     override = os.environ.get(SOCKET_ENV_OVERRIDE)
     if override:
         return Path(override)
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    runtime = _user_runtime_dir()
     if runtime:
-        return Path(runtime) / DEFAULT_SOCKET_NAME
+        return runtime / DEFAULT_SOCKET_NAME
     user = os.environ.get("USER") or _safe_user() or str(os.getuid())
     base = Path(f"/tmp/hsp-broker-{user}")
     try:
@@ -117,6 +119,14 @@ def socket_path() -> Path:
     except OSError:
         pass
     return base / DEFAULT_SOCKET_NAME
+
+
+def _user_runtime_dir() -> Path | None:
+    raw = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if raw:
+        return Path(raw)
+    candidate = Path(f"/run/user/{os.getuid()}")
+    return candidate if candidate.exists() else None
 
 
 def _safe_user() -> str:
