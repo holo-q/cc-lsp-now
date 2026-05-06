@@ -11,6 +11,8 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
+import subprocess
 import sys
 from collections.abc import Sequence
 from typing import Any, cast
@@ -19,6 +21,37 @@ from hsp import server
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"", "0", "false", "no", "off"}
+BUILD_FIRST_TOKENS = {
+    "cargo",
+    "cmake",
+    "dotnet",
+    "go",
+    "gradle",
+    "just",
+    "make",
+    "mvn",
+    "ninja",
+    "npm",
+    "pnpm",
+    "pytest",
+    "rk",
+    "uv",
+    "yarn",
+}
+BUILD_SUBCOMMANDS = {
+    "bench",
+    "build",
+    "check",
+    "clippy",
+    "compile",
+    "install",
+    "lint",
+    "package",
+    "publish",
+    "run",
+    "test",
+    "verify",
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -28,6 +61,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_log(ns, parser)
     if ns.command == "hook":
         return _run_hook(ns, parser)
+    if ns.command == "run":
+        return _run_command(ns, parser)
     parser.error(f"unknown command: {ns.command!r}")
     return 2
 
@@ -68,6 +103,18 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--status", default="")
     hook.add_argument("--targets", default="")
     hook.add_argument("--commit", default="")
+
+    run = subcommands.add_parser(
+        "run",
+        help="wait for the workgroup build gate, run a command, then record the result",
+    )
+    run.add_argument("--timeout", default="2m")
+    run.add_argument("--kind", default="test.ran")
+    run.add_argument("--files", default="")
+    run.add_argument("--symbols", default="")
+    run.add_argument("--message", default="")
+    run.add_argument("--no-log", action="store_true")
+    run.add_argument("argv", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -112,12 +159,30 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if kind in {"prompt", "user.prompt"} and message.strip() == ".end":
         kind = "session.stop"
         message = ".end"
+    command = _hook_command(payload)
+    if _is_build_before_hook(kind, payload, command):
+        gate = asyncio.run(
+            server.lsp_log(
+                action="build_gate",
+                message=command,
+                timeout=os.environ.get("HSP_BUILD_GATE_TIMEOUT", "2m"),
+            )
+        )
+        if "build gate: unlocked" not in gate:
+            print(gate, file=sys.stderr)
+            return 124
+        return 0
     files = _join_scope(str(ns.files), _hook_files(payload))
     symbols = _join_scope(str(ns.symbols), _hook_symbols(payload))
     aliases = _join_scope(str(ns.aliases), [])
     status = str(ns.status) or _hook_status(payload)
     targets = str(ns.targets)
     commit = str(ns.commit)
+    if _is_build_after_hook(kind, payload, command):
+        kind = "test.ran"
+        message = command
+        targets = targets or command
+        status = _build_status(status)
 
     asyncio.run(
         server.lsp_log(
@@ -133,6 +198,46 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         )
     )
     return 0
+
+
+def _run_command(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    argv = _command_argv(cast(list[str], ns.argv))
+    if not argv:
+        parser.error("hsp run requires a command after --")
+
+    message = str(ns.message).strip() or " ".join(argv)
+    gate = asyncio.run(
+        server.lsp_log(
+            action="build_gate",
+            message=message,
+            timeout=str(ns.timeout),
+        )
+    )
+    if "build gate: unlocked" not in gate:
+        print(gate, file=sys.stderr)
+        return 124
+
+    completed = subprocess.run(argv, check=False)
+    status = "passed" if completed.returncode == 0 else "failed"
+    if not bool(ns.no_log):
+        asyncio.run(
+            server.lsp_log(
+                action="event",
+                message=message,
+                files=str(ns.files),
+                symbols=str(ns.symbols),
+                kind=str(ns.kind),
+                status=status,
+                targets=message,
+            )
+        )
+    return int(completed.returncode)
+
+
+def _command_argv(argv: list[str]) -> list[str]:
+    if argv and argv[0] == "--":
+        return argv[1:]
+    return argv
 
 
 def _hooks_enabled() -> bool:
@@ -207,11 +312,70 @@ def _hook_status(payload: dict[str, object]) -> str:
             return "error"
         if data.get("interrupted"):
             return "interrupted"
+        if data.get("success") is True:
+            return "success"
+        if data.get("success") is False:
+            return "error"
     if payload.get("success") is True:
         return "success"
     if payload.get("success") is False:
         return "error"
     return ""
+
+
+def _hook_command(payload: dict[str, object]) -> str:
+    command = payload.get("command")
+    if isinstance(command, str) and command.strip():
+        return command.strip()
+    for key in ("tool_input", "toolInput", "input"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            data = cast(dict[str, object], nested)
+            command = data.get("command")
+            if isinstance(command, str) and command.strip():
+                return command.strip()
+    return ""
+
+
+def _is_build_before_hook(kind: str, payload: dict[str, object], command: str) -> bool:
+    return kind in {"tool.before", "bash.before"} and _hook_tool_name(payload) == "Bash" and _is_build_command(command)
+
+
+def _is_build_after_hook(kind: str, payload: dict[str, object], command: str) -> bool:
+    return kind in {"tool.after", "bash.after"} and _hook_tool_name(payload) == "Bash" and _is_build_command(command)
+
+
+def _hook_tool_name(payload: dict[str, object]) -> str:
+    return _string_value(payload, "tool_name", "toolName", "name")
+
+
+def _is_build_command(command: str) -> bool:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = command.split()
+    if not argv:
+        return False
+    first = os.path.basename(argv[0])
+    if first not in BUILD_FIRST_TOKENS:
+        return False
+    if first in {"pytest", "make", "just", "ninja"}:
+        return True
+    if first == "uv":
+        return len(argv) >= 2 and argv[1] in {"run", "tool"}
+    if first in {"npm", "pnpm", "yarn"}:
+        return len(argv) >= 2 and argv[1] in {"run", "test", "build", "lint", "publish"}
+    if len(argv) == 1:
+        return False
+    return argv[1] in BUILD_SUBCOMMANDS
+
+
+def _build_status(status: str) -> str:
+    if status in {"success", "passed", "ok"}:
+        return "passed"
+    if status in {"error", "failed", "interrupted"}:
+        return "failed"
+    return status
 
 
 def _collect_path_like(payload: dict[str, object], out: list[str]) -> None:

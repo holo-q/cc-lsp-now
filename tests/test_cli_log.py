@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 from hsp import main as hsp_main
 from hsp import server
+from hsp.agent_bus import AgentBus
 from hsp.bus_event import BusEventKind
 
 
@@ -30,6 +32,7 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("hsp", scripts)
         self.assertNotIn("hsp-log", scripts)
         self.assertNotIn("hsp-hook", scripts)
+        self.assertNotIn("hsp-run", scripts)
 
     def test_entrypoint_dispatches_log_weather_without_starting_mcp_stdio(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
@@ -104,6 +107,56 @@ class CliLogTests(unittest.TestCase):
         self.assertIn(qid, reply)
         self.assertIn("reply recorded", reply)
 
+    def test_run_waits_for_gate_executes_command_and_records_result(self) -> None:
+        completed = subprocess.CompletedProcess(["python", "-m", "tests"], 0)
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            with patch("hsp.cli.subprocess.run", return_value=completed) as run:
+                out = self._run(["run", "--", "python", "-m", "tests"], root=root)
+            event = self._read_last_event(root)
+            metadata = self._require_dict(event, "metadata")
+
+        self.assertEqual(out, "")
+        run.assert_called_once_with(["python", "-m", "tests"], check=False)
+        self.assertEqual(event["kind"], "test.ran")
+        self.assertEqual(event["message"], "python -m tests")
+        self.assertEqual(metadata["status"], "passed")
+
+    def test_run_records_failed_command_status_and_returns_exit_code(self) -> None:
+        completed = subprocess.CompletedProcess(["cargo", "test"], 101)
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            with patch("hsp.cli.subprocess.run", return_value=completed):
+                code, _out, _err = self._run_code(["run", "--", "cargo", "test"], root=root)
+            event = self._read_last_event(root)
+            metadata = self._require_dict(event, "metadata")
+
+        self.assertEqual(code, 101)
+        self.assertEqual(event["kind"], "test.ran")
+        self.assertEqual(metadata["status"], "failed")
+
+    def test_run_timeout_does_not_execute_command_or_write_result(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "other-agent",
+                "message": "editing shared state",
+            })
+            with patch("hsp.cli.subprocess.run") as run:
+                code, _out, err = self._run_code([
+                    "run",
+                    "--timeout",
+                    "1ms",
+                    "--",
+                    "cargo",
+                    "test",
+                ], root=root)
+            event = self._read_last_event(root)
+
+        self.assertEqual(code, 124)
+        self.assertIn("build gate timed out", err)
+        run.assert_not_called()
+        self.assertEqual(event["kind"], "ticket.started")
+
     def test_hook_kind_aliases_normalize_to_canonical_kind(self) -> None:
         self.assertIs(BusEventKind.from_wire("test.result"), BusEventKind.TEST)
         self.assertIs(BusEventKind.from_wire("lsp_confirm.after"), BusEventKind.CONFIRM_AFTER)
@@ -138,6 +191,62 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(event["kind"], "edit.after")
         self.assertEqual(event["message"], "PostToolUse Edit")
         self.assertEqual(scope["files"], ["src/hsp/server.py"])
+
+    def test_build_before_hook_waits_at_gate_without_writing_board_event(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run_hook(["hook", "--kind", "tool.before"], root=root, stdin=payload, enabled=True)
+            path = Path(root) / "tmp" / "hsp-bus.jsonl"
+
+        self.assertEqual(out, "")
+        self.assertFalse(path.exists())
+
+    def test_build_before_hook_timeout_blocks_command_without_new_board_event(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "other-agent",
+                "message": "editing shared state",
+            })
+            code, _out, err = self._run_hook_code(
+                ["hook", "--kind", "tool.before"],
+                root=root,
+                stdin=payload,
+                enabled=True,
+                extra_env={"HSP_BUILD_GATE_TIMEOUT": "1ms"},
+            )
+            event = self._read_last_event(root)
+
+        self.assertEqual(code, 124)
+        self.assertIn("build gate timed out", err)
+        self.assertEqual(event["kind"], "ticket.started")
+
+    def test_build_after_hook_records_test_result(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "uv run python -m unittest"},
+            "tool_response": {"success": True},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run_hook(["hook", "--kind", "tool.after"], root=root, stdin=payload, enabled=True)
+            event = self._read_last_event(root)
+            metadata = self._require_dict(event, "metadata")
+
+        self.assertEqual(out, "")
+        self.assertEqual(event["kind"], "test.ran")
+        self.assertEqual(event["message"], "uv run python -m unittest")
+        self.assertEqual(metadata["status"], "passed")
 
     def test_prompt_end_command_records_session_stop(self) -> None:
         payload = json.dumps({
@@ -178,28 +287,52 @@ class CliLogTests(unittest.TestCase):
         self.assertNotIn("hsp-hook", commands)
 
     def _run(self, argv: list[str], *, root: str) -> str:
+        code, out, _err = self._run_code(argv, root=root)
+        self.assertEqual(code, 0)
+        return out
+
+    def _run_code(self, argv: list[str], *, root: str) -> tuple[int, str, str]:
         out = io.StringIO()
+        err = io.StringIO()
         with patch.dict(os.environ, {"HSP_BROKER": "off", "LSP_ROOT": root}, clear=False):
             with contextlib.redirect_stdout(out):
-                with self.assertRaises(SystemExit) as cm:
-                    hsp_main(argv)
-        self.assertEqual(cm.exception.code, 0)
-        return out.getvalue()
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as cm:
+                        hsp_main(argv)
+        code = cm.exception.code
+        return code if isinstance(code, int) else int(code or 0), out.getvalue(), err.getvalue()
 
     def _run_hook(self, argv: list[str], *, root: str, stdin: str, enabled: bool) -> str:
+        code, out, _err = self._run_hook_code(argv, root=root, stdin=stdin, enabled=enabled)
+        self.assertEqual(code, 0)
+        return out
+
+    def _run_hook_code(
+        self,
+        argv: list[str],
+        *,
+        root: str,
+        stdin: str,
+        enabled: bool,
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
         out = io.StringIO()
+        err = io.StringIO()
         env = {
             "HSP_BROKER": "off",
             "LSP_ROOT": root,
             "HSP_HOOKS": "1" if enabled else "0",
         }
+        if extra_env:
+            env.update(extra_env)
         with patch.dict(os.environ, env, clear=False):
             with patch("sys.stdin", io.StringIO(stdin)):
                 with contextlib.redirect_stdout(out):
-                    with self.assertRaises(SystemExit) as cm:
-                        hsp_main(argv)
-        self.assertEqual(cm.exception.code, 0)
-        return out.getvalue()
+                    with contextlib.redirect_stderr(err):
+                        with self.assertRaises(SystemExit) as cm:
+                            hsp_main(argv)
+        code = cm.exception.code
+        return code if isinstance(code, int) else int(code or 0), out.getvalue(), err.getvalue()
 
     def _read_last_event(self, root: str) -> dict[str, object]:
         path = Path(root) / "tmp" / "hsp-bus.jsonl"

@@ -306,17 +306,20 @@ hsp log reply --id Q3 --message "done"
 hsp log hook --kind edit.after --files src/server.py
 hsp log hook --kind commit.after --commit d796fc8
 hsp hook --kind edit.after < "$CLAUDE_HOOK_PAYLOAD"
+hsp run -- cargo test
 ```
 
 Each subcommand prints a compact bus-stop notice or stays silent when no
 related motion is nearby. Silence is part of the interface; harness hooks
 should pass output straight through without prefixing or summarizing it.
 
-The CLI stays warn-only at this layer too. `hsp log` never blocks the
+The CLI stays warn-first at this layer too. `hsp log` never blocks the
 caller, never claims a file, and never returns a non-zero exit code to gate an
-edit — it only describes the surrounding weather. Coordination pressure comes
-from making nearby motion visible at the next bus stop, not from refusing the
-current action.
+edit — it only describes the surrounding weather. `hsp run` is the explicit
+exception for build and verifier commands: it waits on `build_gate`, executes
+the command with normal stdio, and records one `test.ran` row with pass/fail
+status after the process exits. A gate timeout returns `124` and does not run
+the command.
 
 ### Hook Recipes
 
@@ -358,6 +361,14 @@ Session start and prompt stops emit weather; edit/confirm/test/commit/push
 stops record a touched-files event and then emit any digest the broker has
 queued for that scope. The same broker decides whether to surface an open
 question, a settled digest, a related commit, or nothing.
+
+Generic Bash hooks also recognize common build/verifier commands such as
+`cargo test`, `cargo check`, `uv run ...`, `pytest`, `npm test`, `pnpm run`,
+`go test`, `make`, `just`, `dotnet test`, `rk test`, and similar first-token /
+subcommand pairs. On the before hook they run the quiet build gate and do not
+append a journal row; on the after hook they record `test.ran` with normalized
+`passed` / `failed` status. Set `HSP_BUILD_GATE_TIMEOUT` to tune the hook wait
+window; the default is `2m`.
 
 ### Timed Questions
 
@@ -441,7 +452,8 @@ a single `hsp` binary. The shape is:
    The broker decides per-stop whether the digest is worth printing; silent
    exit is the common case.
 5. Stays warn-first: no file claims and no edit denial. `build_gate` is the
-   explicit quiet build stop; hook bodies that pipe other `hsp log` output
+   explicit quiet build stop. `hsp run` and detected build-command before hooks
+   are allowed to wait or time out; hook bodies that pipe other `hsp log` output
    through must not interpret it as a gate.
 6. Timed questions (`ask`/`reply`) layer on top of the same stops: open
    questions whose scope overlaps the current stop append a compact reminder,
