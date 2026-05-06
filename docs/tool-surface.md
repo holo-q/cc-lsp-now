@@ -20,7 +20,8 @@ multi-agent, and verifier tool roadmap that extends this surface beyond raw LSP
 orchestration. See `docs/lsp-path.md` for the bounded pathfinding operator that
 connects two known semantic anchors through one explicit edge family. See
 `docs/agent-bus.md` for the planned multi-agent event log and hook-fed bus
-digests.
+digests. See `docs/harness-capability-matrix.md` for harness-by-harness
+support, enforcement gaps, and follow-up tickets.
 
 ## Target Tools
 

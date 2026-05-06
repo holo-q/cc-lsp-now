@@ -1,9 +1,11 @@
 # Agent Bus
 
 The agent bus is the coordination layer for parallel agents working in the same
-workspace. It should feel like weather, not a traffic cop: compact situational
-awareness appears at the next natural boundary, and agents adjust course without
-needing a lock ritual.
+workspace. It should feel like weather, not a traffic cop by default: compact
+situational awareness appears at the next natural boundary, and agents adjust
+course without needing a lock ritual. See
+`docs/harness-capability-matrix.md` for the exact harness support matrix and
+open teamwork tickets.
 
 The core idea is simple:
 

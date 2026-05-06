@@ -192,11 +192,12 @@ hsp-broker
   Multiple agents reuse the same broker-owned LSP chain for the same
   root/config hash, reducing CPU and keeping route selection, method routing,
   diagnostics, and future alias memory aligned.
-- The broker owns the first agent-bus slice: `lsp_log` appends durable
-  workspace events to `tmp/hsp-bus.jsonl`, opens timed questions,
-  records replies, settles closed windows, and renders compact weather. The bus
-  is advisory only: no claims, leases, or edit denial. See
-  [docs/agent-bus.md](docs/agent-bus.md).
+- The broker owns the agent-bus slice: `lsp_log` appends workspace events to
+  `tmp/hsp-bus.jsonl`, opens timed questions, records replies, settles closed
+  windows, and renders compact weather. Tickets, build gates, and opt-in edit
+  denial are documented in [docs/agent-bus.md](docs/agent-bus.md); harness
+  support and open teamwork tickets live in
+  [docs/harness-capability-matrix.md](docs/harness-capability-matrix.md).
 - With `LSP_DEVTOOLS=1`, the broker starts `python-devtools` and registers
   live `broker`, `bus`, `registry`, and `lsp` objects so agents can attach via
   the `python-devtools` MCP bridge and inspect daemon state directly.
