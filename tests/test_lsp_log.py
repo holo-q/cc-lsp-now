@@ -172,7 +172,6 @@ class LspLogRegistryTests(unittest.TestCase):
             "journal": "hsp/journal",
             "ask": "hsp/ask",
             "chat": "hsp/chat",
-            "build_gate": "hsp/build_gate",
         }
         for name, method in expected.items():
             with self.subTest(name=name):
@@ -182,6 +181,11 @@ class LspLogRegistryTests(unittest.TestCase):
                 self.assertEqual(registered, method)
                 self.assertIn(name, TOOL_CAPABILITIES)
                 self.assertIsNone(TOOL_CAPABILITIES[name])
+
+    def test_build_gate_is_implicit_not_agent_facing_mcp(self) -> None:
+        self.assertNotIn("build_gate", _server._BUS_ACTIONS)
+        self.assertNotIn("build_gate", _ALL_TOOLS)
+        self.assertNotIn("build_gate", TOOL_CAPABILITIES)
 
     def test_edit_gate_is_lsp_log_action_but_not_short_tool(self) -> None:
         self.assertIn("edit_gate", _server._BUS_ACTIONS)
@@ -328,18 +332,17 @@ class LspLogAskFlowTests(_LocalBusFixture):
 class TeamToolFlowTests(_LocalBusFixture):
     """The short MCP names are the agent treadmill surface.
 
-    ``ticket`` announces work and feeds the build gate, ``journal`` is the
-    compact board, and ``chat(id=Qn)`` is the reply that wakes a waiting ask.
+    ``ticket`` announces work, ``journal`` is the compact board, and
+    ``chat(id=Qn)`` is the reply that wakes a waiting ask. Build gates are
+    ambient hook/wrapper behavior, not an MCP verb agents should call.
     """
 
-    def test_ticket_journal_and_build_gate_short_tools(self) -> None:
+    def test_ticket_and_journal_short_tools(self) -> None:
         ticket = _run(_server.ticket("wire build gate", files="src/hsp/server.py"))
-        gate = _run(_server.build_gate("uv run python -m unittest"))
         journal = _run(_server.journal(limit=10))
 
         self.assertIn("ticket T1", ticket)
         self.assertIn("active tickets: 1", ticket)
-        self.assertIn("build gate: unlocked", gate)
         self.assertIn("journal:", journal)
         self.assertIn("ticket.started", journal)
 
@@ -398,7 +401,7 @@ class TeamToolFlowTests(_LocalBusFixture):
             "message": "edit b",
         })
 
-        result = _run(_server.build_gate("cargo test", timeout="1ms"))
+        result = _run(_server.implicit_build_gate("cargo test", timeout="1ms"))
 
         self.assertIn("timed out", result)
         self.assertIn("build gate: waiting", result)

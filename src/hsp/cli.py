@@ -180,9 +180,8 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             return 0
     if _is_build_before_hook(kind, payload, command):
         gate = asyncio.run(
-            server.lsp_log(
-                action="build_gate",
-                message=command,
+            server.implicit_build_gate(
+                command,
                 timeout=os.environ.get("HSP_BUILD_GATE_TIMEOUT", "2m"),
             )
         )
@@ -225,11 +224,7 @@ def _run_command(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int
 
     message = str(ns.message).strip() or " ".join(argv)
     gate = asyncio.run(
-        server.lsp_log(
-            action="build_gate",
-            message=message,
-            timeout=str(ns.timeout),
-        )
+        server.implicit_build_gate(message, timeout=str(ns.timeout))
     )
     if "build gate: unlocked" not in gate:
         print(gate, file=sys.stderr)

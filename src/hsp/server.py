@@ -764,7 +764,6 @@ _BUS_ACTIONS: tuple[str, ...] = (
     "ticket",
     "journal",
     "question",
-    "build_gate",
     "edit_gate",
     "recent",
     "settle",
@@ -3845,15 +3844,6 @@ async def lsp_log(
     if act == "edit_gate" and status:
         params["mode"] = status
 
-    if act == "build_gate":
-        result = await _wait_for_build_gate(params, timeout_seconds)
-        if isinstance(result, str):
-            return result
-        text = _render_bus_result(act, result)
-        if not bool(result.get("unlocked", False)):
-            text = f"build gate timed out after {timeout}\n{text}"
-        return text
-
     result = await _dispatch_bus_action(act, params)
     if isinstance(result, str):
         return result
@@ -3980,8 +3970,8 @@ async def chat(message: str, id: str = "") -> str:
     return _render_bus_result("chat", result)
 
 
-async def build_gate(command: str = "", timeout: str = "2m") -> str:
-    """Wait until a build may proceed without broadcasting pressure."""
+async def implicit_build_gate(command: str = "", timeout: str = "2m") -> str:
+    """Wait for hook/wrapper-detected build commands without exposing an MCP tool."""
     timeout_seconds = _parse_bus_duration(timeout, default=120.0)
     if isinstance(timeout_seconds, str):
         return timeout_seconds
@@ -5659,7 +5649,6 @@ _ALL_TOOLS: dict[str, tuple[Any, str]] = {
     "journal": (journal, "hsp/journal"),
     "ask": (ask, "hsp/ask"),
     "chat": (chat, "hsp/chat"),
-    "build_gate": (build_gate, "hsp/build_gate"),
     "memory": (lsp_memory, "hsp/memory"),
 }
 
@@ -5713,7 +5702,6 @@ TOOL_CAPABILITIES: dict[str, str | None] = {
     "journal": None,
     "ask": None,
     "chat": None,
-    "build_gate": None,
     "memory": None,
 }
 

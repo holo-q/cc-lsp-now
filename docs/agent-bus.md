@@ -159,18 +159,20 @@ emits `ticket.started`; later holders emit `ticket.joined`; release emits
 implementation intentionally keeps one ticket per agent because the ergonomic
 unit is "what am I doing now?", not a stack of claims to remember.
 
-Build wrappers call the gate before running expensive or state-sensitive
-commands:
+Build hooks and wrappers call the gate before running expensive or
+state-sensitive commands. This is intentionally ambient: agents should run the
+build command normally and let HSP detect build-shaped shell commands through
+the harness hook, or use `hsp run -- <command>` from shell scripts:
 
 ```text
-hsp.build_gate("cargo test", timeout="2m")
+hsp run -- cargo test
 ```
 
-The tool waits and returns `unlocked` when there are no active ticket holders, or when
-every current holder has also reached the build gate and is waiting. That second
-case prevents deadlock: if all agents independently arrived at "I need the
-build", the build can proceed. Calling the gate is not written to the journal
-and is not broadcast; it should not rush active editors.
+The internal gate returns `unlocked` when there are no active ticket holders, or
+when every current holder has also reached the build gate and is waiting. That
+second case prevents deadlock: if all agents independently arrived at "I need
+the build", the build can proceed. Checking the gate is not written to the
+journal and is not broadcast; it should not rush active editors.
 
 When an agent starts a new ticket, its stale build-wait marker is cleared. This
 keeps an old "waiting for build" state from accidentally unlocking a later
@@ -294,7 +296,6 @@ small:
 | `chat` | Post a chat row, optionally replying to and closing an ask id. |
 | `ticket` | Start/join this agent's current work ticket, or release with an empty message. |
 | `journal` | Show open tickets/questions and the latest compact event rows. |
-| `build_gate` | Quietly wait until a build can proceed or the timeout elapses. |
 | `edit_gate` | Quietly report whether the current edit hook may proceed. |
 | `recent` | Show recent related bus activity. |
 | `settle` | Close expired questions and show pending digests. |
@@ -336,7 +337,7 @@ hsp log ticket --message "wire workgroup ticket state" --files src/hsp/agent_bus
 hsp log ticket --message ""
 hsp log journal
 hsp log chat --id Q3 --message "all holders waiting"
-hsp log build_gate --message "cargo test" --timeout 2m
+hsp run -- cargo test
 hsp log edit_gate --status workgroup
 hsp log note --message "..." --files src/server.py
 hsp log ask --message "Anyone touching server.py?" --files src/server.py --timeout 3m
@@ -354,10 +355,11 @@ should pass output straight through without prefixing or summarizing it.
 The CLI stays warn-first at this layer too. `hsp log` never blocks the
 caller, never claims a file, and never returns a non-zero exit code to gate an
 edit — it only describes the surrounding weather. `hsp run` is the explicit
-exception for build and verifier commands: it waits on `build_gate`, executes
-the command with normal stdio, and records one `test.ran` row with pass/fail
-status after the process exits. A gate timeout returns `124` and does not run
-the command.
+exception for build and verifier commands: it waits on the internal build gate,
+executes the command with normal stdio, and records one `test.ran` row with
+pass/fail status after the process exits. A gate timeout returns `124` and
+does not run the command. Build gating is not an `hsp log` action because
+agents should not need to remember or invoke it manually.
 
 ### Hook Recipes
 
@@ -470,10 +472,9 @@ The initial implementation is broker-backed and intentionally advisory:
 3. `BrokerDaemon` exposes `bus.event`, `bus.note`, `bus.ask`, `bus.reply`,
    `bus.chat`, `bus.ticket`, `bus.journal`, `bus.build_gate`, `bus.recent`,
    `bus.settle`, `bus.precommit`, `bus.postcommit`, `bus.weather`, and
-   `bus.status`.
-4. The MCP surface is `lsp_log(action="event|note|ask|reply|chat|ticket|journal|build_gate|recent|settle|precommit|postcommit|weather")`,
-   plus short tools `hsp.ticket`, `hsp.journal`, `hsp.ask`, `hsp.chat`, and
-   `hsp.build_gate`.
+   `bus.status`. `bus.build_gate` is internal to hooks/wrappers.
+4. The MCP surface is `lsp_log(action="event|note|ask|reply|chat|ticket|journal|recent|settle|precommit|postcommit|weather")`,
+   plus short tools `hsp.ticket`, `hsp.journal`, `hsp.ask`, and `hsp.chat`.
 5. `LSP_DEVTOOLS=1` registers the live broker, bus, registry, and LSP
    manager with `python-devtools` under app id `hsp-broker` by default,
    so agents can inspect daemon state without adding bespoke debug endpoints.
@@ -487,20 +488,20 @@ a single `hsp` binary. The shape is:
 1. No new binary. `log` and `hook` are subcommands on `hsp`; there is no
    `hsp-log` or `hsp-hook`. One entrypoint keeps install paths, broker
    discovery, and socket auth identical between the MCP server and hooks.
-2. The subcommand mirrors `lsp_log` actions one-to-one (`weather`, `journal`,
-   `recent`, `settle`, `ticket`, `chat`, `note`, `ask`, `reply`, `hook`,
-   `build_gate`, `precommit`, `postcommit`, `event`), so any MCP example
-   translates directly to a shell hook body.
+2. The subcommand mirrors public `lsp_log` actions where useful (`weather`,
+   `journal`, `recent`, `settle`, `ticket`, `chat`, `note`, `ask`, `reply`,
+   `hook`, `precommit`, `postcommit`, `event`). Build gating is not a public
+   log action; it is driven by `hsp hook` build-command detection and `hsp run`.
 3. Bundled plugin hooks are opt-in with `HSP_HOOKS=1` and no-op otherwise.
 4. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
    before/after, test result, git commit before/after, and push before/after.
    The broker decides per-stop whether the digest is worth printing; silent
    exit is the common case.
 5. Stays warn-first by default: no file claims and no edit denial unless
-   `HSP_REQUIRE_TICKET_FOR_EDITS=1` is set. `build_gate` is the explicit quiet
-   build stop. `hsp run` and detected build-command before hooks are allowed to
-   wait or time out; hook bodies that pipe other `hsp log` output through must
-   not interpret it as a gate.
+   `HSP_REQUIRE_TICKET_FOR_EDITS=1` is set. The build gate is the implicit
+   quiet build stop. `hsp run` and detected build-command before hooks are
+   allowed to wait or time out; hook bodies that pipe other `hsp log` output
+   through must not interpret it as a gate.
 6. Timed questions (`ask`/`reply`) layer on top of the same stops: open
    questions whose scope overlaps the current stop append a compact reminder,
    and at timeout the next stop emits the closing digest.
