@@ -131,9 +131,15 @@ class BrokerLspSession:
         client_factory: ClientFactory | None = None,
         prefer: dict[str, int] | None = None,
         project_markers: list[str] | None = None,
+        language: str = "",
+        route_id: str = "",
+        route_reason: str = "",
     ) -> None:
         self.root = os.path.abspath(root)
         self.chain = chain
+        self.language = language
+        self.route_id = route_id
+        self.route_reason = route_reason
         self.clients: list[LspClient | None] = [None] * len(chain)
         self.method_handler: dict[str, int | None] = dict(prefer or {})
         self.project_markers = list(project_markers or _project_markers())
@@ -365,6 +371,9 @@ class BrokerLspSession:
             )
         return {
             "root": self.root,
+            "language": self.language,
+            "route_id": self.route_id,
+            "route_reason": self.route_reason,
             "project_markers": list(self.project_markers),
             "last_used_at": self.last_used_at,
             "request_count": self.request_count,
@@ -401,6 +410,9 @@ class BrokerLspManager:
         server_label: str,
         prefer: dict[str, int] | None = None,
         project_markers: list[str] | None = None,
+        language: str = "",
+        route_id: str = "",
+        route_reason: str = "",
     ) -> tuple[str, BrokerLspSession]:
         session = self.registry.get_or_create(
             SessionKey(root=os.path.abspath(root), config_hash=config_hash_value),
@@ -415,6 +427,9 @@ class BrokerLspManager:
             client_factory=self.client_factory,
             prefer=prefer,
             project_markers=project_markers,
+            language=language,
+            route_id=route_id,
+            route_reason=route_reason,
         )
         self.sessions[session.session_id] = lsp_session
         return session.session_id, lsp_session

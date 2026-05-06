@@ -8,10 +8,12 @@ warming Roslyn, ty, basedpyright, or other servers wastes time and loses shared
 semantic context.
 
 This note started as a future direction. The first lifecycle slice now exists:
-the MCP server defaults to broker-first mode when an LSP chain is configured,
-auto-starts `hsp-broker`, and forwards LSP requests over the Unix socket.
-If the broker is unavailable in `auto` mode, direct in-process spawning remains
-the fallback.
+the MCP server defaults to broker-first mode when an LSP chain or builtin
+router is configured, auto-starts `hsp-broker`, and forwards LSP requests over
+the Unix socket. In router mode the MCP frontend sends URI/root context and the
+broker owns route selection, chain hashing, and warm-session lookup. If the
+broker is unavailable in `auto` mode, direct in-process spawning remains the
+fallback.
 
 ## Thesis
 
@@ -81,6 +83,7 @@ That slice is implemented as:
 - JSONL over a user-scoped Unix socket
 - MCP server request path: broker-first, direct fallback
 - session key: `(root, chain config hash)`
+- broker-owned route resolution for builtin routes (`HSP_ROUTER=1`),
 - list active sessions,
 - stop a session,
 - queue/add workspace folders,
@@ -126,6 +129,7 @@ future work; idle eviction and explicit root/config stop are implemented.
 Session identity should be explicit and debuggable:
 
 ```text
+route=csharp
 language=csharp
 root=~/holoq/repo-kit
 command=csharp-ls

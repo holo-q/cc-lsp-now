@@ -12,8 +12,8 @@ fresh language-server chain.
   response per line);
 - a workspace session registry keyed by `(root, config_hash)` so two
   clients asking for the same workspace get the same session record;
-- shared LSP request forwarding with the same chain routing policy as
-  direct mode;
+- shared LSP request forwarding, with builtin route selection owned by the
+  broker when clients send `router=true`;
 - clean start/stop helpers that the client side can drive (`session.stop`
   / a graceful `shutdown` request).
 
@@ -39,6 +39,7 @@ import os
 import signal
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -55,9 +56,14 @@ from hsp.broker_session import (
 )
 from hsp.broker_lsp import (
     BrokerLspManager,
+    chain_config_hash,
     chain_from_wire,
 )
+from hsp.chain_server import ChainServer
+from hsp.lsp_chain_config import parse_chain as parse_lsp_chain
+from hsp.lsp_chain_config import parse_prefer as parse_lsp_prefer
 from hsp.lsp import LspError
+from hsp.router import BUILTIN_ROUTES, LanguageRoute, find_project_root, get_route, resolve_route_id_for_path
 
 log = logging.getLogger(__name__)
 
@@ -252,6 +258,14 @@ class BrokerDaemon:
             sid = _str_param(params, "session_id")
             return {"stopped": await self.lsp.stop_session(sid)}
         if method == "session.stop_matching":
+            if _bool_param(params, "router"):
+                config = _lsp_session_config(params)
+                return {
+                    "stopped": await self.lsp.stop_matching(
+                        root=config.root,
+                        config_hash_value=config.config_hash,
+                    )
+                }
             return {
                 "stopped": await self.lsp.stop_matching(
                     root=_str_param(params, "root"),
@@ -357,23 +371,17 @@ class BrokerDaemon:
         return session_to_dict(session)
 
     def _lsp_session_from_params(self, params: dict[str, object]):
-        root = _str_param(params, "root")
-        chash = _str_param(params, "config_hash")
-        try:
-            chain = chain_from_wire(params.get("chain"))
-        except ValueError as e:
-            raise BrokerError("invalid_params", str(e)) from None
-        label_obj = params.get("server_label", "")
-        label = label_obj if isinstance(label_obj, str) else ""
-        prefer = _prefer_param(params)
-        project_markers = _str_list_param(params, "project_markers")
+        config = _lsp_session_config(params)
         _sid, session = self.lsp.get_or_create(
-            root=root,
-            config_hash_value=chash,
-            chain=chain,
-            server_label=label,
-            prefer=prefer,
-            project_markers=project_markers,
+            root=config.root,
+            config_hash_value=config.config_hash,
+            chain=config.chain,
+            server_label=config.server_label,
+            prefer=config.prefer,
+            project_markers=config.project_markers,
+            language=config.language,
+            route_id=config.route_id,
+            route_reason=config.route_reason,
         )
         return session
 
@@ -462,10 +470,142 @@ class BrokerDaemon:
         return await session.render_reset_session(reason)
 
 
+@dataclass(frozen=True)
+class LspSessionConfig:
+    root: str
+    config_hash: str
+    chain: list[ChainServer]
+    server_label: str
+    prefer: dict[str, int]
+    project_markers: list[str]
+    language: str
+    route_id: str
+    route_reason: str
+
+
 def _error_response(
     rid: object, code: str, message: str
 ) -> dict[str, object]:
     return {"id": rid, "error": {"code": code, "message": message}}
+
+
+def _bool_param(params: dict[str, object], name: str) -> bool:
+    value = params.get(name, False)
+    return bool(value) if isinstance(value, bool) else False
+
+
+def _optional_str_param(params: dict[str, object], name: str) -> str:
+    value = params.get(name, "")
+    return value if isinstance(value, str) else ""
+
+
+def _uri_to_path(uri: str) -> str:
+    return uri.removeprefix("file://") if uri.startswith("file://") else uri
+
+
+def _route_probe_path(params: dict[str, object], root: str) -> str:
+    uri = _optional_str_param(params, "uri")
+    if uri:
+        return _uri_to_path(uri)
+    for name in ("route_path", "path"):
+        value = _optional_str_param(params, name)
+        if value:
+            return value
+    renamed = params.get("renamed", [])
+    if isinstance(renamed, list) and renamed:
+        first = renamed[0]
+        if isinstance(first, list) and first and isinstance(first[0], str):
+            return first[0]
+    for name in ("created", "deleted"):
+        values = params.get(name, [])
+        if isinstance(values, list) and values and isinstance(values[0], str):
+            return values[0]
+    return root
+
+
+def _route_env(route: LanguageRoute, name: str, default: str = "") -> str:
+    if name in route.env:
+        return route.env[name]
+    return os.environ.get(name, default)
+
+
+def _route_markers(route: LanguageRoute) -> list[str]:
+    raw = _route_env(route, "LSP_PROJECT_MARKERS", ".git").strip()
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+def _config_language(language: str, project_markers: list[str]) -> str:
+    if project_markers:
+        return f"{language}|markers={','.join(project_markers)}"
+    return language
+
+
+def _legacy_lsp_session_config(params: dict[str, object]) -> LspSessionConfig:
+    root = _str_param(params, "root")
+    chash = _str_param(params, "config_hash")
+    try:
+        chain = chain_from_wire(params.get("chain"))
+    except ValueError as e:
+        raise BrokerError("invalid_params", str(e)) from None
+    label = _optional_str_param(params, "server_label")
+    return LspSessionConfig(
+        root=root,
+        config_hash=chash,
+        chain=chain,
+        server_label=label,
+        prefer=_prefer_param(params),
+        project_markers=_str_list_param(params, "project_markers"),
+        language=_optional_str_param(params, "language"),
+        route_id=_optional_str_param(params, "route_id"),
+        route_reason="client-supplied chain",
+    )
+
+
+def _router_lsp_session_config(params: dict[str, object]) -> LspSessionConfig:
+    requested_root = os.path.abspath(_str_param(params, "root"))
+    probe_path = os.path.abspath(_route_probe_path(params, requested_root))
+    override = _optional_str_param(params, "route").strip().lower()
+    route_id = override or resolve_route_id_for_path(probe_path) or resolve_route_id_for_path(requested_root)
+    if not route_id:
+        known = ", ".join(sorted(BUILTIN_ROUTES))
+        raise BrokerError(
+            "invalid_params",
+            "HSP broker router could not select a language route. "
+            f"Set HSP_ROUTE to one of: {known}; or set LSP_SERVERS explicitly.",
+        )
+    route = get_route(route_id)
+    if route is None:
+        known = ", ".join(sorted(BUILTIN_ROUTES))
+        raise BrokerError("invalid_params", f"Unknown HSP_ROUTE {route_id!r}. Known: {known}")
+
+    def env(name: str, default: str = "") -> str:
+        return _route_env(route, name, default)
+
+    try:
+        chain = parse_lsp_chain(env)
+    except ValueError as e:
+        raise BrokerError("invalid_params", str(e)) from None
+    project_markers = _route_markers(route)
+    root = find_project_root(probe_path, project_markers) or requested_root
+    language = _route_env(route, "LSP_LANGUAGE", route.language)
+    reason = f"{probe_path} -> {route_id}"
+    return LspSessionConfig(
+        root=os.path.abspath(root),
+        config_hash=chain_config_hash(_config_language(language, project_markers), chain),
+        chain=chain,
+        server_label=chain[0].label if chain else "",
+        prefer=parse_lsp_prefer(env, chain),
+        project_markers=project_markers,
+        language=language,
+        route_id=route_id,
+        route_reason=reason,
+    )
+
+
+def _lsp_session_config(params: dict[str, object]) -> LspSessionConfig:
+    if _bool_param(params, "router"):
+        return _router_lsp_session_config(params)
+    return _legacy_lsp_session_config(params)
 
 
 def _str_param(params: dict[str, object], name: str) -> str:

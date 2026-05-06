@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import unittest
-from hsp.broker_session import SessionRegistry
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -10,6 +11,7 @@ from hsp import server
 from hsp.alias_coordinator import alias_identity_to_wire
 from hsp.broker import BrokerDaemon
 from hsp.broker_lsp import BrokerLspManager, BrokerLspSession, chain_config_hash, chain_from_wire, chain_to_wire
+from hsp.broker_session import SessionRegistry
 from hsp.chain_server import ChainServer
 from hsp.lsp import LspClient
 from hsp.render_memory import AliasIdentity, AliasKind
@@ -238,6 +240,73 @@ class BrokerDaemonLspForwardingTests(unittest.IsolatedAsyncioTestCase):
         lsp = cast(dict[str, object], session["lsp"])
         self.assertEqual(lsp["request_count"], 2)
 
+    async def test_router_lsp_request_resolves_chain_inside_broker(self) -> None:
+        clients: list[FakeLspClient] = []
+
+        def factory(command: list[str], root: str) -> LspClient:
+            client = FakeLspClient(command, root)
+            clients.append(client)
+            return cast(LspClient, client)
+
+        daemon = BrokerDaemon()
+        daemon.lsp = BrokerLspManager(daemon.registry, client_factory=factory)
+        params: dict[str, object] = {
+            "root": "/repo",
+            "router": True,
+            "lsp_method": "textDocument/definition",
+            "lsp_params": {},
+            "uri": "file:///repo/src/lib.rs",
+            "empty_fallback_methods": [],
+        }
+
+        result = await daemon.handle_request({"id": "1", "method": "lsp.request", "params": params})
+        status = await daemon.handle_request({"id": "2", "method": "lsp.status", "params": {}})
+
+        self.assertIn("result", result)
+        self.assertEqual(clients[0].command, ["rust-analyzer"])
+        status_result = cast(dict[str, object], status["result"])
+        session = cast(list[dict[str, object]], status_result["sessions"])[0]
+        lsp = cast(dict[str, object], session["lsp"])
+        self.assertEqual(lsp["route_id"], "rust")
+        self.assertEqual(lsp["language"], "rust")
+
+    async def test_router_lsp_request_uses_nearest_project_root(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "tmp" / "test_broker_router"
+        shutil.rmtree(root, ignore_errors=True)
+        try:
+            crate = root / "crates" / "demo"
+            src = crate / "src"
+            src.mkdir(parents=True)
+            (root / "pyproject.toml").write_text("[project]\nname = 'outer'\n", encoding="utf-8")
+            (crate / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
+            target = src / "lib.rs"
+            target.write_text("", encoding="utf-8")
+
+            clients: list[FakeLspClient] = []
+
+            def factory(command: list[str], root_path: str) -> LspClient:
+                client = FakeLspClient(command, root_path)
+                clients.append(client)
+                return cast(LspClient, client)
+
+            daemon = BrokerDaemon()
+            daemon.lsp = BrokerLspManager(daemon.registry, client_factory=factory)
+            params: dict[str, object] = {
+                "root": str(root),
+                "router": True,
+                "lsp_method": "textDocument/definition",
+                "lsp_params": {},
+                "uri": target.resolve().as_uri(),
+                "empty_fallback_methods": [],
+            }
+
+            await daemon.handle_request({"id": "1", "method": "lsp.request", "params": params})
+
+            self.assertEqual(clients[0].command, ["rust-analyzer"])
+            self.assertEqual(clients[0].root, str(crate))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     async def test_render_touch_wire_reuses_alias_but_reintroduces_per_client(self) -> None:
         daemon = BrokerDaemon()
         chain = chain_to_wire([ChainServer(command="fake-ls", args=[], name="fake", label="fake")])
@@ -332,6 +401,15 @@ class ServerBrokerForwardingTests(unittest.TestCase):
         self.assertEqual(server._last_server, "brokered")
         self.assertIn("brokered", server._just_started_this_call)
         self.assertIn("/repo", server._added_workspaces_this_call)
+
+    def test_router_broker_params_do_not_include_frontend_chain(self) -> None:
+        with patch.dict("os.environ", {"HSP_ROUTER": "1"}, clear=True):
+            params = server._broker_base_params(route_uri="file:///repo/src/lib.rs")
+
+        self.assertTrue(params["router"])
+        self.assertEqual(params["uri"], "file:///repo/src/lib.rs")
+        self.assertNotIn("chain", params)
+        self.assertNotIn("config_hash", params)
 
 
 if __name__ == "__main__":

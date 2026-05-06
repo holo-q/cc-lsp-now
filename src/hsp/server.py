@@ -34,6 +34,9 @@ from hsp.candidate import Candidate
 from hsp.candidate_kind import CandidateKind
 from hsp.chain_server import ChainServer
 from hsp.file_move import FileMove
+from hsp.lsp_chain_config import parse_chain as parse_lsp_chain
+from hsp.lsp_chain_config import parse_prefer as parse_lsp_prefer
+from hsp.lsp_chain_config import parse_replace as parse_lsp_replace
 from hsp.path_finder import PathDirection, PathEdge, PathNode, PathSearchResult, find_paths
 from hsp.pending_buffer import DEFAULT_STAGE_HANDLE, PendingBook, PendingBuffer
 from hsp.router import BUILTIN_ROUTES, LanguageRoute, get_route, has_marker, resolve_route_id_for_path
@@ -440,19 +443,7 @@ def _parse_replace() -> dict[str, str]:
     lets a downstream user swap a binary without rewriting the plugin's full
     config sheet.
     """
-    env = os.environ.get("LSP_REPLACE", "").strip()
-    if not env:
-        return {}
-    result: dict[str, str] = {}
-    for entry in env.split(","):
-        entry = entry.strip()
-        if "=" not in entry:
-            continue
-        old, new = entry.split("=", 1)
-        old, new = old.strip(), new.strip()
-        if old and new:
-            result[old] = new
-    return result
+    return parse_lsp_replace(os.environ.get("LSP_REPLACE", ""))
 
 
 def _parse_chain() -> list[ChainServer]:
@@ -470,62 +461,10 @@ def _parse_chain() -> list[ChainServer]:
     LSP_REPLACE (optional): applies after parsing. 'basedpyright-langserver=pylance-language-server'
     swaps the command everywhere it appears in the chain and in LSP_PREFER.
     """
-    replace = _parse_replace()
-
-    def _sub(cmd: str) -> str:
-        return replace.get(cmd, cmd)
-    servers_env = _route_env("LSP_SERVERS", "").strip()
-    if servers_env:
-        chain: list[ChainServer] = []
-        for i, entry in enumerate(s.strip() for s in servers_env.split(";")):
-            if not entry:
-                continue
-            tokens = entry.split()
-            cmd, args = _sub(tokens[0]), tokens[1:]
-            label = cmd if i == 0 else f"{cmd} (fallback{f' {i}' if i > 1 else ''})"
-            chain.append(ChainServer(command=cmd, args=args, name=cmd, label=label))
-        if not chain:
-            raise RuntimeError("LSP_SERVERS is empty or malformed")
-        return chain
-
-    # Legacy path
-    primary_cmd = _route_env("LSP_COMMAND", "")
-    if not primary_cmd:
-        raise RuntimeError("LSP_SERVERS or LSP_COMMAND environment variable is required")
-    primary_cmd = _sub(primary_cmd)
-
-    chain: list[ChainServer] = [ChainServer(
-        command=primary_cmd,
-        args=_route_env("LSP_ARGS", "").split() if _route_env("LSP_ARGS", "") else [],
-        name=primary_cmd,
-        label=primary_cmd,
-    )]
-
-    first_fb = _route_env("LSP_FALLBACK_COMMAND", "")
-    if first_fb:
-        first_fb = _sub(first_fb)
-        chain.append(ChainServer(
-            command=first_fb,
-            args=_route_env("LSP_FALLBACK_ARGS", "").split() if _route_env("LSP_FALLBACK_ARGS", "") else [],
-            name=first_fb,
-            label=f"{first_fb} (fallback)",
-        ))
-
-    i = 2
-    while True:
-        cmd = _route_env(f"LSP_FALLBACK_{i}_COMMAND", "")
-        if not cmd:
-            break
-        cmd = _sub(cmd)
-        chain.append(ChainServer(
-            command=cmd,
-            args=_route_env(f"LSP_FALLBACK_{i}_ARGS", "").split() if _route_env(f"LSP_FALLBACK_{i}_ARGS", "") else [],
-            name=cmd,
-            label=f"{cmd} (fallback {i})",
-        ))
-        i += 1
-
-    return chain
+    try:
+        return parse_lsp_chain(_route_env)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from None
 
 
 def _parse_prefer(chain: list[ChainServer]) -> dict[str, int]:
@@ -535,23 +474,7 @@ def _parse_prefer(chain: list[ChainServer]) -> dict[str, int]:
     Example: 'workspace/willRenameFiles=basedpyright-langserver,textDocument/callHierarchy=basedpyright-langserver'
     If the named command isn't in the chain, the entry is ignored.
     """
-    prefer_env = _route_env("LSP_PREFER", "").strip()
-    if not prefer_env:
-        return {}
-    replace = _parse_replace()
-    result: dict[str, int] = {}
-    for entry in prefer_env.split(","):
-        entry = entry.strip()
-        if "=" not in entry:
-            continue
-        method, cmd = entry.split("=", 1)
-        method, cmd = method.strip(), cmd.strip()
-        cmd = replace.get(cmd, cmd)
-        for idx, cfg in enumerate(chain):
-            if cfg.command == cmd:
-                result[method] = idx
-                break
-    return result
+    return parse_lsp_prefer(_route_env, chain)
 
 
 def _ensure_chain_configs() -> list[ChainServer]:
@@ -574,10 +497,29 @@ def _broker_mode() -> str:
 def _broker_enabled() -> bool:
     if _broker_mode() == "off":
         return False
+    if _router_enabled() and not _explicit_lsp_configured():
+        return True
     return bool(_route_env("LSP_SERVERS", "") or _route_env("LSP_COMMAND", ""))
 
 
-def _broker_base_params() -> dict[str, object]:
+def _broker_routes_lsp() -> bool:
+    return _router_enabled() and not _explicit_lsp_configured()
+
+
+def _broker_base_params(route_uri: str | None = None, route_path: str = "") -> dict[str, object]:
+    base_root = os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd()))
+    if _broker_routes_lsp():
+        result: dict[str, object] = {
+            "root": base_root,
+            "router": True,
+            "route": os.environ.get("HSP_ROUTE", "").strip().lower(),
+        }
+        if route_uri:
+            result["uri"] = route_uri
+        if route_path:
+            result["route_path"] = route_path
+        return result
+
     chain = _ensure_chain_configs()
     language = _route_env("LSP_LANGUAGE", "").strip()
     project_markers = _project_markers()
@@ -585,7 +527,7 @@ def _broker_base_params() -> dict[str, object]:
     if project_markers:
         config_language = f"{language}|markers={','.join(project_markers)}"
     return {
-        "root": os.path.abspath(os.environ.get("LSP_ROOT", os.getcwd())),
+        "root": base_root,
         "config_hash": chain_config_hash(config_language, chain),
         "chain": chain_to_wire(chain),
         "server_label": chain[0].label if chain else "",
@@ -647,7 +589,7 @@ def _wire_float(container: dict[str, object], key: str, default: float = 0.0) ->
 
 
 def _broker_lsp_request_sync(method: str, params: dict | None, uri: str | None) -> dict[str, object]:
-    wire = _broker_base_params()
+    wire = _broker_base_params(route_uri=uri)
     wire.update(
         {
             "lsp_method": method,
@@ -667,7 +609,8 @@ async def _broker_lsp_request(method: str, params: dict | None, uri: str | None)
 
 
 def _broker_render_touch_sync(identities: list[AliasIdentity]) -> AliasTouchResult:
-    wire = _broker_base_params()
+    route_path = next((identity.path for identity in identities if identity.path), "")
+    wire = _broker_base_params(route_path=route_path)
     wire.update(
         {
             "client_id": _client_id,
@@ -719,12 +662,14 @@ async def _known_workspace_roots() -> list[str]:
         if status:
             current = _broker_base_params()
             root = current["root"]
-            chash = current["config_hash"]
+            chash = current.get("config_hash", "")
             for session_obj in _wire_list(status, "sessions"):
                 if not isinstance(session_obj, dict):
                     continue
                 session = cast(dict[str, object], session_obj)
-                if session.get("root") != root or session.get("config_hash") != chash:
+                if not _broker_routes_lsp() and (
+                    session.get("root") != root or session.get("config_hash") != chash
+                ):
                     continue
                 roots.add(str(session.get("root", root)))
                 lsp = _wire_dict(session, "lsp")
@@ -750,7 +695,7 @@ async def _known_workspace_roots() -> list[str]:
 async def _stored_diagnostics(uri: str) -> list[dict]:
     if _broker_enabled():
         try:
-            params = _broker_base_params()
+            params = _broker_base_params(route_uri=uri)
             params["uri"] = uri
             result = await _broker_call("lsp.diagnostics", params)
             if isinstance(result, dict):
@@ -772,7 +717,14 @@ def _notify_broker_workspace_changes_sync(
 ) -> None:
     if not _broker_enabled() or not (renamed or created or deleted):
         return
-    params = _broker_base_params()
+    route_path = ""
+    if renamed:
+        route_path = renamed[0][0]
+    elif created:
+        route_path = created[0]
+    elif deleted:
+        route_path = deleted[0]
+    params = _broker_base_params(route_path=route_path)
     params.update(
         {
             "renamed": [[old, new] for old, new in renamed],
@@ -1318,8 +1270,10 @@ _SLOW_TIMEOUT = 300.0
 async def _request(method: str, params: dict | None, *, uri: str | None = None) -> Any:
     """Route a request through the chain. Caches which server handles each method."""
     global _last_server
-    _activate_route_for_uri(uri)
-    _ensure_chain_configs()
+    broker_owned_route = _broker_routes_lsp()
+    if not broker_owned_route:
+        _activate_route_for_uri(uri)
+        _ensure_chain_configs()
     if _broker_enabled():
         try:
             forwarded = await _broker_lsp_request(method, params, uri)
@@ -1340,6 +1294,10 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
             if _broker_mode() == "on" or not _broker_unavailable(e):
                 raise RuntimeError(f"broker request failed: {e.code}: {e}") from None
             agent_log(f"broker unavailable ({e.code}: {e}); falling back to direct LSP")
+
+    if broker_owned_route:
+        _activate_route_for_uri(uri)
+        _ensure_chain_configs()
 
     empty_fallback = _parse_empty_fallback_methods()
 
@@ -3486,12 +3444,13 @@ async def lsp_session(action: str = "status", path: str = "", server: str = "") 
     - ``stop``: stop matching live LSP clients/sessions without respawning.
     """
     act = (action or "status").lower()
-    try:
-        _activate_route_for_uri(file_uri(path) if path else None)
-    except RuntimeError as e:
-        if act == "status":
-            return str(e)
-        raise
+    if not _broker_routes_lsp():
+        try:
+            _activate_route_for_uri(file_uri(path) if path else None)
+        except RuntimeError as e:
+            if act == "status":
+                return str(e)
+            raise
     if act == "status":
         return await _session_status()
     if act == "add":
@@ -3727,7 +3686,9 @@ async def _session_status() -> str:
         pass
 
     broker_state = "enabled" if _broker_enabled() else "disabled"
-    if _router_enabled() and not _explicit_lsp_configured():
+    if _broker_routes_lsp():
+        lines.append(f"route: broker-owned router; known={','.join(sorted(BUILTIN_ROUTES))}")
+    elif _router_enabled() and not _explicit_lsp_configured():
         route = _current_language_route()
         route_label = route.route_id if route is not None else _bound_route_id()
         lines.append(f"route: {route_label} (router)")
@@ -3755,6 +3716,12 @@ async def _session_status() -> str:
             lsp = _wire_dict(session, "lsp")
             if lsp is None:
                 continue
+            if lsp.get("route_id"):
+                lines.append(
+                    "    "
+                    f"route={lsp.get('route_id')} language={lsp.get('language') or '-'} "
+                    f"reason={lsp.get('route_reason') or '-'}"
+                )
             lines.append(
                 "    "
                 f"requests={lsp.get('request_count', 0)} last={lsp.get('last_method') or '-'} "
@@ -3779,6 +3746,12 @@ async def _session_status() -> str:
                     f"    [{label}] {state} pid={pid} open={open_docs} requests={req_count}: "
                     f"{folder_text or '(no folders)'}"
                 )
+
+    if _broker_routes_lsp():
+        lines.append("")
+        lines.append("Chain:")
+        lines.append("  (broker-owned; resolved and warmed on demand)")
+        return "\n".join(lines)
 
     _ensure_chain_configs()
     now = time.time()
@@ -3829,7 +3802,7 @@ async def _session_add(path: str) -> str:
         return f"Not a directory: {abs_path}"
 
     if _broker_enabled():
-        params = _broker_base_params()
+        params = _broker_base_params(route_path=abs_path)
         params["path"] = abs_path
         try:
             result = await _broker_call("lsp.add_workspace", params)
@@ -3963,13 +3936,16 @@ async def _session_restart(server: str) -> str:
 
 async def _broker_stop_matching() -> list[str]:
     current = _broker_base_params()
+    if _broker_routes_lsp():
+        params = current
+    else:
+        params = {}
+        params["root"] = str(current["root"])
+        params["config_hash"] = str(current["config_hash"])
     try:
         result = await _broker_call(
             "session.stop_matching",
-            {
-                "root": str(current["root"]),
-                "config_hash": str(current["config_hash"]),
-            },
+            params,
         )
     except BrokerError as e:
         raise RuntimeError(f"broker stop failed: {e.code}: {e}") from None

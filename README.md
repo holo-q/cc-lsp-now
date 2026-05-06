@@ -30,7 +30,7 @@ File arguments may be full paths, relative paths, or unique basenames. For examp
 
 ## Plugin Install Shape
 
-HSP now ships as one plugin with a router for Python, C#, and Rust language routes. The MCP server runs with `HSP_ROUTER=1`; each request chooses a route from the target file extension or workspace markers, then keeps that route's LSP chain, method cache, warmup state, and broker session separate.
+HSP now ships as one plugin with a broker-owned router for Python, C#, and Rust language routes. The MCP server runs with `HSP_ROUTER=1`; each request forwards the target URI/root to the broker, and the broker chooses a route from the file extension or workspace markers. That keeps each route's LSP chain, method cache, warmup state, and broker session separate while letting a broker restart pick up route-table changes.
 
 Built-in routes:
 
@@ -138,7 +138,7 @@ Set in the `env` block of your `mcpServers` entry:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `HSP_ROUTER` | No | Set `1`/`true`/`on` in the unified plugin to let HSP select a builtin language route by file extension or project markers. Explicit `LSP_SERVERS`/`LSP_COMMAND` disables router mode. |
+| `HSP_ROUTER` | No | Set `1`/`true`/`on` in the unified plugin to let the broker select a builtin language route by file extension or project markers. Explicit `LSP_SERVERS`/`LSP_COMMAND` disables router mode. |
 | `HSP_ROUTE` | No | Force one builtin route (`python`, `csharp`, or `rust`) when router mode is enabled and a request has no target file URI. |
 | `HSP_HOOKS` | No | Enables bundled ambient bus hooks when set to `1`/`true`/`on`. The hooks ship inside the plugin and no-op before launching `uvx` by default, so turning this on records session, prompt, and edit bus events without manual hook installation. |
 | `LSP_SERVERS` | Required only for custom/legacy plugin configs | `;`-separated chain in priority order. Each entry is `<command> <args...>`. First = primary. Example: `ty server;basedpyright-langserver --stdio;pyright-langserver --stdio` |
@@ -188,9 +188,10 @@ hsp-broker
 └─── Fallback LSP  (basedpyright, pyright, ...)  [lazy-spawned]
 ```
 
-- Broker mode is default when an LSP chain is configured. Multiple agents reuse
-  the same broker-owned LSP chain for the same root/config hash, reducing CPU
-  and keeping method routing, diagnostics, and future alias memory aligned.
+- Broker mode is default when an LSP chain or builtin router is configured.
+  Multiple agents reuse the same broker-owned LSP chain for the same
+  root/config hash, reducing CPU and keeping route selection, method routing,
+  diagnostics, and future alias memory aligned.
 - The broker owns the first agent-bus slice: `lsp_log` appends durable
   workspace events to `tmp/hsp-bus.jsonl`, opens timed questions,
   records replies, settles closed windows, and renders compact weather. The bus
