@@ -116,7 +116,6 @@ gate policy: build=project checker=file/project journal=workgroup
 Recommended first hard-policy trial:
 
 ```text
-HSP_HOOKS=1
 HSP_REQUIRE_TICKET_FOR_EDITS=1
 HSP_BUILD_GATE_TIMEOUT=2m
 ```
@@ -125,7 +124,6 @@ Recommended stricter identity trial, only after hook and MCP processes share
 the same id:
 
 ```text
-HSP_HOOKS=1
 HSP_REQUIRE_TICKET_FOR_EDITS=1
 HSP_EDIT_GATE_SCOPE=agent
 HSP_AGENT_ID=<stable-agent-id>

@@ -63,9 +63,9 @@ plugin hooks use the env-gated `hsp hook --kind <kind>` adapter, and build
 wrappers can use `hsp run -- <command>` to wait on the workgroup build gate
 before recording a `test.ran` row. When `HSP_REQUIRE_TICKET_FOR_EDITS=1`,
 edit-before hooks also call the quiet `edit_gate` action and return a
-harness-native denial if the ticket policy fails. The plugin command checks
-`HSP_HOOKS` before launching `uvx`, so the shipped hooks are cheap and inert by
-default. There is no separate `hsp-log`, `hsp-hook`, or `hsp-run` binary; the
+harness-native denial if the ticket policy fails. The plugin command treats
+hooks as enabled by default and only drains stdin when `HSP_HOOKS=0`/`false`/`off`.
+There is no separate `hsp-log`, `hsp-hook`, or `hsp-run` binary; the
 MCP tool and CLI subcommands funnel into the broker's `bus.*` JSONL surface.
 MCP launch is explicit as `hsp mcp`; bare `hsp` is reserved for workgroup
 status/debug output.

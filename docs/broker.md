@@ -261,8 +261,8 @@ Wave 2 layers ambient harness hooks over the same broker. There is no separate
 shell mirror of `lsp_log`, bundled plugin hooks call `hsp hook --kind <kind>`
 with harness payloads on stdin, `hsp mcp` runs the stdio MCP server, and
 `hsp run -- <command>` gates
-build/verifier commands before recording their result. The hook adapter is
-env-gated by `HSP_HOOKS` and no-ops before launching `uvx` by default. Session
+build/verifier commands before recording their result. The hook adapter is on
+by default and can be disabled with `HSP_HOOKS=0`. Session
 start, user prompt, edit before/after, generic tool before/after, and detected
 Bash build commands now ship inside the Claude plugin manifests. Bare `hsp`
 prints the workgroup status/debug surface instead of blocking on stdio. The CLI stays

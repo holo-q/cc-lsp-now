@@ -586,7 +586,7 @@ class CliLogTests(unittest.TestCase):
         self.assertIs(BusEventKind.from_wire("lsp_confirm.after"), BusEventKind.CONFIRM_AFTER)
         self.assertIs(BusEventKind.from_wire("git.push"), BusEventKind.PUSH_AFTER)
 
-    def test_bundled_hook_command_is_noop_until_env_enabled(self) -> None:
+    def test_bundled_hook_command_can_be_disabled_by_env(self) -> None:
         payload = json.dumps({
             "hookEventName": "PostToolUse",
             "tool_name": "Edit",
@@ -598,6 +598,20 @@ class CliLogTests(unittest.TestCase):
 
         self.assertEqual(out, "")
         self.assertFalse(path.exists())
+
+    def test_bundled_hook_records_by_default_when_env_unset(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run_hook(["hook", "--kind", "edit.after"], root=root, stdin=payload, enabled=None)
+            event = self._read_last_event(root)
+
+        self.assertEqual(out, "")
+        self.assertEqual(event["kind"], "edit.after")
+        self.assertEqual(event["message"], "PostToolUse Edit")
 
     def test_bundled_hook_records_harness_payload_when_env_enabled(self) -> None:
         payload = json.dumps({
@@ -941,7 +955,7 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(event["kind"], "session.stop")
         self.assertEqual(event["message"], ".end")
 
-    def test_claude_plugin_bundles_env_gated_bus_hooks(self) -> None:
+    def test_claude_plugin_bundles_default_on_bus_hooks(self) -> None:
         data = json.loads(Path(".claude-plugin/plugin.json").read_text(encoding="utf-8"))
         hooks = data["hooks"]
         self.assertIn("SessionStart", hooks)
@@ -963,7 +977,7 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("hsp hook --kind tool.after", commands)
         self.assertIn("hsp hook --kind edit.before", commands)
         self.assertIn("hsp hook --kind edit.after", commands)
-        self.assertIn("HSP_HOOKS", commands)
+        self.assertIn("${HSP_HOOKS:-1}", commands)
         self.assertIn("cat >/dev/null", commands)
         self.assertNotIn("hsp-hook", commands)
 
@@ -1005,7 +1019,7 @@ class CliLogTests(unittest.TestCase):
         *,
         root: str,
         stdin: str,
-        enabled: bool,
+        enabled: bool | None,
         extra_env: dict[str, str] | None = None,
     ) -> str:
         code, out, _err = self._run_hook_code(
@@ -1024,7 +1038,7 @@ class CliLogTests(unittest.TestCase):
         *,
         root: str,
         stdin: str,
-        enabled: bool,
+        enabled: bool | None,
         extra_env: dict[str, str] | None = None,
     ) -> tuple[int, str, str]:
         out = io.StringIO()
@@ -1033,8 +1047,9 @@ class CliLogTests(unittest.TestCase):
             "HSP_BROKER": "off",
             "LSP_ROOT": root,
             "HSP_WORKGROUP_ROOT": root,
-            "HSP_HOOKS": "1" if enabled else "0",
         }
+        if enabled is not None:
+            env["HSP_HOOKS"] = "1" if enabled else "0"
         if extra_env:
             env.update(extra_env)
         with patch.dict(os.environ, env, clear=False):

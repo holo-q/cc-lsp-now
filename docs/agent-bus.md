@@ -392,9 +392,9 @@ agents should not need to remember or invoke it manually.
 These are the ambient stops the Claude plugin ships. Users should not copy
 hook blocks by hand; the plugin owns the hook declarations and each hook calls
 `hsp hook --kind <kind>` with the JSON payload on stdin. The hook adapter is
-env-gated twice: the bundled shell command drains stdin and exits before
-launching `uvx` when `HSP_HOOKS` is unset or false, and the Python adapter also
-no-ops defensively. Setting `HSP_HOOKS=1` turns the feature on.
+enabled by default because an installed workgroup plugin should immediately
+show traffic in `hsp watch`. Set `HSP_HOOKS=0`/`false`/`off` when a session needs
+to drain hook payloads without launching `uvx`.
 
 The shipped Claude hook slice records every available lifecycle hook that the
 plugin can receive: session start/stop, user prompt, notification, subagent
@@ -528,7 +528,8 @@ a single `hsp` binary. The shape is:
    broker unless `--start-broker` is passed.
 4. MCP launch is explicit as `hsp mcp`; plugin manifests must pass that
    subcommand so a terminal `hsp` never blocks on stdio by accident.
-5. Bundled plugin hooks are opt-in with `HSP_HOOKS=1` and no-op otherwise.
+5. Bundled plugin hooks are on by default and can be disabled with
+   `HSP_HOOKS=0`.
 6. Ambient stops cover session, prompt, edit before/after, `lsp_confirm`
    before/after, test result, git commit before/after, and push before/after.
    The broker decides per-stop whether the digest is worth printing; silent

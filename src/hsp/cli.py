@@ -210,7 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     hook = subcommands.add_parser(
         "hook",
-        help="record a bundled plugin hook event when HSP_HOOKS is enabled",
+        help="record a bundled plugin hook event unless HSP_HOOKS disables it",
     )
     hook.add_argument("--kind", required=True)
     hook.add_argument("--message", default="")
@@ -1110,12 +1110,12 @@ def _command_argv(argv: list[str]) -> list[str]:
 
 
 def _hooks_enabled() -> bool:
-    raw = os.environ.get("HSP_HOOKS", "").strip().lower()
+    raw = os.environ.get("HSP_HOOKS", "1").strip().lower()
     if raw in TRUE_VALUES:
         return True
     if raw in FALSE_VALUES:
         return False
-    return False
+    return True
 
 
 def _require_ticket_for_edits() -> bool:

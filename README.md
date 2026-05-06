@@ -127,10 +127,9 @@ Claude's built-in `LSP()` tool is incomplete and occasionally silent-fails (e.g.
 
 The published HSP Claude plugin already bundles these hooks. Plugin authors
 copy the block only when building a new downstream plugin; users should not
-hand-install hook config. Ambient bus hooks are bundled the same way and stay
-silent until `HSP_HOOKS=1` is present in the Claude Code environment. When the
-env var is unset, the bundled hook commands drain their JSON payload and exit
-without launching `uvx`.
+hand-install hook config. Ambient bus hooks are enabled by default when the
+plugin is installed; set `HSP_HOOKS=0` only when you need the hook commands to
+drain their JSON payload and exit without launching `uvx`.
 
 ### 3. Configuration via env vars
 
@@ -140,7 +139,7 @@ Set in the `env` block of your `mcpServers` entry:
 |----------|----------|-------------|
 | `HSP_ROUTER` | No | Builtin routing is the default when no explicit `LSP_SERVERS`/`LSP_COMMAND` is set. Set `0`/`false`/`off` only to force legacy single-chain mode. |
 | `HSP_ROUTE` | No | Force one builtin route (`python`, `csharp`, or `rust`) when router mode is enabled and a request has no target file URI. |
-| `HSP_HOOKS` | No | Enables bundled ambient bus hooks when set to `1`/`true`/`on`. The hooks ship inside the plugin and no-op before launching `uvx` by default, so turning this on records session, prompt, and edit bus events without manual hook installation. |
+| `HSP_HOOKS` | No | Controls bundled ambient bus hooks. Hooks are on by default; set `0`/`false`/`off` to make them drain stdin and exit before launching `uvx`. |
 | `LSP_SERVERS` | Required only for custom/legacy plugin configs | `;`-separated chain in priority order. Each entry is `<command> <args...>`. First = primary. Example: `ty server;basedpyright-langserver --stdio;pyright-langserver --stdio` |
 | `LSP_ROOT` | No | Workspace root path (defaults to cwd) |
 | `LSP_PREFER` | No | Per-method server override: `method1=command,method2=command`. Skips the cold-call probe and routes directly. Example: `workspace/willRenameFiles=basedpyright-langserver,textDocument/callHierarchy=basedpyright-langserver` |

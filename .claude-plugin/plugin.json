@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind session.start ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind session.start ;; *) cat >/dev/null ;; esac'"
           }
         ]
       }
@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind prompt ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind prompt ;; *) cat >/dev/null ;; esac'"
           }
         ]
       }
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind session.stop ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind session.stop ;; *) cat >/dev/null ;; esac'"
           }
         ]
       }
@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind notification ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind notification ;; *) cat >/dev/null ;; esac'"
           }
         ]
       }
@@ -95,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind subagent.stop ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind subagent.stop ;; *) cat >/dev/null ;; esac'"
           }
         ]
       }
@@ -105,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind compact.before ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind compact.before ;; *) cat >/dev/null ;; esac'"
           }
         ]
       }
@@ -125,7 +125,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.before ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.before ;; *) cat >/dev/null ;; esac'"
           }
         ]
       },
@@ -134,7 +134,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.before ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.before ;; *) cat >/dev/null ;; esac'"
           }
         ]
       },
@@ -143,7 +143,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.before ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.before ;; *) cat >/dev/null ;; esac'"
           }
         ]
       },
@@ -151,7 +151,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind tool.before ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind tool.before ;; *) cat >/dev/null ;; esac'"
           }
         ]
       }
@@ -161,7 +161,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind tool.after ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind tool.after ;; *) cat >/dev/null ;; esac'"
           }
         ]
       },
@@ -170,7 +170,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.after ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.after ;; *) cat >/dev/null ;; esac'"
           }
         ]
       },
@@ -179,7 +179,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.after ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.after ;; *) cat >/dev/null ;; esac'"
           }
         ]
       },
@@ -188,7 +188,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'case \"${HSP_HOOKS:-}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.after ;; *) cat >/dev/null ;; esac'"
+            "command": "sh -c 'case \"${HSP_HOOKS:-1}\" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) exec uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook --kind edit.after ;; *) cat >/dev/null ;; esac'"
           }
         ]
       }
