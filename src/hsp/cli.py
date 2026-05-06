@@ -78,6 +78,7 @@ BUILD_FIRST_TOKENS = {
     "pnpm",
     "pytest",
     "rk",
+    "spaceship",
     "tox",
     "uv",
     "yarn",
@@ -1300,6 +1301,8 @@ def _gate_spec_for_argv(argv: list[str]) -> CommandGateSpec | None:
         return _path_scoped_spec(argv, argv[1:])
     if first in {"make", "just", "ninja", "cmake", "gradle", "mvn", "rk", "xcodebuild"}:
         return CommandGateSpec(tuple(argv), full_workspace=True)
+    if first == "spaceship":
+        return _spaceship_gate_spec(argv)
     if first == "uv":
         nested = _runner_inner_argv(first, argv)
         return _gate_spec_for_argv(nested) if nested else None
@@ -1409,6 +1412,12 @@ def _deno_gate_spec(argv: list[str]) -> CommandGateSpec | None:
 
 def _subcommand_gate_spec(argv: list[str]) -> CommandGateSpec | None:
     if len(argv) < 2 or argv[1] not in BUILD_SUBCOMMANDS:
+        return None
+    return CommandGateSpec(tuple(argv), full_workspace=True)
+
+
+def _spaceship_gate_spec(argv: list[str]) -> CommandGateSpec | None:
+    if len(argv) < 2 or argv[1] not in {"build", "check", "upgrade"}:
         return None
     return CommandGateSpec(tuple(argv), full_workspace=True)
 

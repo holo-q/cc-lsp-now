@@ -300,6 +300,9 @@ class CliLogTests(unittest.TestCase):
             "bun test src",
             "tox",
             "nox",
+            "spaceship build",
+            "spaceship check",
+            "spaceship upgrade 42",
         ]
 
         for command in cases:
