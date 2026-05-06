@@ -350,6 +350,14 @@ class OutlineRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "No symbols found.")
         self.assertEqual(req.await_count, 1)
 
+    async def test_outline_reports_null_document_symbols_as_indexing(self) -> None:
+        with patch.object(_server, "_resolve_file_path", return_value="/repo/src/lib.rs"):
+            with patch.object(_server, "_request", new=AsyncMock(return_value=None)):
+                result = await _server._outline_single("/repo/src/lib.rs")
+
+        self.assertIn("returned no outline after warmup wait", result)
+        self.assertIn("indexing", result)
+
 
 if __name__ == "__main__":
     unittest.main()

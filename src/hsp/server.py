@@ -1667,7 +1667,7 @@ def _should_retry_null_document_symbols(method: str, result: Any, server_label: 
 
 async def _sleep_for_null_document_symbols(attempt: int, uri: str | None) -> None:
     delay = _DOCUMENT_SYMBOL_NULL_RETRY_DELAY * (attempt + 1)
-    agent_log(
+    log.info(
         "rust-analyzer returned null documentSymbol"
         f" for {uri or '(no uri)'}; retrying in {delay:.1f}s"
     )
@@ -1682,7 +1682,7 @@ def _should_retry_empty_references(method: str, result: Any, server_label: str) 
 
 async def _sleep_for_empty_references(attempt: int, uri: str | None) -> None:
     delay = _REFERENCES_EMPTY_RETRY_DELAY * (attempt + 1)
-    agent_log(
+    log.info(
         "rust-analyzer returned empty references"
         f" for {uri or '(no uri)'}; retrying in {delay:.1f}s"
     )
@@ -3006,6 +3006,8 @@ async def _outline_single(file_path: str) -> str:
     result = await _request("textDocument/documentSymbol", {
         "textDocument": {"uri": uri},
     }, uri=uri)
+    if result is None:
+        return "rust-analyzer returned no outline after warmup wait; try again if indexing is still running."
     if not result:
         return "No symbols found."
     lines: list[str] = []
@@ -4277,6 +4279,8 @@ async def _session_add(path: str) -> str:
                 result_dict = cast(dict[str, object], result)
                 added = result_dict.get("added", [])
                 count = len(added) if isinstance(added, list) else 0
+                if count == 0:
+                    return f"[broker] queued {abs_path}; will apply when the matching LSP client starts"
                 return f"[broker] queued {abs_path}; applied to {count} live client(s)"
             return f"[broker] queued {abs_path}"
 

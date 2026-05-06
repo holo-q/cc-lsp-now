@@ -247,6 +247,14 @@ class LspSessionDefensiveSurfaceTests(unittest.TestCase):
         )
         self.assertIn("Not a directory", result)
 
+    def test_broker_add_with_no_live_client_says_when_it_applies(self) -> None:
+        with patch.dict("os.environ", {"HSP_ROUTER": "1", "HSP_BROKER": "on"}, clear=False):
+            with patch.object(_server, "_broker_call", AsyncMock(return_value={"added": []})):
+                result = _run(_server.lsp_session(action="add", path="."))
+
+        self.assertIn("queued", result)
+        self.assertIn("will apply when the matching LSP client starts", result)
+
 
 class LspSessionLifecycleHelperTests(unittest.TestCase):
     def setUp(self) -> None:
