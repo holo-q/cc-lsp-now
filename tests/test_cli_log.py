@@ -142,6 +142,42 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("broker: skipped", out)
         self.assertNotIn("weather:", out)
 
+    def test_workgroup_weather_uses_lightweight_broker_renderer(self) -> None:
+        class FakeBroker:
+            hsp_started = False
+
+            def __enter__(self) -> FakeBroker:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def request(self, method: str, _params: dict[str, object]) -> dict[str, object]:
+                if method == "bus.status":
+                    return {"event_count": 2, "last_event_id": "E2", "open_question_count": 0}
+                return {
+                    "workspace_root": "/workspace/domain",
+                    "agents": [{"agent_id": "agent-a", "state": "awake", "idle_seconds": 1}],
+                    "open_questions": [],
+                    "recent": [{"event_id": "E2", "event_type": "note.posted", "message": "done"}],
+                }
+
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            with patch("hsp.cli._open_cli_broker", return_value=FakeBroker()):
+                with patch("hsp.cli._server", side_effect=AssertionError("server import not allowed")):
+                    out = self._run_with_env(
+                        ["workgroup", "--weather", root],
+                        {
+                            "HSP_BROKER": "auto",
+                            "LSP_ROOT": root,
+                            "HSP_WORKGROUP_ROOT": root,
+                        },
+                    )
+
+        self.assertIn("broker: reachable", out)
+        self.assertIn("agents: 1", out)
+        self.assertIn("E2 note.posted done", out)
+
     def test_workgroup_command_counts_append_log_events(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
             path = Path(root) / "tmp" / "hsp-bus.jsonl"

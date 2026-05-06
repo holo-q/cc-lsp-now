@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -33,6 +34,7 @@ FALSE_VALUES = {"", "0", "false", "no", "off"}
 BROKER_DISABLED = {"0", "false", "no", "off", "disable", "disabled", "local"}
 BROKER_REQUIRED = {"1", "true", "yes", "on", "require", "required"}
 BROKER_SOCKET_NAME = "hsp-broker.sock"
+BROKER_CONNECT_TIMEOUT_SECONDS = 0.25
 BUS_ACTIONS: tuple[str, ...] = (
     "event",
     "note",
@@ -558,18 +560,15 @@ def _workgroup_broker_lines(
     if not include_broker and not include_weather and not start_broker:
         return ["broker: skipped (use --broker, --weather, or --start-broker)"]
     try:
-        from hsp.broker import BrokerError
-        from hsp.broker_client import BrokerClient
-
-        with BrokerClient() as client:
-            started = client.connect_or_start() if start_broker else _connect_existing_broker(client)
+        with _open_cli_broker(start_broker=start_broker) as client:
+            started = bool(getattr(client, "hsp_started", False))
             status = client.request("bus.status", {"workspace_root": root})
             weather = (
                 client.request("bus.weather", {"workspace_root": root, "limit": limit})
                 if include_weather
                 else None
             )
-    except BrokerError as e:
+    except _CliBrokerError as e:
         return [f"broker: unreachable ({e.code}: {e})"]
     except OSError as e:
         return [f"broker: unreachable ({type(e).__name__}: {e})"]
@@ -583,14 +582,204 @@ def _workgroup_broker_lines(
         )
     if isinstance(weather, dict):
         lines.append("weather:")
-        rendered = _server()._render_bus_weather(cast(dict[str, object], weather))
+        rendered = _render_bus_weather(cast(dict[str, object], weather))
         lines.extend(f"  {line}" for line in rendered.splitlines())
     return lines
 
 
-def _connect_existing_broker(client: Any) -> bool:
+def _open_cli_broker(*, start_broker: bool) -> Any:
+    if start_broker:
+        from hsp.broker_client import BrokerClient
+
+        client = BrokerClient()
+        started = client.connect_or_start()
+        setattr(client, "hsp_started", started)
+        return client
+    client = _CliBrokerClient(_broker_socket_path())
     client.connect()
-    return False
+    return client
+
+
+class _CliBrokerError(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class _CliBrokerClient:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.hsp_started = False
+        self._sock: socket.socket | None = None
+        self._reader_buf = b""
+        self._request_index = 0
+
+    def __enter__(self) -> _CliBrokerClient:
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        self.close()
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(BROKER_CONNECT_TIMEOUT_SECONDS)
+        try:
+            sock.connect(str(self.path))
+        except OSError:
+            sock.close()
+            raise
+        sock.settimeout(BROKER_CONNECT_TIMEOUT_SECONDS)
+        self._sock = sock
+
+    def close(self) -> None:
+        sock = self._sock
+        self._sock = None
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
+
+    def request(self, method: str, params: dict[str, object] | None = None) -> object:
+        sock = self._sock
+        if sock is None:
+            raise _CliBrokerError("not_connected", "client not connected")
+        self._request_index += 1
+        message: dict[str, object] = {"id": f"cli{self._request_index}", "method": method}
+        if params is not None:
+            message["params"] = params
+        frame = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+        try:
+            sock.sendall(frame)
+        except OSError as e:
+            raise _CliBrokerError("transport", f"send failed: {e!r}") from None
+        response = self._decode_response(self._read_line())
+        if "error" in response:
+            error = response["error"]
+            if isinstance(error, dict):
+                code = error.get("code", "unknown")
+                message_obj = error.get("message", "")
+                message_text = message_obj if isinstance(message_obj, str) else json.dumps(message_obj)
+                raise _CliBrokerError(code if isinstance(code, str) else "unknown", message_text)
+            raise _CliBrokerError("unknown", json.dumps(error))
+        return response.get("result")
+
+    def _read_line(self) -> bytes:
+        sock = self._sock
+        if sock is None:
+            raise _CliBrokerError("not_connected", "client not connected")
+        while b"\n" not in self._reader_buf:
+            try:
+                chunk = sock.recv(4096)
+            except OSError as e:
+                raise _CliBrokerError("transport", f"recv failed: {e!r}") from None
+            if not chunk:
+                raise _CliBrokerError("transport", "broker closed connection")
+            self._reader_buf += chunk
+        index = self._reader_buf.index(b"\n")
+        line = self._reader_buf[: index + 1]
+        self._reader_buf = self._reader_buf[index + 1 :]
+        return line
+
+    def _decode_response(self, line: bytes) -> dict[str, object]:
+        try:
+            decoded = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise _CliBrokerError("decode", f"invalid broker frame: {e}") from None
+        if not isinstance(decoded, dict):
+            raise _CliBrokerError("decode", f"broker frame was {type(decoded).__name__}")
+        return cast(dict[str, object], decoded)
+
+
+def _render_bus_weather(result: dict[str, object]) -> str:
+    lines = [f"workspace: {result.get('workspace_root', '')}"]
+    agents = _wire_list(result, "agents")
+    lines.append(f"agents: {len(agents)}")
+    for agent in agents[:8]:
+        if isinstance(agent, dict):
+            lines.append(f"  {_agent_label(cast(dict[str, object], agent))}")
+    questions = _wire_list(result, "open_questions")
+    lines.append(f"open questions: {len(questions)}")
+    for question in questions[:5]:
+        if isinstance(question, dict):
+            q = cast(dict[str, object], question)
+            lines.append(
+                f"  {q.get('question_id', '')} {_wire_float(q, 'seconds_left'):.0f}s "
+                f"{q.get('message', '')}"
+            )
+    recent = _wire_list(result, "recent")
+    lines.append(f"recent: {len(recent)}")
+    for event in recent[-5:]:
+        if isinstance(event, dict):
+            lines.append(f"  {_event_label(cast(dict[str, object], event))}")
+    return "\n".join(lines)
+
+
+def _agent_label(agent: dict[str, object]) -> str:
+    agent_id = str(agent.get("agent_id") or agent.get("client_id") or agent.get("session_id") or "?")
+    state = str(agent.get("state") or agent.get("status") or "?")
+    idle = _wire_float(agent, "idle_seconds")
+    last = str(agent.get("last_event_id") or "")
+    prompt_count = agent.get("prompt_count", 0)
+    pinned = " pinned" if agent.get("pinned") else ""
+    return _compact_line(f"{agent_id} {state} idle={idle:.0f}s prompts={prompt_count}{pinned} last={last}", 180)
+
+
+def _event_label(event: dict[str, object] | None) -> str:
+    if not event:
+        return "(unknown event)"
+    event_id = str(event.get("event_id", ""))
+    if event_id and not event_id.startswith("E"):
+        event_id = f"E{event_id}"
+    event_type = str(event.get("event_type", "") or event.get("kind", ""))
+    message = str(event.get("message", ""))
+    timestamp = _event_timestamp_label(event)
+    head = " ".join(part for part in (event_id, timestamp, event_type) if part).strip()
+    if message:
+        head += f" {message}"
+    scope = _render_bus_scope(event)
+    if scope:
+        head += f" [{scope}]"
+    return _compact_line(head, 220)
+
+
+def _event_timestamp_label(event: dict[str, object]) -> str:
+    raw = event.get("timestamp")
+    if not isinstance(raw, int | float) or raw <= 0:
+        return ""
+    return time.strftime("%H:%M:%S", time.localtime(float(raw)))
+
+
+def _render_bus_scope(item: dict[str, object]) -> str:
+    parts: list[str] = []
+    for key in ("files", "symbols", "aliases"):
+        values = _wire_list(item, key)
+        if values:
+            parts.append(f"{key}=" + ",".join(str(value) for value in values[:5]))
+    return " ".join(parts)
+
+
+def _wire_list(container: dict[str, object], key: str) -> list[object]:
+    value = container.get(key, [])
+    return cast(list[object], value) if isinstance(value, list) else []
+
+
+def _wire_float(container: dict[str, object], key: str, default: float = 0.0) -> float:
+    value = container.get(key, default)
+    if isinstance(value, int | float | str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _compact_line(text: str, limit: int = 180) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
 
 
 def _workgroup_lsp_status(root: str) -> str:
