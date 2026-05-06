@@ -385,6 +385,97 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("build gate timed out", err)
         self.assertIn("scope: src", err)
 
+    def test_all_waiting_build_hook_runs_once_and_denies_original_bash(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo check"},
+        })
+        completed = subprocess.CompletedProcess("cargo check", 0, stdout="finished\n", stderr="")
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({"workspace_root": root, "agent_id": "agent-a", "message": "edit a"})
+            server._local_bus.ticket({"workspace_root": root, "agent_id": "agent-b", "message": "edit b"})
+            server._local_bus.build_gate({"workspace_root": root, "agent_id": "agent-b"})
+            with patch("hsp.cli.subprocess.run", return_value=completed) as run:
+                code, out, err = self._run_hook_code(
+                    ["hook", "--kind", "tool.before"],
+                    root=root,
+                    stdin=payload,
+                    enabled=True,
+                    extra_env={
+                        "HSP_AGENT_ID": "agent-a",
+                        "HSP_BUILD_GATE_TIMEOUT": "1ms",
+                    },
+                )
+            event = self._read_last_event(root)
+            metadata = self._require_dict(event, "metadata")
+            denial = json.loads(out)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        run.assert_called_once_with(
+            "cargo check",
+            shell=True,
+            cwd=str(Path(root).resolve()),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        hook_output = self._require_dict(denial, "hookSpecificOutput")
+        self.assertEqual(hook_output["permissionDecision"], "deny")
+        reason = str(hook_output["permissionDecisionReason"])
+        self.assertIn("ran this command once", reason)
+        self.assertIn("finished", reason)
+        self.assertEqual(event["kind"], "test.ran")
+        self.assertEqual(event["message"], "cargo check")
+        self.assertEqual(metadata["status"], "passed")
+
+    def test_all_waiting_build_hook_reuses_batched_result_for_second_agent(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo check"},
+        })
+        completed = subprocess.CompletedProcess("cargo check", 0, stdout="shared\n", stderr="")
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({"workspace_root": root, "agent_id": "agent-a", "message": "edit a"})
+            server._local_bus.ticket({"workspace_root": root, "agent_id": "agent-b", "message": "edit b"})
+            server._local_bus.build_gate({"workspace_root": root, "agent_id": "agent-b"})
+            with patch("hsp.cli.subprocess.run", return_value=completed):
+                first_code, first_out, _first_err = self._run_hook_code(
+                    ["hook", "--kind", "tool.before"],
+                    root=root,
+                    stdin=payload,
+                    enabled=True,
+                    extra_env={
+                        "HSP_AGENT_ID": "agent-a",
+                        "HSP_BUILD_GATE_TIMEOUT": "1ms",
+                    },
+                )
+            with patch("hsp.cli.subprocess.run") as run:
+                second_code, second_out, second_err = self._run_hook_code(
+                    ["hook", "--kind", "tool.before"],
+                    root=root,
+                    stdin=payload,
+                    enabled=True,
+                    extra_env={
+                        "HSP_AGENT_ID": "agent-b",
+                        "HSP_BUILD_GATE_TIMEOUT": "1ms",
+                    },
+                )
+
+        self.assertEqual(first_code, 0)
+        self.assertEqual(second_code, 0)
+        self.assertEqual(second_err, "")
+        run.assert_not_called()
+        first_reason = str(self._require_dict(json.loads(first_out), "hookSpecificOutput")["permissionDecisionReason"])
+        second_reason = str(self._require_dict(json.loads(second_out), "hookSpecificOutput")["permissionDecisionReason"])
+        self.assertIn("ran this command once", first_reason)
+        self.assertIn("reused the batched result", second_reason)
+        self.assertIn("shared", second_reason)
+
     def test_build_after_hook_records_test_result(self) -> None:
         payload = json.dumps({
             "hookEventName": "PostToolUse",

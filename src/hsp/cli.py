@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +70,9 @@ BUILD_SUBCOMMANDS = {
     "test",
     "verify",
 }
+BUILD_BATCH_CAPTURE_LIMIT = 12000
+BUILD_BATCH_DEFAULT_TTL_SECONDS = 30.0
+BUILD_BATCH_DEFAULT_WAIT_SECONDS = 1800.0
 DIRECT_CHECKER_TOKENS = {
     "biome",
     "black",
@@ -263,6 +268,15 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         if "build gate: unlocked" not in gate:
             print(gate, file=sys.stderr)
             return 124
+        if _build_gate_reason(gate) == "all_waiting" and _authoritative_build_enabled():
+            batch = _run_authoritative_build_batch(
+                command=command,
+                gate=gate,
+                files=",".join(gate_spec.files),
+                full_workspace=gate_spec.full_workspace,
+            )
+            _write_hook_denial(_build_batch_denial_reason(batch))
+            return 0
         return 0
     files = _join_scope(str(ns.files), _hook_files(payload))
     symbols = _join_scope(str(ns.symbols), _hook_symbols(payload))
@@ -481,6 +495,11 @@ def _require_ticket_for_edits() -> bool:
     return raw in TRUE_VALUES
 
 
+def _authoritative_build_enabled() -> bool:
+    raw = os.environ.get("HSP_AUTHORITATIVE_BUILD", "1").strip().lower()
+    return raw not in FALSE_VALUES
+
+
 def _is_edit_before_hook(kind: str) -> bool:
     return kind in {"edit.before", "write.before"}
 
@@ -500,6 +519,187 @@ def _write_hook_denial(reason: str) -> None:
 def _edit_denial_reason(gate: str) -> str:
     gate = gate.strip()
     return f"{EDIT_DENY_REASON}\n\n{gate}" if gate else EDIT_DENY_REASON
+
+
+def _build_gate_reason(gate: str) -> str:
+    first = gate.splitlines()[0] if gate else ""
+    start = first.find("(")
+    end = first.find(")", start + 1)
+    if start == -1 or end == -1:
+        return ""
+    return first[start + 1:end]
+
+
+def _run_authoritative_build_batch(
+    *,
+    command: str,
+    gate: str,
+    files: str,
+    full_workspace: bool,
+) -> dict[str, object]:
+    root = Path(os.environ.get("LSP_ROOT", os.getcwd())).resolve()
+    directory = root / "tmp" / "hsp-build-batches"
+    directory.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(f"{root}\n{command}\n{gate}".encode("utf-8")).hexdigest()[:24]
+    result_path = directory / f"{key}.json"
+    lock_path = directory / f"{key}.lock"
+    ttl = _duration_env("HSP_BUILD_BATCH_TTL", BUILD_BATCH_DEFAULT_TTL_SECONDS)
+    wait_timeout = _duration_env("HSP_BUILD_BATCH_WAIT_TIMEOUT", BUILD_BATCH_DEFAULT_WAIT_SECONDS)
+    fresh = _read_fresh_batch_result(result_path, ttl)
+    if fresh is not None:
+        fresh["owner"] = False
+        return fresh
+    if _try_create_lock(lock_path, ttl):
+        try:
+            result = _run_build_command(command, root=root)
+            result.update({
+                "command": command,
+                "gate": gate,
+                "key": key,
+                "owner": True,
+                "timestamp": time.time(),
+            })
+            _write_batch_result(result_path, result)
+            _record_authoritative_build_result(command, result, files=files, full_workspace=full_workspace)
+            return result
+        finally:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+    waited = _wait_for_batch_result(result_path, wait_timeout)
+    if waited is not None:
+        waited["owner"] = False
+        return waited
+    return {
+        "command": command,
+        "gate": gate,
+        "key": key,
+        "owner": False,
+        "returncode": 124,
+        "status": "failed",
+        "stdout": "",
+        "stderr": f"timed out waiting for HSP build batch result after {wait_timeout:.0f}s",
+        "timestamp": time.time(),
+    }
+
+
+def _run_build_command(command: str, *, root: Path) -> dict[str, object]:
+    completed = subprocess.run(
+        command,
+        shell=True,
+        cwd=str(root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "returncode": int(completed.returncode),
+        "status": "passed" if completed.returncode == 0 else "failed",
+        "stdout": completed.stdout or "",
+        "stderr": completed.stderr or "",
+    }
+
+
+def _record_authoritative_build_result(
+    command: str,
+    result: dict[str, object],
+    *,
+    files: str,
+    full_workspace: bool,
+) -> None:
+    scope_files = "" if full_workspace else files
+    asyncio.run(
+        server.lsp_log(
+            action="event",
+            message=command,
+            files=scope_files,
+            kind="test.ran",
+            status=str(result.get("status", "")),
+            targets=command,
+        )
+    )
+
+
+def _build_batch_denial_reason(result: dict[str, object]) -> str:
+    owner = bool(result.get("owner"))
+    action = "ran this command once" if owner else "reused the batched result"
+    command = str(result.get("command", ""))
+    returncode = result.get("returncode", "?")
+    stdout = _truncate_capture(str(result.get("stdout", "")))
+    stderr = _truncate_capture(str(result.get("stderr", "")))
+    lines = [
+        f"HSP build mutex {action} for the workgroup and denied duplicate Bash execution.",
+        f"$ {command}",
+        f"exit: {returncode}",
+    ]
+    if stdout:
+        lines.extend(["--- stdout ---", stdout])
+    if stderr:
+        lines.extend(["--- stderr ---", stderr])
+    return "\n".join(lines).strip()
+
+
+def _truncate_capture(text: str) -> str:
+    if len(text) <= BUILD_BATCH_CAPTURE_LIMIT:
+        return text.rstrip()
+    head = text[:BUILD_BATCH_CAPTURE_LIMIT]
+    return f"{head.rstrip()}\n... truncated {len(text) - BUILD_BATCH_CAPTURE_LIMIT} char(s)"
+
+
+def _read_fresh_batch_result(path: Path, ttl: float) -> dict[str, object] | None:
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+    if age > ttl:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return cast(dict[str, object], payload) if isinstance(payload, dict) else None
+
+
+def _wait_for_batch_result(path: Path, timeout: float) -> dict[str, object] | None:
+    deadline = time.time() + timeout
+    while time.time() <= deadline:
+        result = _read_fresh_batch_result(path, max(timeout, BUILD_BATCH_DEFAULT_TTL_SECONDS))
+        if result is not None:
+            return result
+        time.sleep(0.2)
+    return None
+
+
+def _write_batch_result(path: Path, result: dict[str, object]) -> None:
+    path.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+
+
+def _try_create_lock(path: Path, ttl: float) -> bool:
+    try:
+        age = time.time() - path.stat().st_mtime
+        if age > ttl:
+            path.unlink()
+    except OSError:
+        pass
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def _duration_env(name: str, default: float) -> float:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = server._parse_bus_duration(value, default=default)
+    except Exception:
+        return default
+    return default if isinstance(parsed, str) else float(parsed)
 
 
 def _drain_stdin() -> None:

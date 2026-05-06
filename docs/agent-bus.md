@@ -180,6 +180,14 @@ agents independently arrived at "I need the build", the build can proceed.
 Checking the gate is not written to the journal and is not broadcast; it should
 not rush active editors.
 
+When a build/checker hook unlocks because every overlapping ticket holder is
+waiting, HSP becomes authoritative for that command. The hook runs the command
+once under `tmp/hsp-build-batches/`, captures stdout/stderr, records the
+`test.ran` result, and returns a harness denial payload so the original Bash
+tool does not execute again. Other agents hitting the same command/gate shape
+reuse the batched result instead of compiling again. A normal `clear` gate still
+lets the harness run the command directly.
+
 When an agent starts a new ticket, its stale build-wait marker is cleared. This
 keeps an old "waiting for build" state from accidentally unlocking a later
 build while the same agent is editing again.
