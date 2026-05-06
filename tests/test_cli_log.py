@@ -9,8 +9,9 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from hsp import cli as hsp_cli
 from hsp import main as hsp_main
@@ -62,7 +63,8 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("broker: disabled", out)
 
     def test_mcp_subcommand_runs_stdio_server(self) -> None:
-        with patch("hsp.cli.server.run") as run:
+        run = Mock()
+        with patch("hsp.cli._server", return_value=SimpleNamespace(run=run)):
             with self.assertRaises(SystemExit) as cm:
                 hsp_main(["mcp"])
 
@@ -79,7 +81,14 @@ class CliLogTests(unittest.TestCase):
 
     def test_workgroup_command_reports_root_and_bus_logs(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
-            out = self._run(["workgroup", root], root=root)
+            out = self._run_with_env(
+                ["workgroup", root],
+                {
+                    "HSP_BROKER": "off",
+                    "LSP_ROOT": root,
+                    "HSP_WORKGROUP_BOUNDARY": root,
+                },
+            )
 
         self.assertIn(f"workgroup: {Path(root).resolve()}", out)
         self.assertIn("workgroup_source: fallback", out)
@@ -118,6 +127,20 @@ class CliLogTests(unittest.TestCase):
         self.assertIn(f"project: {project.resolve()}", out)
         self.assertIn(f"parent umbrella umbrella: {umbrella.resolve()}", out)
         self.assertIn(f"active domain domain: {domain.resolve()}", out)
+
+    def test_workgroup_command_skips_broker_by_default(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run_with_env(
+                ["workgroup", root],
+                {
+                    "HSP_BROKER": "auto",
+                    "LSP_ROOT": root,
+                    "HSP_WORKGROUP_ROOT": root,
+                },
+            )
+
+        self.assertIn("broker: skipped", out)
+        self.assertNotIn("weather:", out)
 
     def test_workgroup_command_counts_append_log_events(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:

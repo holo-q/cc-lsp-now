@@ -44,4 +44,26 @@ class WorkgroupDiscoveryTests(unittest.TestCase):
 
         self.assertTrue(context.fallback_workgroup)
         self.assertEqual(context.active_workgroup_root, str(Path(root).resolve()))
+        self.assertEqual(context.workgroup_source, "fallback")
         self.assertEqual(discovered, [])
+
+    def test_project_root_does_not_escape_active_workgroup(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            umbrella = Path(root)
+            domain = umbrella / "domain"
+            domain.mkdir()
+            (umbrella / "workgroup.toml").write_text(
+                "[workgroup]\nname = 'umbrella'\nlevel = 'umbrella'\n",
+                encoding="utf-8",
+            )
+            (umbrella / "Justfile").write_text("default:\n  echo umbrella\n", encoding="utf-8")
+            (domain / "workgroup.toml").write_text(
+                "[workgroup]\nname = 'domain'\nlevel = 'domain'\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict("os.environ", {"HSP_WORKGROUP_BOUNDARY": str(umbrella)}, clear=False):
+                context = scope_context_for(domain)
+
+        self.assertEqual(context.active_workgroup_root, str(domain.resolve()))
+        self.assertEqual(context.project_root, str(domain.resolve()))

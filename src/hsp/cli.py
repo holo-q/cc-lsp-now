@@ -20,16 +20,38 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any, cast
 
-from hsp import server
-from hsp.broker import BrokerError, broker_log_path, socket_path
-from hsp.broker_client import BrokerClient
 from hsp.bus_registry import BrokerMode, log_path_for, workspace_id_for
 from hsp.workgroup import ScopeContext, project_root_for, scope_context_for
 
+_server_module: ModuleType | None = None
+
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"", "0", "false", "no", "off"}
+BROKER_DISABLED = {"0", "false", "no", "off", "disable", "disabled", "local"}
+BROKER_REQUIRED = {"1", "true", "yes", "on", "require", "required"}
+BROKER_SOCKET_NAME = "hsp-broker.sock"
+BUS_ACTIONS: tuple[str, ...] = (
+    "event",
+    "note",
+    "ask",
+    "reply",
+    "chat",
+    "ticket",
+    "journal",
+    "question",
+    "edit_gate",
+    "recent",
+    "settle",
+    "precommit",
+    "postcommit",
+    "weather",
+    "presence",
+    "workgroup",
+    "status",
+)
 EDIT_DENY_REASON = (
     "Edit denied by HSP workgroup policy: no active ticket is held for this "
     "workspace. Start work with hsp.ticket(\"...\") or `hsp log ticket --message "
@@ -141,7 +163,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hsp")
-    parser.set_defaults(command=None, locations=[], limit=8, start_broker=False, lsp=False)
+    parser.set_defaults(
+        command=None,
+        locations=[],
+        limit=8,
+        broker=False,
+        weather=False,
+        start_broker=False,
+        lsp=False,
+    )
+    _add_workgroup_flags(parser)
     subcommands = parser.add_subparsers(dest="command")
 
     subcommands.add_parser(
@@ -155,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     log.add_argument(
         "action",
-        choices=(*server._BUS_ACTIONS, "hook"),
+        choices=(*BUS_ACTIONS, "hook"),
         help="bus action; hook is a CLI alias for event with --kind",
     )
     log.add_argument("--message", default="")
@@ -203,14 +234,62 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         help="directories or files to evaluate; defaults to the current directory",
     )
-    workgroup.add_argument("--limit", type=int, default=8)
-    workgroup.add_argument("--start-broker", action="store_true")
-    workgroup.add_argument("--lsp", action="store_true", help="include lsp_session status for each location")
+    _add_workgroup_flags(workgroup)
     return parser
 
 
+def _add_workgroup_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--broker", action="store_true", help="query broker bus status")
+    parser.add_argument(
+        "--weather",
+        action="store_true",
+        help="query broker bus status and recent journal weather",
+    )
+    parser.add_argument("--start-broker", action="store_true")
+    parser.add_argument("--lsp", action="store_true", help="include lsp_session status for each location")
+
+
+def _server() -> ModuleType:
+    global _server_module
+    if _server_module is None:
+        from hsp import server
+
+        _server_module = server
+    return _server_module
+
+
+def _broker_mode() -> str:
+    raw = os.environ.get("HSP_BROKER", "auto").strip().lower()
+    if raw in BROKER_DISABLED:
+        return "off"
+    if raw in BROKER_REQUIRED:
+        return "on"
+    return "auto"
+
+
+def _broker_socket_path() -> Path:
+    override = os.environ.get("HSP_BROKER_SOCKET")
+    if override:
+        return Path(override)
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / BROKER_SOCKET_NAME
+    user = os.environ.get("USER") or str(os.getuid())
+    return Path(f"/tmp/hsp-broker-{user}") / BROKER_SOCKET_NAME
+
+
+def _broker_log_path() -> Path:
+    override = os.environ.get("HSP_BROKER_LOG")
+    if override:
+        return Path(override)
+    state_home = os.environ.get("XDG_STATE_HOME")
+    base = Path(state_home) if state_home else Path.home() / ".local" / "state"
+    return base / "hsp" / "broker.log"
+
+
 def _run_mcp() -> int:
-    server.run()
+    _server().run()
     return 0
 
 
@@ -223,7 +302,7 @@ def _run_log(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         action = "event"
 
     result = asyncio.run(
-        server.lsp_log(
+        _server().lsp_log(
             action=action,
             message=str(ns.message),
             files=str(ns.files),
@@ -258,7 +337,7 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     command = _hook_command(payload)
     if _is_edit_before_hook(kind) and _require_ticket_for_edits():
         gate = asyncio.run(
-            server.lsp_log(
+            _server().lsp_log(
                 action="edit_gate",
                 message=message,
                 files=_join_scope(str(ns.files), _hook_files(payload)),
@@ -273,7 +352,7 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         gate_spec = _command_gate_spec(command)
         assert gate_spec is not None
         gate = asyncio.run(
-            server.implicit_build_gate(
+            _server().implicit_build_gate(
                 command,
                 timeout=os.environ.get("HSP_BUILD_GATE_TIMEOUT", "2m"),
                 files=",".join(gate_spec.files),
@@ -306,7 +385,7 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         status = _build_status(status)
 
     asyncio.run(
-        server.lsp_log(
+        _server().lsp_log(
             action="event",
             message=message,
             files=files,
@@ -329,7 +408,7 @@ def _run_command(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     message = str(ns.message).strip() or " ".join(argv)
     gate_spec = _gate_spec_for_argv(argv)
     gate = asyncio.run(
-        server.implicit_build_gate(
+        _server().implicit_build_gate(
             message,
             timeout=str(ns.timeout),
             files=",".join(gate_spec.files) if gate_spec else str(ns.files),
@@ -344,7 +423,7 @@ def _run_command(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     status = "passed" if completed.returncode == 0 else "failed"
     if not bool(ns.no_log):
         asyncio.run(
-            server.lsp_log(
+            _server().lsp_log(
                 action="event",
                 message=message,
                 files=str(ns.files),
@@ -363,6 +442,8 @@ def _run_workgroup(ns: argparse.Namespace) -> int:
         _workgroup_block(
             location=location,
             limit=max(0, int(ns.limit)),
+            include_broker=bool(ns.broker) or bool(ns.weather),
+            include_weather=bool(ns.weather),
             start_broker=bool(ns.start_broker),
             include_lsp=bool(ns.lsp),
         )
@@ -376,6 +457,8 @@ def _workgroup_block(
     *,
     location: str,
     limit: int,
+    include_broker: bool,
+    include_weather: bool,
     start_broker: bool,
     include_lsp: bool,
 ) -> str:
@@ -385,18 +468,27 @@ def _workgroup_block(
     lines = [
         f"workgroup: {root}",
         f"location: {Path(location).expanduser()}",
-        f"workgroup_source: {'fallback' if scope.fallback_workgroup else 'marker'}",
+        f"workgroup_source: {scope.workgroup_source}",
         f"workspace_id: {wsid}",
         f"project: {scope.project_root}",
         "gate policy: build=project checker=file/project journal=workgroup",
+        f"env HSP_WORKGROUP_ROOT: {os.environ.get('HSP_WORKGROUP_ROOT', '(unset)')}",
         f"env LSP_ROOT: {os.environ.get('LSP_ROOT', '(unset)')}",
-        f"broker mode: {server._broker_mode()}",
-        f"broker socket: {socket_path()}",
-        f"broker log: {broker_log_path()}",
+        f"broker mode: {_broker_mode()}",
+        f"broker socket: {_broker_socket_path()}",
+        f"broker log: {_broker_log_path()}",
     ]
     lines.extend(_workgroup_stack_lines(scope))
     lines.extend(_workgroup_log_lines(root))
-    lines.extend(_workgroup_broker_lines(root, limit=limit, start_broker=start_broker))
+    lines.extend(
+        _workgroup_broker_lines(
+            root,
+            limit=limit,
+            include_broker=include_broker,
+            include_weather=include_weather,
+            start_broker=start_broker,
+        )
+    )
     if include_lsp:
         lines.append("lsp:")
         lines.extend(f"  {line}" for line in _workgroup_lsp_status(root).splitlines())
@@ -405,7 +497,7 @@ def _workgroup_block(
 
 def _workgroup_stack_lines(scope: ScopeContext) -> list[str]:
     if not scope.workgroups:
-        return ["workgroup_stack: (none; ephemeral fallback)"]
+        return [f"workgroup_stack: (none; {scope.workgroup_source})"]
     lines = ["workgroup_stack:"]
     for index, item in enumerate(scope.workgroups):
         role = "active" if index == len(scope.workgroups) - 1 else "parent"
@@ -453,14 +545,30 @@ def _jsonl_count_and_last(path: Path) -> tuple[int, str]:
     return len(lines), last_id
 
 
-def _workgroup_broker_lines(root: str, *, limit: int, start_broker: bool) -> list[str]:
-    if server._broker_mode() == "off":
+def _workgroup_broker_lines(
+    root: str,
+    *,
+    limit: int,
+    include_broker: bool,
+    include_weather: bool,
+    start_broker: bool,
+) -> list[str]:
+    if _broker_mode() == "off":
         return ["broker: disabled"]
+    if not include_broker and not include_weather and not start_broker:
+        return ["broker: skipped (use --broker, --weather, or --start-broker)"]
     try:
+        from hsp.broker import BrokerError
+        from hsp.broker_client import BrokerClient
+
         with BrokerClient() as client:
             started = client.connect_or_start() if start_broker else _connect_existing_broker(client)
             status = client.request("bus.status", {"workspace_root": root})
-            weather = client.request("bus.weather", {"workspace_root": root, "limit": limit})
+            weather = (
+                client.request("bus.weather", {"workspace_root": root, "limit": limit})
+                if include_weather
+                else None
+            )
     except BrokerError as e:
         return [f"broker: unreachable ({e.code}: {e})"]
     except OSError as e:
@@ -475,12 +583,12 @@ def _workgroup_broker_lines(root: str, *, limit: int, start_broker: bool) -> lis
         )
     if isinstance(weather, dict):
         lines.append("weather:")
-        rendered = server._render_bus_weather(cast(dict[str, object], weather))
+        rendered = _server()._render_bus_weather(cast(dict[str, object], weather))
         lines.extend(f"  {line}" for line in rendered.splitlines())
     return lines
 
 
-def _connect_existing_broker(client: BrokerClient) -> bool:
+def _connect_existing_broker(client: Any) -> bool:
     client.connect()
     return False
 
@@ -489,7 +597,7 @@ def _workgroup_lsp_status(root: str) -> str:
     old_root = os.environ.get("LSP_ROOT")
     os.environ["LSP_ROOT"] = root
     try:
-        return asyncio.run(server.lsp_session(action="status"))
+        return asyncio.run(_server().lsp_session(action="status"))
     finally:
         if old_root is None:
             os.environ.pop("LSP_ROOT", None)
@@ -632,7 +740,7 @@ def _record_authoritative_build_result(
 ) -> None:
     scope_files = "" if full_workspace else files
     asyncio.run(
-        server.lsp_log(
+        _server().lsp_log(
             action="event",
             message=command,
             files=scope_files,
@@ -718,7 +826,7 @@ def _duration_env(name: str, default: float) -> float:
     if not value:
         return default
     try:
-        parsed = server._parse_bus_duration(value, default=default)
+        parsed = _server()._parse_bus_duration(value, default=default)
     except Exception:
         return default
     return default if isinstance(parsed, str) else float(parsed)

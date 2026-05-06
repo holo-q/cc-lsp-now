@@ -43,6 +43,7 @@ class ScopeContext:
     project_root: str
     workgroups: tuple[WorkgroupDefinition, ...]
     fallback_workgroup: bool
+    workgroup_source: str
 
     @property
     def parent_workgroup_root(self) -> str:
@@ -55,23 +56,25 @@ def scope_context_for(location: str | Path | None = None) -> ScopeContext:
     resolved = resolve_location(location)
     override = _explicit_workgroup_root()
     if override:
-        project = discover_project_root(resolved) or str(resolved)
+        project = discover_project_root(resolved, boundary=Path(override)) or override
         return ScopeContext(
             location=str(resolved),
             active_workgroup_root=override,
             project_root=project,
             workgroups=(),
             fallback_workgroup=True,
+            workgroup_source="override",
         )
     workgroups = discover_workgroups(resolved)
     active = workgroups[-1].root if workgroups else str(resolved)
-    project = discover_project_root(resolved) or str(resolved)
+    project = discover_project_root(resolved, boundary=Path(active)) or active
     return ScopeContext(
         location=str(resolved),
         active_workgroup_root=active,
         project_root=project,
         workgroups=tuple(workgroups),
         fallback_workgroup=not workgroups,
+        workgroup_source="fallback" if not workgroups else "marker",
     )
 
 
@@ -97,10 +100,12 @@ def discover_workgroups(location: str | Path | None = None) -> list[WorkgroupDef
     return found
 
 
-def discover_project_root(location: str | Path | None = None) -> str | None:
+def discover_project_root(location: str | Path | None = None, *, boundary: Path | None = None) -> str | None:
     resolved = resolve_location(location)
     markers = _project_markers()
-    return find_project_root(str(resolved), markers)
+    if boundary is None:
+        return find_project_root(str(resolved), markers)
+    return _find_project_root_until(resolved, markers, boundary=boundary)
 
 
 def resolve_location(location: str | Path | None = None) -> Path:
@@ -117,6 +122,27 @@ def resolve_location(location: str | Path | None = None) -> Path:
 
 def _ancestor_chain(path: Path) -> list[Path]:
     return [path, *path.parents]
+
+
+def _find_project_root_until(path: Path, markers: list[str], *, boundary: Path) -> str | None:
+    boundary = boundary.resolve(strict=False)
+    start = path if path.is_dir() else path.parent
+    for parent in _ancestor_chain(start):
+        for marker in markers:
+            if _has_marker(parent, marker):
+                return str(parent)
+        if parent == boundary:
+            break
+    return None
+
+
+def _has_marker(parent: Path, marker: str) -> bool:
+    if any(ch in marker for ch in "*?["):
+        try:
+            return any(parent.glob(marker))
+        except OSError:
+            return False
+    return (parent / marker).exists()
 
 
 def _workgroup_marker(parent: Path) -> Path | None:
