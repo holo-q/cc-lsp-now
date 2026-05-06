@@ -99,6 +99,33 @@ class BrokerLspSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Missing LSP server binary", cm.exception.message)
         self.assertIn("definitely-missing-lsp-binary", cm.exception.message)
 
+    async def test_lsp_client_retries_retrigger_request_cancellation(self) -> None:
+        client = LspClient(["fake-ls"], "/repo")
+        sends = 0
+
+        def fake_send(msg: dict[str, object]) -> None:
+            nonlocal sends
+            sends += 1
+            if sends == 1:
+                client._dispatch(
+                    {
+                        "id": msg["id"],
+                        "error": {
+                            "code": -32802,
+                            "message": "server cancelled the request",
+                            "data": {"retriggerRequest": True},
+                        },
+                    }
+                )
+            else:
+                client._dispatch({"id": msg["id"], "result": [{"name": "cmd_ls"}]})
+
+        with patch.object(client, "_send", side_effect=fake_send):
+            result = await client.request("textDocument/documentSymbol", {}, timeout=1)
+
+        self.assertEqual(result, [{"name": "cmd_ls"}])
+        self.assertEqual(sends, 2)
+
     async def test_request_starts_client_once_and_caches_method_handler(self) -> None:
         clients: list[FakeLspClient] = []
 
@@ -434,6 +461,68 @@ class ServerBrokerForwardingTests(unittest.TestCase):
         self.assertEqual(server._last_server, "brokered")
         self.assertIn("brokered", server._just_started_this_call)
         self.assertIn("/repo", server._added_workspaces_this_call)
+
+    def test_request_retries_null_rust_document_symbols_from_broker(self) -> None:
+        calls = 0
+
+        async def fake_broker(_method: str, _params: dict | None, _uri: str | None) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            return {
+                "result": None if calls == 1 else [{"name": "cmd_ls"}],
+                "server_label": "rust-analyzer",
+                "started": [],
+                "workspaces_added": [],
+            }
+
+        with patch.dict("os.environ", {"HSP_ROUTER": "1", "HSP_BROKER": "on"}, clear=True):
+            with patch.object(server, "_broker_lsp_request", AsyncMock(side_effect=fake_broker)):
+                with patch.object(server, "_sleep_for_null_document_symbols", AsyncMock()) as sleep:
+                    result = asyncio.run(
+                        server._request(
+                            "textDocument/documentSymbol",
+                            {"textDocument": {"uri": "file:///repo/src/lib.rs"}},
+                            uri="file:///repo/src/lib.rs",
+                        )
+                    )
+
+        self.assertEqual(result, [{"name": "cmd_ls"}])
+        self.assertEqual(calls, 2)
+        sleep.assert_awaited_once()
+
+    def test_direct_request_retries_null_rust_document_symbols(self) -> None:
+        class NullThenReadyClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def request(
+                self,
+                _method: str,
+                _params: dict | None,
+                *,
+                timeout: float = 30.0,
+            ) -> object:
+                self.calls += 1
+                return None if self.calls == 1 else [{"name": "cmd_ls"}]
+
+        client = NullThenReadyClient()
+
+        async def run() -> object:
+            return await server._client_request_with_null_document_symbol_retries(
+                cast(LspClient, client),
+                "textDocument/documentSymbol",
+                {"textDocument": {"uri": "file:///repo/src/lib.rs"}},
+                timeout=1,
+                uri="file:///repo/src/lib.rs",
+                server_label="rust-analyzer",
+            )
+
+        with patch.object(server, "_sleep_for_null_document_symbols", AsyncMock()) as sleep:
+            result = asyncio.run(run())
+
+        self.assertEqual(result, [{"name": "cmd_ls"}])
+        self.assertEqual(client.calls, 2)
+        sleep.assert_awaited_once()
 
     def test_router_broker_params_do_not_include_frontend_chain(self) -> None:
         with patch.dict("os.environ", {"HSP_ROUTER": "1"}, clear=True):

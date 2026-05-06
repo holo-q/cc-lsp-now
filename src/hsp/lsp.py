@@ -13,6 +13,10 @@ from hsp.lsp_binary import missing_lsp_binary_message
 
 log = logging.getLogger(__name__)
 
+_RETRIGGER_ERROR = -32802
+_RETRIGGER_ATTEMPTS = 3
+_RETRIGGER_DELAY_SECONDS = 0.05
+
 EXTENSION_LANGUAGE_MAP: dict[str, str] = {
     ".py": "python",
     ".pyi": "python",
@@ -95,6 +99,14 @@ class LspError(Exception):
         except TypeError:
             data = repr(self.data)
         return f"{base}\nData: {data}"
+
+
+def _should_retrigger_request(error: LspError) -> bool:
+    return (
+        error.code == _RETRIGGER_ERROR
+        and isinstance(error.data, dict)
+        and error.data.get("retriggerRequest") is True
+    )
 
 
 class LspClient:
@@ -238,28 +250,35 @@ class LspClient:
     async def request(
         self, method: str, params: dict | None, *, timeout: float = 30.0
     ) -> Any:
-        self._request_id += 1
-        msg_id = self._request_id
+        for attempt in range(_RETRIGGER_ATTEMPTS):
+            self._request_id += 1
+            msg_id = self._request_id
 
-        msg: dict[str, Any] = {
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "method": method,
-        }
-        if params is not None:
-            msg["params"] = params
+            msg: dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "method": method,
+            }
+            if params is not None:
+                msg["params"] = params
 
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[Any] = loop.create_future()
-        self._pending[msg_id] = future
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[Any] = loop.create_future()
+            self._pending[msg_id] = future
 
-        self._send(msg)
-        try:
-            return await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
-            self._pending.pop(msg_id, None)
-            agent_log(f"{self._command[0]} timed out on {method} after {timeout}s")
-            raise
+            self._send(msg)
+            try:
+                return await asyncio.wait_for(future, timeout=timeout)
+            except LspError as e:
+                if not _should_retrigger_request(e) or attempt == _RETRIGGER_ATTEMPTS - 1:
+                    raise
+                agent_log(f"{self._command[0]} asked to retrigger {method}; retrying")
+                await asyncio.sleep(_RETRIGGER_DELAY_SECONDS * (attempt + 1))
+            except asyncio.TimeoutError:
+                self._pending.pop(msg_id, None)
+                agent_log(f"{self._command[0]} timed out on {method} after {timeout}s")
+                raise
+        raise LspError(_RETRIGGER_ERROR, f"{method} cancelled after retrigger retries")
 
     def notify(self, method: str, params: dict | None) -> None:
         msg: dict[str, Any] = {

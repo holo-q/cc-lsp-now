@@ -23,6 +23,7 @@ end-to-end behaviour with a real server stays in live smoke per the docs.
 """
 import inspect
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from hsp import server as _server
 from hsp.server import (
@@ -338,6 +339,16 @@ class OutlineRegistryTests(unittest.TestCase):
         # would break the ``_wrap_with_header`` registration shim silently.
         self.assertTrue(inspect.iscoroutinefunction(lsp_outline))
         self.assertTrue(inspect.iscoroutinefunction(getattr(_server, "lsp_outline")))
+
+
+class OutlineRequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_outline_does_not_retry_empty_document_symbols(self) -> None:
+        with patch.object(_server, "_resolve_file_path", return_value="/repo/src/empty.rs"):
+            with patch.object(_server, "_request", new=AsyncMock(return_value=[])) as req:
+                result = await _server._outline_single("/repo/src/empty.rs")
+
+        self.assertEqual(result, "No symbols found.")
+        self.assertEqual(req.await_count, 1)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from hsp import server
 from hsp.lsp import file_uri
-from hsp.router import find_project_root, resolve_route_id_for_path
+from hsp.router import BUILTIN_ROUTES, find_project_root, resolve_route_id_for_path
 
 
 class HspRouterResolutionTests(unittest.TestCase):
@@ -49,6 +49,11 @@ class HspRouterResolutionTests(unittest.TestCase):
 
         self.assertEqual(find_project_root(str(target), ("Cargo.toml", "rust-project.json")), str(project))
         self.assertEqual(resolve_route_id_for_path(str(target)), "rust")
+
+    def test_rust_route_excludes_project_tmp_from_warmup(self) -> None:
+        exclude = BUILTIN_ROUTES["rust"].env["LSP_WARMUP_EXCLUDE"].split(",")
+        self.assertIn("references", exclude)
+        self.assertIn("tmp", exclude)
 
     def test_generic_git_marker_does_not_make_workspace_route_ambiguous(self) -> None:
         project = self.root / "python"

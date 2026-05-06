@@ -62,7 +62,7 @@ BUILTIN_ROUTES: dict[str, LanguageRoute] = {
             "LSP_SERVERS": "rust-analyzer",
             "LSP_PROJECT_MARKERS": "Cargo.toml,rust-project.json,.git",
             "LSP_WARMUP_PATTERNS": "*.rs",
-            "LSP_WARMUP_EXCLUDE": "target,.git",
+            "LSP_WARMUP_EXCLUDE": "target,references,tmp,.git",
             "LSP_LANGUAGE": "rust",
         },
     ),

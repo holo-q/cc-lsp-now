@@ -45,6 +45,9 @@ from hsp.warmup_stats import WarmupStats
 
 log = logging.getLogger(__name__)
 
+_DOCUMENT_SYMBOL_NULL_RETRIES = 8
+_DOCUMENT_SYMBOL_NULL_RETRY_DELAY = 0.5
+
 mcp = FastMCP(
     "lsp-bridge",
     instructions=(
@@ -1276,17 +1279,23 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         _ensure_chain_configs()
     if _broker_enabled():
         try:
-            forwarded = await _broker_lsp_request(method, params, uri)
-            label = forwarded.get("server_label", "")
-            if isinstance(label, str):
-                _last_server = label
-            for item in _wire_list(forwarded, "started"):
-                if isinstance(item, str) and item not in _just_started_this_call:
-                    _just_started_this_call.append(item)
-            for item in _wire_list(forwarded, "workspaces_added"):
-                if isinstance(item, str) and item not in _added_workspaces_this_call:
-                    _added_workspaces_this_call.append(item)
-            return forwarded.get("result")
+            for attempt in range(_DOCUMENT_SYMBOL_NULL_RETRIES):
+                forwarded = await _broker_lsp_request(method, params, uri)
+                label = forwarded.get("server_label", "")
+                if isinstance(label, str):
+                    _last_server = label
+                for item in _wire_list(forwarded, "started"):
+                    if isinstance(item, str) and item not in _just_started_this_call:
+                        _just_started_this_call.append(item)
+                for item in _wire_list(forwarded, "workspaces_added"):
+                    if isinstance(item, str) and item not in _added_workspaces_this_call:
+                        _added_workspaces_this_call.append(item)
+                result = forwarded.get("result")
+                if not _should_retry_null_document_symbols(method, result, _last_server):
+                    return result
+                if attempt == _DOCUMENT_SYMBOL_NULL_RETRIES - 1:
+                    return result
+                await _sleep_for_null_document_symbols(attempt, uri)
         except BrokerError as e:
             lsp_error = _lsp_error_from_broker(e)
             if lsp_error is not None:
@@ -1315,7 +1324,14 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
             await client.ensure_document(uri)
         _last_server = _chain_configs[idx].label
         try:
-            return await client.request(method, params, timeout=timeout)
+            return await _client_request_with_null_document_symbol_retries(
+                client,
+                method,
+                params,
+                timeout=timeout,
+                uri=uri,
+                server_label=_last_server,
+            )
         except asyncio.TimeoutError:
             agent_log(f"{_chain_configs[idx].label} timed out on {method} (cached), invalidating")
             del _method_handler[method]
@@ -1333,7 +1349,14 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
         if uri:
             await client.ensure_document(uri)
         try:
-            result = await client.request(method, params, timeout=timeout)
+            result = await _client_request_with_null_document_symbol_retries(
+                client,
+                method,
+                params,
+                timeout=timeout,
+                uri=uri,
+                server_label=_chain_configs[idx].label,
+            )
         except asyncio.TimeoutError:
             agent_log(f"{_chain_configs[idx].label} timed out on {method} after {timeout}s, trying next")
             continue
@@ -1373,6 +1396,40 @@ async def _request(method: str, params: dict | None, *, uri: str | None = None) 
     if last_err is not None:
         _method_handler[method] = None
     raise last_err or LspError(-32601, f"{method} timed out on all servers in the chain")
+
+
+def _should_retry_null_document_symbols(method: str, result: Any, server_label: str) -> bool:
+    if method != "textDocument/documentSymbol" or result is not None:
+        return False
+    return "rust-analyzer" in server_label or _route_env("LSP_LANGUAGE", "").strip().lower() == "rust"
+
+
+async def _sleep_for_null_document_symbols(attempt: int, uri: str | None) -> None:
+    delay = _DOCUMENT_SYMBOL_NULL_RETRY_DELAY * (attempt + 1)
+    agent_log(
+        "rust-analyzer returned null documentSymbol"
+        f" for {uri or '(no uri)'}; retrying in {delay:.1f}s"
+    )
+    await asyncio.sleep(delay)
+
+
+async def _client_request_with_null_document_symbol_retries(
+    client: LspClient,
+    method: str,
+    params: dict | None,
+    *,
+    timeout: float,
+    uri: str | None,
+    server_label: str,
+) -> Any:
+    for attempt in range(_DOCUMENT_SYMBOL_NULL_RETRIES):
+        result = await client.request(method, params, timeout=timeout)
+        if not _should_retry_null_document_symbols(method, result, server_label):
+            return result
+        if attempt == _DOCUMENT_SYMBOL_NULL_RETRIES - 1:
+            return result
+        await _sleep_for_null_document_symbols(attempt, uri)
+    return None
 
 
 def _header(method: str) -> str:
