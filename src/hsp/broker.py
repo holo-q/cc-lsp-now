@@ -324,6 +324,8 @@ class BrokerDaemon:
                 raise BrokerError("invalid_params", str(e)) from None
         if method == "bus.build_gate":
             return self.bus.build_gate(params)
+        if method == "bus.edit_gate":
+            return self.bus.edit_gate(params)
         if method == "bus.note":
             return self.bus.note(params)
         if method == "bus.ask":

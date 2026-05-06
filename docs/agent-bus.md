@@ -174,6 +174,37 @@ When an agent starts a new ticket, its stale build-wait marker is cleared. This
 keeps an old "waiting for build" state from accidentally unlocking a later
 build while the same agent is editing again.
 
+## Edit Gate
+
+Harnesses that support `PreToolUse` denial can make tickets mandatory for
+edits. Set:
+
+```text
+HSP_REQUIRE_TICKET_FOR_EDITS=1
+```
+
+When enabled, the `edit.before` hook checks `edit_gate` before recording the
+edit event. If the gate fails, the hook returns the harness denial payload and
+the edit tool does not run. The denial tells the agent to start a ticket and
+retry:
+
+```text
+hsp.ticket("editing workgroup bus policy")
+```
+
+The default scope is `workgroup`: any active ticket in the workspace unlocks
+edits. This is the practical mode for mixed harnesses because MCP tools and
+shell hooks may run in separate processes. For stricter ownership, set:
+
+```text
+HSP_EDIT_GATE_SCOPE=agent
+HSP_AGENT_ID=<stable-agent-id>
+```
+
+In `agent` scope, the current hook process must present the same `HSP_AGENT_ID`
+as the ticket holder. Without a stable id, the hook cannot prove that the MCP
+agent holding the ticket is the shell process attempting the edit.
+
 ## Journal And Chat
 
 `hsp.journal()` displays the compact shared board: open tickets, open questions,
@@ -259,6 +290,7 @@ small:
 | `ticket` | Start/join this agent's current work ticket, or release with an empty message. |
 | `journal` | Show open tickets/questions and the latest compact event rows. |
 | `build_gate` | Quietly wait until a build can proceed or the timeout elapses. |
+| `edit_gate` | Quietly report whether the current edit hook may proceed. |
 | `recent` | Show recent related bus activity. |
 | `settle` | Close expired questions and show pending digests. |
 | `precommit` | Summarize touched files, overlaps, related edits, and suggested checks. |
@@ -300,6 +332,7 @@ hsp log ticket --message ""
 hsp log journal
 hsp log chat --id Q3 --message "all holders waiting"
 hsp log build_gate --message "cargo test" --timeout 2m
+hsp log edit_gate --status workgroup
 hsp log note --message "..." --files src/server.py
 hsp log ask --message "Anyone touching server.py?" --files src/server.py --timeout 3m
 hsp log reply --id Q3 --message "done"
@@ -369,6 +402,11 @@ subcommand pairs. On the before hook they run the quiet build gate and do not
 append a journal row; on the after hook they record `test.ran` with normalized
 `passed` / `failed` status. Set `HSP_BUILD_GATE_TIMEOUT` to tune the hook wait
 window; the default is `2m`.
+
+When `HSP_REQUIRE_TICKET_FOR_EDITS=1`, edit before hooks become hard gates.
+They use the same broker bus and return a harness-native denial payload rather
+than a normal bus-stop notice. This is deliberately opt-in because it changes
+the edit hook from weather into policy.
 
 ### Timed Questions
 
@@ -451,10 +489,11 @@ a single `hsp` binary. The shape is:
    before/after, test result, git commit before/after, and push before/after.
    The broker decides per-stop whether the digest is worth printing; silent
    exit is the common case.
-5. Stays warn-first: no file claims and no edit denial. `build_gate` is the
-   explicit quiet build stop. `hsp run` and detected build-command before hooks
-   are allowed to wait or time out; hook bodies that pipe other `hsp log` output
-   through must not interpret it as a gate.
+5. Stays warn-first by default: no file claims and no edit denial unless
+   `HSP_REQUIRE_TICKET_FOR_EDITS=1` is set. `build_gate` is the explicit quiet
+   build stop. `hsp run` and detected build-command before hooks are allowed to
+   wait or time out; hook bodies that pipe other `hsp log` output through must
+   not interpret it as a gate.
 6. Timed questions (`ask`/`reply`) layer on top of the same stops: open
    questions whose scope overlaps the current stop append a compact reminder,
    and at timeout the next stop emits the closing digest.

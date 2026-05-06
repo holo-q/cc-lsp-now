@@ -183,6 +183,10 @@ class LspLogRegistryTests(unittest.TestCase):
                 self.assertIn(name, TOOL_CAPABILITIES)
                 self.assertIsNone(TOOL_CAPABILITIES[name])
 
+    def test_edit_gate_is_lsp_log_action_but_not_short_tool(self) -> None:
+        self.assertIn("edit_gate", _server._BUS_ACTIONS)
+        self.assertNotIn("edit_gate", _ALL_TOOLS)
+
 
 class LspLogDefensiveTests(_LocalBusFixture):
     """Bad input from an agent (or hook) must surface as a string so the

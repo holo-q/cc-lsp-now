@@ -251,6 +251,32 @@ class BrokerBusLifecycleTests(unittest.TestCase):
             self.assertIsNotNone(chat_question["closed_at"])
             self.assertEqual([reply["event_type"] for reply in replies], ["bus.reply"])
 
+    def test_edit_gate_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            daemon = BrokerDaemon()
+            denied = _run(daemon.handle_request({
+                "id": "denied",
+                "method": "bus.edit_gate",
+                "params": {"workspace_root": root, "agent_id": "agent-a"},
+            }))
+            _run(daemon.handle_request({
+                "id": "ticket",
+                "method": "bus.ticket",
+                "params": {
+                    "workspace_root": root,
+                    "agent_id": "agent-b",
+                    "message": "editing",
+                },
+            }))
+            allowed = _run(daemon.handle_request({
+                "id": "allowed",
+                "method": "bus.edit_gate",
+                "params": {"workspace_root": root, "agent_id": "agent-a"},
+            }))
+
+            self.assertFalse(_result(denied)["allowed"])
+            self.assertTrue(_result(allowed)["allowed"])
+
 
 class BrokerBusWorkspaceScopingTests(unittest.TestCase):
     """Bus must key by workspace root, not LSP config_hash."""

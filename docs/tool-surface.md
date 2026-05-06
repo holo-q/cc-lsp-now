@@ -60,11 +60,13 @@ should be warn-only and should print nothing when there is no useful signal.
 The same actions are reachable from the shell as `hsp log <action>`, bundled
 plugin hooks use the env-gated `hsp hook --kind <kind>` adapter, and build
 wrappers can use `hsp run -- <command>` to wait on the workgroup build gate
-before recording a `test.ran` row. The plugin command checks `HSP_HOOKS` before
-launching `uvx`, so the shipped hooks are cheap and inert by default. There is
-no separate `hsp-log`, `hsp-hook`, or `hsp-run` binary; the MCP tool and CLI
-subcommands funnel into the broker's `bus.*` JSONL surface. See
-`docs/agent-bus.md` for the ambient hook recipes.
+before recording a `test.ran` row. When `HSP_REQUIRE_TICKET_FOR_EDITS=1`,
+edit-before hooks also call the quiet `edit_gate` action and return a
+harness-native denial if the ticket policy fails. The plugin command checks
+`HSP_HOOKS` before launching `uvx`, so the shipped hooks are cheap and inert by
+default. There is no separate `hsp-log`, `hsp-hook`, or `hsp-run` binary; the
+MCP tool and CLI subcommands funnel into the broker's `bus.*` JSONL surface.
+See `docs/agent-bus.md` for the ambient hook recipes.
 
 ## Raw Tool Cut Map
 

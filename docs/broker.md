@@ -264,9 +264,10 @@ build/verifier commands before recording their result. The hook adapter is
 env-gated by `HSP_HOOKS` and no-ops before launching `uvx` by default. Session
 start, user prompt, edit before/after, generic tool before/after, and detected
 Bash build commands now ship inside the Claude plugin manifests. The CLI stays
-warn-first: ordinary log/hook rows do not block, while the explicit build gate
-path may wait or time out. See `docs/agent-bus.md` for the full hook taxonomy
-and recipes.
+warn-first by default: ordinary log/hook rows do not block, while the explicit
+build gate path may wait or time out. Setting `HSP_REQUIRE_TICKET_FOR_EDITS=1`
+also turns edit-before hooks into hard denials when the workspace has no active
+ticket. See `docs/agent-bus.md` for the full hook taxonomy and recipes.
 
 ## Relationship To hsp
 

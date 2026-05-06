@@ -292,6 +292,39 @@ class AgentBus:
                 "active_tickets": [ticket.to_wire() for ticket in tickets],
             }
 
+    def edit_gate(self, params: dict[str, Any]) -> dict[str, Any]:
+        root = _workspace_root(params)
+        agent_id = _agent_id(params)
+        mode = _string(params.get("mode")) or "workgroup"
+        with self._lock:
+            active_tickets = self._active_ticket_wires_locked(root)
+            if mode == "workgroup":
+                return {
+                    "workspace_root": root,
+                    "allowed": bool(active_tickets),
+                    "reason": "ticket_active" if active_tickets else "missing_ticket",
+                    "agent_id": agent_id,
+                    "active_tickets": active_tickets,
+                }
+            if not agent_id:
+                return {
+                    "workspace_root": root,
+                    "allowed": False,
+                    "reason": "missing_agent_id",
+                    "agent_id": "",
+                    "active_tickets": active_tickets,
+                }
+            ticket = self._tickets.get(self._agent_tickets.get(agent_id, ""))
+            allowed = ticket is not None and ticket.is_open and ticket.workspace_root == root
+            return {
+                "workspace_root": root,
+                "allowed": allowed,
+                "reason": "ticket_held" if allowed else "missing_ticket",
+                "agent_id": agent_id,
+                "ticket": ticket.to_wire() if allowed and ticket is not None else {},
+                "active_tickets": active_tickets,
+            }
+
     def ask(self, params: dict[str, Any]) -> dict[str, Any]:
         timeout_seconds = _timeout_seconds(params.get("timeout"), default=180.0)
         now = time.time()

@@ -21,6 +21,11 @@ from hsp import server
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"", "0", "false", "no", "off"}
+EDIT_DENY_REASON = (
+    "Edit denied by HSP workgroup policy: no active ticket is held for this "
+    "workspace. Start work with hsp.ticket(\"...\") or `hsp log ticket --message "
+    "\"...\"`, then retry the edit."
+)
 BUILD_FIRST_TOKENS = {
     "cargo",
     "cmake",
@@ -160,6 +165,19 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         kind = "session.stop"
         message = ".end"
     command = _hook_command(payload)
+    if _is_edit_before_hook(kind) and _require_ticket_for_edits():
+        gate = asyncio.run(
+            server.lsp_log(
+                action="edit_gate",
+                message=message,
+                files=_join_scope(str(ns.files), _hook_files(payload)),
+                symbols=_join_scope(str(ns.symbols), _hook_symbols(payload)),
+                status=os.environ.get("HSP_EDIT_GATE_SCOPE", "workgroup"),
+            )
+        )
+        if "edit gate: allowed" not in gate:
+            _write_hook_denial(_edit_denial_reason(gate))
+            return 0
     if _is_build_before_hook(kind, payload, command):
         gate = asyncio.run(
             server.lsp_log(
@@ -247,6 +265,32 @@ def _hooks_enabled() -> bool:
     if raw in FALSE_VALUES:
         return False
     return False
+
+
+def _require_ticket_for_edits() -> bool:
+    raw = os.environ.get("HSP_REQUIRE_TICKET_FOR_EDITS", "").strip().lower()
+    return raw in TRUE_VALUES
+
+
+def _is_edit_before_hook(kind: str) -> bool:
+    return kind in {"edit.before", "write.before"}
+
+
+def _write_hook_denial(reason: str) -> None:
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+    sys.stdout.write(json.dumps(output))
+    sys.stdout.flush()
+
+
+def _edit_denial_reason(gate: str) -> str:
+    gate = gate.strip()
+    return f"{EDIT_DENY_REASON}\n\n{gate}" if gate else EDIT_DENY_REASON
 
 
 def _drain_stdin() -> None:

@@ -168,6 +168,30 @@ class AgentBusPureTests(unittest.TestCase):
 
         self.assertEqual(gate["waiting"], [])
 
+    def test_edit_gate_workgroup_mode_requires_any_active_ticket(self) -> None:
+        bus = AgentBus()
+
+        denied = bus.edit_gate({"workspace_root": "/repo", "agent_id": "agent-a"})
+        bus.ticket({"workspace_root": "/repo", "agent_id": "agent-b", "message": "editing"})
+        allowed = bus.edit_gate({"workspace_root": "/repo", "agent_id": "agent-a"})
+
+        self.assertFalse(denied["allowed"])
+        self.assertEqual(denied["reason"], "missing_ticket")
+        self.assertTrue(allowed["allowed"])
+        self.assertEqual(allowed["reason"], "ticket_active")
+
+    def test_edit_gate_agent_mode_requires_current_agent_ticket(self) -> None:
+        bus = AgentBus()
+        bus.ticket({"workspace_root": "/repo", "agent_id": "agent-b", "message": "editing"})
+
+        denied = bus.edit_gate({"workspace_root": "/repo", "agent_id": "agent-a", "mode": "agent"})
+        allowed = bus.edit_gate({"workspace_root": "/repo", "agent_id": "agent-b", "mode": "agent"})
+
+        self.assertFalse(denied["allowed"])
+        self.assertEqual(denied["reason"], "missing_ticket")
+        self.assertTrue(allowed["allowed"])
+        self.assertEqual(allowed["reason"], "ticket_held")
+
     def test_chat_reply_closes_question_and_surfaces_in_journal(self) -> None:
         bus = AgentBus()
         opened = bus.ask({

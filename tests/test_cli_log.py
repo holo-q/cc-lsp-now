@@ -248,6 +248,85 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(event["message"], "uv run python -m unittest")
         self.assertEqual(metadata["status"], "passed")
 
+    def test_edit_before_hook_denies_without_ticket_when_policy_enabled(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            code, out, err = self._run_hook_code(
+                ["hook", "--kind", "edit.before"],
+                root=root,
+                stdin=payload,
+                enabled=True,
+                extra_env={"HSP_REQUIRE_TICKET_FOR_EDITS": "1"},
+            )
+            path = Path(root) / "tmp" / "hsp-bus.jsonl"
+            denial = json.loads(out)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertFalse(path.exists())
+        hook_output = self._require_dict(denial, "hookSpecificOutput")
+        self.assertEqual(hook_output["permissionDecision"], "deny")
+        self.assertIn("no active ticket", str(hook_output["permissionDecisionReason"]))
+
+    def test_edit_before_hook_allows_with_workgroup_ticket(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "other-agent",
+                "message": "editing shared state",
+            })
+            out = self._run_hook(
+                ["hook", "--kind", "edit.before"],
+                root=root,
+                stdin=payload,
+                enabled=True,
+                extra_env={"HSP_REQUIRE_TICKET_FOR_EDITS": "1"},
+            )
+            event = self._read_last_event(root)
+
+        self.assertEqual(out, "")
+        self.assertEqual(event["kind"], "edit.before")
+
+    def test_edit_before_hook_agent_scope_requires_matching_agent_id(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "agent-a",
+                "message": "editing shared state",
+            })
+            code, out, _err = self._run_hook_code(
+                ["hook", "--kind", "edit.before"],
+                root=root,
+                stdin=payload,
+                enabled=True,
+                extra_env={
+                    "HSP_REQUIRE_TICKET_FOR_EDITS": "1",
+                    "HSP_EDIT_GATE_SCOPE": "agent",
+                    "HSP_AGENT_ID": "agent-b",
+                },
+            )
+            denial = json.loads(out)
+
+        self.assertEqual(code, 0)
+        hook_output = self._require_dict(denial, "hookSpecificOutput")
+        self.assertEqual(hook_output["permissionDecision"], "deny")
+
     def test_prompt_end_command_records_session_stop(self) -> None:
         payload = json.dumps({
             "hookEventName": "UserPromptSubmit",
@@ -302,8 +381,22 @@ class CliLogTests(unittest.TestCase):
         code = cm.exception.code
         return code if isinstance(code, int) else int(code or 0), out.getvalue(), err.getvalue()
 
-    def _run_hook(self, argv: list[str], *, root: str, stdin: str, enabled: bool) -> str:
-        code, out, _err = self._run_hook_code(argv, root=root, stdin=stdin, enabled=enabled)
+    def _run_hook(
+        self,
+        argv: list[str],
+        *,
+        root: str,
+        stdin: str,
+        enabled: bool,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
+        code, out, _err = self._run_hook_code(
+            argv,
+            root=root,
+            stdin=stdin,
+            enabled=enabled,
+            extra_env=extra_env,
+        )
         self.assertEqual(code, 0)
         return out
 

@@ -369,6 +369,7 @@ class BrokerBusMethodSurfaceTests(unittest.TestCase):
         "bus.journal",
         "bus.question",
         "bus.build_gate",
+        "bus.edit_gate",
         "bus.recent",
         "bus.settle",
         "bus.precommit",

@@ -765,6 +765,7 @@ _BUS_ACTIONS: tuple[str, ...] = (
     "journal",
     "question",
     "build_gate",
+    "edit_gate",
     "recent",
     "settle",
     "precommit",
@@ -957,6 +958,8 @@ def _local_bus_dispatch(action: str, params: dict[str, object]) -> dict[str, obj
             return bus.question(params)
         if action == "build_gate":
             return bus.build_gate(params)
+        if action == "edit_gate":
+            return bus.edit_gate(params)
         if action == "note":
             return bus.note(params)
         if action == "ask":
@@ -1021,6 +1024,8 @@ def _render_bus_result(action: str, result: dict[str, object]) -> str:
         return json.dumps(result, indent=2, sort_keys=True)
     if action == "build_gate":
         return _render_build_gate(result)
+    if action == "edit_gate":
+        return _render_edit_gate(result)
     if action == "recent":
         return _render_bus_recent(result)
     if action == "settle":
@@ -1150,6 +1155,20 @@ def _render_build_gate(result: dict[str, object]) -> str:
         if isinstance(t_obj, dict):
             t = cast(dict[str, object], t_obj)
             lines.append(_compact_line(f"  {t.get('ticket_id', '')} {t.get('message', '')}", 180))
+    return "\n".join(lines)
+
+
+def _render_edit_gate(result: dict[str, object]) -> str:
+    allowed = bool(result.get("allowed", False))
+    reason = str(result.get("reason", ""))
+    head = "edit gate: allowed" if allowed else "edit gate: denied"
+    lines = [f"{head} ({reason})"]
+    ticket = _wire_dict(result, "ticket")
+    if ticket:
+        lines.append(_compact_line(f"ticket {ticket.get('ticket_id', '')}: {ticket.get('message', '')}", 180))
+    active = _wire_list(result, "active_tickets")
+    if active:
+        lines.append(f"active tickets: {len(active)}")
     return "\n".join(lines)
 
 
@@ -3761,8 +3780,8 @@ async def lsp_log(
 
     The bus is warn-only shared context for parallel agents. It appends
     workspace-scoped events, opens timed questions, records replies, and
-    renders compact weather at natural boundaries; it does not claim files
-    or deny edits.
+    renders compact weather at natural boundaries. It does not claim files
+    by default; ``edit_gate`` exists for opt-in hook denial policies.
 
     Actions (default ``weather``):
 
@@ -3815,6 +3834,8 @@ async def lsp_log(
         commit=commit,
         action=act,
     )
+    if act == "edit_gate" and status:
+        params["mode"] = status
 
     if act == "build_gate":
         result = await _wait_for_build_gate(params, timeout_seconds)
