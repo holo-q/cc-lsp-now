@@ -149,6 +149,8 @@ class CommandGateSpec:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     ns = parser.parse_args(list(argv) if argv is not None else None)
+    if bool(getattr(ns, "global_status", False)) or ns.command == "global":
+        return _run_global(ns)
     if ns.command in {None, "workgroup"}:
         return _run_workgroup(ns)
     if ns.command == "mcp":
@@ -171,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
         limit=8,
         broker=False,
         weather=False,
+        global_status=False,
         start_broker=False,
         lsp=False,
     )
@@ -237,11 +240,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="directories or files to evaluate; defaults to the current directory",
     )
     _add_workgroup_flags(workgroup)
+    global_status = subcommands.add_parser(
+        "global",
+        help="show broker-global sessions, LSP clients, and source routes",
+    )
+    _add_global_flags(global_status)
     return parser
 
 
 def _add_workgroup_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--global", dest="global_status", action="store_true", help="show broker-global status")
     parser.add_argument("--broker", action="store_true", help="query broker bus status")
     parser.add_argument(
         "--weather",
@@ -250,6 +259,10 @@ def _add_workgroup_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--start-broker", action="store_true")
     parser.add_argument("--lsp", action="store_true", help="include lsp_session status for each location")
+
+
+def _add_global_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--start-broker", action="store_true")
 
 
 def _server() -> ModuleType:
@@ -444,14 +457,19 @@ def _run_workgroup(ns: argparse.Namespace) -> int:
         _workgroup_block(
             location=location,
             limit=max(0, int(ns.limit)),
-            include_broker=bool(ns.broker) or bool(ns.weather),
-            include_weather=bool(ns.weather),
+            include_broker=True,
+            include_weather=True,
             start_broker=bool(ns.start_broker),
             include_lsp=bool(ns.lsp),
         )
         for location in locations
     ]
     print("\n\n".join(blocks))
+    return 0
+
+
+def _run_global(ns: argparse.Namespace) -> int:
+    print(_global_block(start_broker=bool(ns.start_broker)))
     return 0
 
 
@@ -547,6 +565,138 @@ def _jsonl_count_and_last(path: Path) -> tuple[int, str]:
     return len(lines), last_id
 
 
+def _global_block(*, start_broker: bool) -> str:
+    lines = [
+        "global:",
+        f"broker mode: {_broker_mode()}",
+        f"broker socket: {_broker_socket_path()}",
+        f"broker log: {_broker_log_path()}",
+    ]
+    if _broker_mode() == "off":
+        lines.append("broker: disabled")
+        return "\n".join(lines)
+    try:
+        with _open_cli_broker(start_broker=start_broker) as client:
+            started = bool(getattr(client, "hsp_started", False))
+            status = client.request("lsp.status", {})
+    except _CliBrokerError as e:
+        lines.append(f"broker: unreachable ({e.code}: {e})")
+        return "\n".join(lines)
+    except OSError as e:
+        lines.append(f"broker: unreachable ({type(e).__name__}: {e})")
+        return "\n".join(lines)
+    if not isinstance(status, dict):
+        lines.append(f"broker: invalid lsp.status ({type(status).__name__})")
+        return "\n".join(lines)
+    lines.extend(_render_global_status(cast(dict[str, object], status), started=started))
+    return "\n".join(lines)
+
+
+def _render_global_status(status: dict[str, object], *, started: bool) -> list[str]:
+    lines = [
+        f"broker: reachable{' (started)' if started else ''}",
+        f"pid: {status.get('pid', '-')}",
+        f"uptime: {_duration_label(_wire_float(status, 'uptime'))}",
+        f"idle_ttl: {_duration_label(_wire_float(status, 'idle_ttl_seconds'))}",
+    ]
+    bus = status.get("bus")
+    if isinstance(bus, dict):
+        lines.append(
+            "bus: "
+            f"events={bus.get('event_count', 0)} "
+            f"last={bus.get('last_event_id', 'E0') or 'E0'} "
+            f"open_questions={bus.get('open_question_count', 0)}"
+        )
+    devtools = status.get("devtools")
+    if isinstance(devtools, dict):
+        lines.append(
+            "devtools: "
+            f"enabled={bool(devtools.get('enabled'))} "
+            f"running={bool(devtools.get('running'))} "
+            f"clients={devtools.get('n_clients', 0)}"
+        )
+    bridge = status.get("babel_bridge")
+    if isinstance(bridge, dict):
+        lines.append(
+            "babel_bridge: "
+            f"enabled={bool(bridge.get('enabled'))} "
+            f"running={bool(bridge.get('running'))}"
+        )
+    sessions = [item for item in _wire_list(status, "sessions") if isinstance(item, dict)]
+    lines.append(f"sessions: {len(sessions)}")
+    if not sessions:
+        lines.append("  (none)")
+    for item in sessions:
+        lines.extend(_render_global_session(cast(dict[str, object], item)))
+    return lines
+
+
+def _render_global_session(session: dict[str, object]) -> list[str]:
+    session_id = session.get("session_id", "?")
+    root = session.get("root", "?")
+    config_hash = session.get("config_hash", "?")
+    client_count = session.get("client_count", 0)
+    lines = [f"  {session_id} root={root} hash={config_hash} clients={client_count}"]
+    lsp = session.get("lsp")
+    if not isinstance(lsp, dict):
+        lines.append("    lsp: not spawned")
+        return lines
+    route = str(lsp.get("route_id") or "manual")
+    language = str(lsp.get("language") or "-")
+    reason = str(lsp.get("route_reason") or "-")
+    markers = _wire_list(lsp, "project_markers")
+    marker_text = ",".join(str(marker) for marker in markers[:6]) if markers else "-"
+    lines.append(
+        f"    source: route={route} language={language} reason={reason} markers={marker_text}"
+    )
+    lines.append(
+        "    traffic: "
+        f"requests={lsp.get('request_count', 0)} "
+        f"last={lsp.get('last_method') or '-'} "
+        f"via={lsp.get('last_server_label') or '-'} "
+        f"{lsp.get('last_duration_ms', 0)}ms"
+    )
+    pending = _wire_list(lsp, "pending_workspace_adds")
+    if pending:
+        lines.append("    pending_workspaces: " + ", ".join(str(path) for path in pending[:6]))
+    handlers = lsp.get("method_handlers", {})
+    if isinstance(handlers, dict) and handlers:
+        rendered = ", ".join(f"{method}->{label}" for method, label in sorted(handlers.items()))
+        lines.append(f"    handlers: {_compact_line(rendered, 180)}")
+    clients = [item for item in _wire_list(lsp, "clients") if isinstance(item, dict)]
+    live_count = sum(1 for item in clients if cast(dict[str, object], item).get("state") == "live")
+    lines.append(f"    lsp_clients: {live_count}/{len(clients)} live")
+    for item in clients:
+        lines.append("      " + _render_global_client(cast(dict[str, object], item)))
+    return lines
+
+
+def _render_global_client(client: dict[str, object]) -> str:
+    label = client.get("label", "server")
+    command = " ".join(str(part) for part in [client.get("command", ""), *_wire_list(client, "args")] if part)
+    state = client.get("state", "unknown")
+    pid = client.get("pid") or "-"
+    open_docs = client.get("open_documents", 0)
+    request_count = client.get("request_count", 0)
+    folders = _wire_list(client, "folders")
+    folder_text = ", ".join(str(folder) for folder in folders[:4]) if folders else "(no folders)"
+    if len(folders) > 4:
+        folder_text += f", +{len(folders) - 4}"
+    return _compact_line(
+        f"{label} {state} pid={pid} cmd={command or '-'} open={open_docs} "
+        f"requests={request_count} folders={folder_text}",
+        220,
+    )
+
+
+def _duration_label(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds:.1f}s"
+
+
 def _workgroup_broker_lines(
     root: str,
     *,
@@ -557,8 +707,6 @@ def _workgroup_broker_lines(
 ) -> list[str]:
     if _broker_mode() == "off":
         return ["broker: disabled"]
-    if not include_broker and not include_weather and not start_broker:
-        return ["broker: skipped (use --broker, --weather, or --start-broker)"]
     try:
         with _open_cli_broker(start_broker=start_broker) as client:
             started = bool(getattr(client, "hsp_started", False))

@@ -128,19 +128,40 @@ class CliLogTests(unittest.TestCase):
         self.assertIn(f"parent umbrella umbrella: {umbrella.resolve()}", out)
         self.assertIn(f"active domain domain: {domain.resolve()}", out)
 
-    def test_workgroup_command_skips_broker_by_default(self) -> None:
-        with tempfile.TemporaryDirectory(dir="tmp") as root:
-            out = self._run_with_env(
-                ["workgroup", root],
-                {
-                    "HSP_BROKER": "auto",
-                    "LSP_ROOT": root,
-                    "HSP_WORKGROUP_ROOT": root,
-                },
-            )
+    def test_workgroup_command_queries_weather_by_default(self) -> None:
+        class FakeBroker:
+            hsp_started = False
 
-        self.assertIn("broker: skipped", out)
-        self.assertNotIn("weather:", out)
+            def __enter__(self) -> FakeBroker:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def request(self, method: str, _params: dict[str, object]) -> dict[str, object]:
+                if method == "bus.status":
+                    return {"event_count": 2, "last_event_id": "E2", "open_question_count": 0}
+                return {
+                    "workspace_root": "/workspace/domain",
+                    "agents": [],
+                    "open_questions": [],
+                    "recent": [],
+                }
+
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            with patch("hsp.cli._open_cli_broker", return_value=FakeBroker()):
+                out = self._run_with_env(
+                    ["workgroup", root],
+                    {
+                        "HSP_BROKER": "auto",
+                        "LSP_ROOT": root,
+                        "HSP_WORKGROUP_ROOT": root,
+                    },
+                )
+
+        self.assertIn("broker: reachable", out)
+        self.assertIn("weather:", out)
+        self.assertIn("events=2", out)
 
     def test_workgroup_weather_uses_lightweight_broker_renderer(self) -> None:
         class FakeBroker:
@@ -177,6 +198,66 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("broker: reachable", out)
         self.assertIn("agents: 1", out)
         self.assertIn("E2 note.posted done", out)
+
+    def test_global_command_reports_lsp_sources(self) -> None:
+        class FakeBroker:
+            hsp_started = False
+
+            def __enter__(self) -> FakeBroker:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def request(self, method: str, _params: dict[str, object]) -> dict[str, object]:
+                if method != "lsp.status":
+                    raise AssertionError(method)
+                return {
+                    "pid": 123,
+                    "uptime": 4.0,
+                    "idle_ttl_seconds": 300.0,
+                    "bus": {"event_count": 2, "last_event_id": "E2", "open_question_count": 0},
+                    "devtools": {"enabled": False, "running": False, "n_clients": 0},
+                    "babel_bridge": {"enabled": False, "running": False},
+                    "sessions": [
+                        {
+                            "session_id": "s1",
+                            "root": "/workspace/domain/app",
+                            "config_hash": "abc",
+                            "client_count": 1,
+                            "lsp": {
+                                "route_id": "rust",
+                                "language": "rust",
+                                "route_reason": "extension",
+                                "project_markers": ["Cargo.toml"],
+                                "request_count": 3,
+                                "last_method": "textDocument/definition",
+                                "last_server_label": "rust-analyzer",
+                                "last_duration_ms": 5,
+                                "clients": [
+                                    {
+                                        "label": "rust-analyzer",
+                                        "command": "rust-analyzer",
+                                        "args": [],
+                                        "state": "live",
+                                        "pid": 456,
+                                        "open_documents": 1,
+                                        "request_count": 3,
+                                        "folders": ["/workspace/domain/app"],
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+
+        with patch("hsp.cli._open_cli_broker", return_value=FakeBroker()):
+            out = self._run_with_env(["global"], {"HSP_BROKER": "auto"})
+
+        self.assertIn("global:", out)
+        self.assertIn("sessions: 1", out)
+        self.assertIn("source: route=rust language=rust reason=extension", out)
+        self.assertIn("rust-analyzer live pid=456", out)
 
     def test_workgroup_command_counts_append_log_events(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
