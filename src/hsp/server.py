@@ -47,6 +47,8 @@ log = logging.getLogger(__name__)
 
 _DOCUMENT_SYMBOL_NULL_RETRIES = 8
 _DOCUMENT_SYMBOL_NULL_RETRY_DELAY = 0.5
+_REFERENCES_EMPTY_RETRIES = 6
+_REFERENCES_EMPTY_RETRY_DELAY = 0.5
 
 mcp = FastMCP(
     "lsp-bridge",
@@ -1659,6 +1661,21 @@ async def _sleep_for_null_document_symbols(attempt: int, uri: str | None) -> Non
     delay = _DOCUMENT_SYMBOL_NULL_RETRY_DELAY * (attempt + 1)
     agent_log(
         "rust-analyzer returned null documentSymbol"
+        f" for {uri or '(no uri)'}; retrying in {delay:.1f}s"
+    )
+    await asyncio.sleep(delay)
+
+
+def _should_retry_empty_references(method: str, result: Any, server_label: str) -> bool:
+    if method != "textDocument/references" or not _is_empty_result(result):
+        return False
+    return "rust-analyzer" in server_label or _route_env("LSP_LANGUAGE", "").strip().lower() == "rust"
+
+
+async def _sleep_for_empty_references(attempt: int, uri: str | None) -> None:
+    delay = _REFERENCES_EMPTY_RETRY_DELAY * (attempt + 1)
+    agent_log(
+        "rust-analyzer returned empty references"
         f" for {uri or '(no uri)'}; retrying in {delay:.1f}s"
     )
     await asyncio.sleep(delay)
@@ -5217,14 +5234,27 @@ async def _reference_section_for_target(
     *,
     heading: str = "",
 ) -> tuple[list[str], SemanticGrepGroup | None]:
-    result = await _request("textDocument/references", {
+    params = {
         "textDocument": {"uri": resolved.uri},
         "position": resolved.pos,
         "context": {"includeDeclaration": include_declaration},
-    }, uri=resolved.uri)
+    }
+    waited = False
+    result: Any = None
+    for attempt in range(_REFERENCES_EMPTY_RETRIES):
+        result = await _request("textDocument/references", params, uri=resolved.uri)
+        if not _should_retry_empty_references("textDocument/references", result, _last_server):
+            break
+        waited = True
+        if attempt == _REFERENCES_EMPTY_RETRIES - 1:
+            break
+        await _sleep_for_empty_references(attempt, resolved.uri)
     locs = _locations_from_lsp(result)
     if not locs:
-        return ([f"{heading}: 0"] if heading else []), None
+        lines = [f"{heading}: 0"] if heading else []
+        if waited:
+            lines.append("rust-analyzer returned no references after warmup wait; try again if indexing is still running.")
+        return lines, None
 
     group = await _semantic_group_for_target(resolved)
     if group is not None:
@@ -5234,6 +5264,8 @@ async def _reference_section_for_target(
         label = resolved.name or "symbol"
 
     lines = [f"{heading}: {len(locs)}" if heading else f"References for {label}: {len(locs)}"]
+    if waited:
+        lines.append("waited for rust-analyzer references to warm up")
     for loc in locs[:max_refs]:
         lines.append(f"  {_format_location_with_context(loc)}")
     if len(locs) > max_refs:

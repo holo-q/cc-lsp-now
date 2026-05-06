@@ -97,5 +97,62 @@ class LspRefsMultiTargetTests(unittest.TestCase):
         self.assertEqual(second.name, "SelectArtifactRelative")
 
 
+class LspRefsRustWarmupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._last_server = _server._last_server
+
+    def tearDown(self) -> None:
+        _server._last_server = self._last_server
+
+    def test_rust_empty_references_retry_until_indexed(self) -> None:
+        reference_calls = 0
+        resolved = _target("focus_pane_on_socket", 734)
+        ref = {
+            "uri": "file:///repo/src/backend/kitty.rs",
+            "range": {
+                "start": {"line": 733, "character": 15},
+                "end": {"line": 733, "character": 35},
+            },
+        }
+
+        async def fake_request(_method: str, _params: dict[str, Any], *, uri: str | None = None) -> list[dict[str, Any]]:
+            nonlocal reference_calls
+            _server._last_server = "rust-analyzer"
+            if _method != "textDocument/references":
+                return []
+            reference_calls += 1
+            return [] if reference_calls < 3 else [ref]
+
+        with patch.object(_server, "_request", side_effect=fake_request):
+            with patch.object(_server, "_sleep_for_empty_references", new=AsyncMock()) as sleep:
+                lines, group = asyncio.run(_server._reference_section_for_target(resolved, True, 100))
+
+        self.assertIsNotNone(group)
+        assert group is not None
+        self.assertEqual(group.reference_locs, [ref])
+        self.assertGreaterEqual(reference_calls, 3)
+        self.assertEqual(sleep.await_count, 2)
+        self.assertIn("References for symbol focus_pane_on_socket: 1", lines)
+        self.assertIn("waited for rust-analyzer references to warm up", lines)
+
+    def test_rust_empty_references_reports_indexing_notice_after_wait(self) -> None:
+        resolved = _target("focus_pane_on_socket", 734)
+
+        async def fake_request(_method: str, _params: dict[str, Any], *, uri: str | None = None) -> list[dict[str, Any]]:
+            _server._last_server = "rust-analyzer"
+            return []
+
+        with patch.object(_server, "_request", side_effect=fake_request):
+            with patch.object(_server, "_sleep_for_empty_references", new=AsyncMock()) as sleep:
+                lines, group = asyncio.run(_server._reference_section_for_target(resolved, True, 100))
+
+        self.assertIsNone(group)
+        self.assertEqual(sleep.await_count, _server._REFERENCES_EMPTY_RETRIES - 1)
+        self.assertIn(
+            "rust-analyzer returned no references after warmup wait; try again if indexing is still running.",
+            lines,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
