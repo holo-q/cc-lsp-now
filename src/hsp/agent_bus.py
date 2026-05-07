@@ -468,8 +468,31 @@ class AgentBus:
                 and _scope_matches(event, files=files, symbols=symbols, aliases=aliases)
             ]
             selected = events[-limit:]
+            query_scope = BusScope(tuple(files), tuple(symbols), tuple(aliases))
+            open_questions = [
+                question.to_wire()
+                for question in self._questions.values()
+                if question.is_open
+                and question.workspace_root == workspace_root
+                and _question_matches_scope(question, query_scope)
+            ]
+            active_tickets = [
+                ticket.to_wire()
+                for ticket in self._tickets.values()
+                if ticket.workspace_root == workspace_root
+                and ticket.is_open
+                and _ticket_blocks_scope(
+                    ticket,
+                    full_workspace=query_scope.is_empty(),
+                    files=files,
+                    symbols=symbols,
+                    aliases=aliases,
+                )
+            ]
             return {
                 "events": [_event_wire(event) for event in selected],
+                "open_questions": open_questions,
+                "active_tickets": active_tickets,
                 "truncated": len(events) > len(selected),
                 "last_event_id": self._events[-1].event_id if self._events else "",
             }
@@ -795,6 +818,11 @@ def _ticket_blocks_scope(
         ticket.symbols,
         symbols,
     ) or _scope_items_overlap(ticket.aliases, aliases)
+
+
+def _question_matches_scope(question: BusQuestion, scope: BusScope) -> bool:
+    question_scope = BusScope(tuple(question.files), tuple(question.symbols), tuple(question.aliases))
+    return question_scope.overlaps(scope)
 
 
 def _scope_items_overlap(left: tuple[str, ...], right: list[str]) -> bool:

@@ -453,6 +453,12 @@ stops record a touched-files event and then emit any digest the broker has
 queued for that scope. The same broker decides whether to surface an open
 question, a settled digest, a related commit, or nothing.
 
+Claude read/edit hook stops also inject file-scoped workgroup context when the
+hook payload names files or symbols. The adapter queries `bus.recent` for that
+scope and renders active tickets, open questions, and recent journal rows with
+timestamps and `@agent` labels before the file action continues. Set
+`HSP_HOOK_CONTEXT=0` to keep hooks recording-only.
+
 Generic Bash hooks also recognize common build/verifier commands such as
 `cargo test`, `cargo check`, `cargo clippy`, `uv run ...`, `python -m pytest`,
 `ruff check`, `mypy`, `eslint`, `prettier --check`, `biome check`, `shellcheck`,

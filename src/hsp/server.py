@@ -1248,16 +1248,52 @@ def _agent_label(agent: dict[str, object]) -> str:
 
 
 def _render_bus_recent(result: dict[str, object]) -> str:
+    tickets = _wire_list(result, "active_tickets")
+    questions = _wire_list(result, "open_questions")
     events = _wire_list(result, "events")
-    if not events:
+    if not tickets and not questions and not events:
         return "recent: (none)"
-    lines = ["recent:"]
+    lines: list[str] = []
+    if tickets:
+        lines.append(f"tickets: {len(tickets)}")
+        for t_obj in tickets[:5]:
+            if isinstance(t_obj, dict):
+                t = cast(dict[str, object], t_obj)
+                lines.append(_compact_line(f"  {_ticket_label(t)}", 180))
+    if questions:
+        lines.append(f"questions: {len(questions)}")
+        for q_obj in questions[:5]:
+            if isinstance(q_obj, dict):
+                q = cast(dict[str, object], q_obj)
+                lines.append(_compact_line(f"  {_question_label(q)}", 180))
+    lines.append(f"recent: {len(events)}")
     for e_obj in events:
         if isinstance(e_obj, dict):
             lines.append(f"  {_event_label(cast(dict[str, object], e_obj))}")
     if result.get("truncated"):
         lines.append("  ... truncated; narrow scope or raise limit")
     return "\n".join(lines)
+
+
+def _ticket_label(ticket: dict[str, object]) -> str:
+    holders = _wire_list(ticket, "holders")
+    holder_ids = [
+        str(cast(dict[str, object], holder).get("agent_id", "?"))
+        for holder in holders
+        if isinstance(holder, dict)
+    ]
+    holder_label = f" [{','.join(holder_ids)}]" if holder_ids else ""
+    return f"{ticket.get('ticket_id', '')} {ticket.get('message', '')}{holder_label}".strip()
+
+
+def _question_label(question: dict[str, object]) -> str:
+    qid = str(question.get("question_id", ""))
+    left = _wire_float(question, "seconds_left")
+    agent = _event_agent_label(question)
+    agent_label = f" @{agent}" if agent else ""
+    scope = _render_bus_scope(question)
+    scope_label = f" [{scope}]" if scope else ""
+    return f"{qid} {left:.0f}s{agent_label} {question.get('message', '')}{scope_label}".strip()
 
 
 def _render_bus_settle(result: dict[str, object]) -> str:
@@ -1314,9 +1350,16 @@ def _event_label(event: dict[str, object] | None) -> str:
     head = " ".join(part for part in (event_id, event_time, str(event_type)) if part).strip()
     if message:
         head += f" {message}"
+    agent = _event_agent_label(event)
+    if agent:
+        head += f" @{agent}"
     if scope:
         head += f" [{scope}]"
     return _compact_line(head, 220)
+
+
+def _event_agent_label(event: dict[str, object]) -> str:
+    return str(event.get("agent_id") or event.get("client_id") or event.get("session_id") or "").strip()
 
 
 def _event_timestamp_label(event: dict[str, object]) -> str:

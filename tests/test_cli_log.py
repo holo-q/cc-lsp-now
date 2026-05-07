@@ -725,6 +725,74 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(event["kind"], "edit.after")
         self.assertEqual(event["message"], "PostToolUse Edit")
 
+    def test_read_before_hook_injects_file_scoped_context(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.note({
+                "workspace_root": root,
+                "agent_id": "agent-a",
+                "message": "changed renderer contract",
+                "files": ["src/hsp/server.py"],
+            })
+            out = self._run_hook(["hook", "--kind", "tool.before"], root=root, stdin=payload, enabled=True)
+            event = self._read_last_event(root)
+
+        self.assertIn("hsp context for src/hsp/server.py:", out)
+        self.assertIn("recent: 1", out)
+        self.assertIn("note.posted changed renderer contract @agent-a", out)
+        self.assertEqual(event["kind"], "tool.before")
+
+    def test_edit_before_hook_injects_active_ticket_context(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.ticket({
+                "workspace_root": root,
+                "agent_id": "agent-a",
+                "message": "refactor server bus rendering",
+                "files": ["src/hsp/server.py"],
+            })
+            out = self._run_hook(["hook", "--kind", "edit.before"], root=root, stdin=payload, enabled=True)
+            event = self._read_last_event(root)
+
+        self.assertIn("hsp context for src/hsp/server.py:", out)
+        self.assertIn("tickets: 1", out)
+        self.assertIn("T1 refactor server bus rendering [agent-a]", out)
+        self.assertEqual(event["kind"], "edit.before")
+
+    def test_hook_context_can_be_disabled(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            server._local_bus = AgentBus()
+            server._local_bus.note({
+                "workspace_root": root,
+                "agent_id": "agent-a",
+                "message": "quiet note",
+                "files": ["src/hsp/server.py"],
+            })
+            out = self._run_hook(
+                ["hook", "--kind", "tool.before"],
+                root=root,
+                stdin=payload,
+                enabled=True,
+                extra_env={"HSP_HOOK_CONTEXT": "0"},
+            )
+
+        self.assertEqual(out, "")
+
     def test_build_before_hook_waits_at_gate_without_writing_board_event(self) -> None:
         payload = json.dumps({
             "hookEventName": "PreToolUse",
@@ -1005,7 +1073,8 @@ class CliLogTests(unittest.TestCase):
             )
             event = self._read_last_event(root)
 
-        self.assertEqual(out, "")
+        self.assertIn("hsp context for src/hsp/server.py:", out)
+        self.assertIn("T1 editing shared state [other-agent]", out)
         self.assertEqual(event["kind"], "edit.before")
 
     def test_edit_before_hook_agent_scope_requires_matching_agent_id(self) -> None:

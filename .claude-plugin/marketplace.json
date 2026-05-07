@@ -9,7 +9,7 @@
     {
       "name": "hsp",
       "description": "One HSP plugin that routes Python, C#, and Rust workspaces to the appropriate LSP chain",
-      "version": "0.15.1",
+      "version": "0.15.2",
       "author": {
         "name": "holo-q"
       },

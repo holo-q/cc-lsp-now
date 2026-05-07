@@ -49,7 +49,7 @@ Status legend:
 | Prompt and stop events | `wired`; `.end` maps to `session.stop` in `hsp hook` | `babel`, not HSP-native yet | `babel` where event surface is complete | `bridge` | `blocked` |
 | Generic tool before/after | `wired` through `PreToolUse`/`PostToolUse` | `babel`; HSP Codex plugin lacks hook carrier | `babel` where native event exists | `bridge` | `blocked` |
 | File read/edit observation | `partial`; Claude hooks can see `Read`, `Edit`, `MultiEdit`, `Write` file paths, but HSP currently records edit hooks only | `open`; current HSP Codex plugin cannot observe `apply_patch` or native file reads/edits | `open`; needs per-harness read/edit tool mapping | `open`; bridge must name read/edit operations and files | `blocked` |
-| File-scoped journal injection | `open`; should inject relevant `bus.recent(files=...)` rows into read/edit before-hook output, with agent labels and repeat suppression | `open`; blocked until Codex has a hook/interception path | `open`; needs hook output channel plus scoped recent query | `open`; bridge must support pre-action context output | `blocked` |
+| File-scoped journal injection | `wired` for Claude `Read`, `Edit`, `MultiEdit`, and `Write` hook output; renders scoped tickets, open questions, and recent rows with agent labels | `open`; blocked until Codex has a hook/interception path | `open`; needs hook output channel plus scoped recent query | `open`; bridge must support pre-action context output | `blocked` |
 | Edit before/after logging | `wired` for Claude `Edit`, `MultiEdit`, `Write` | `open`; Codex `apply_patch` is invisible to HSP today | `open`; needs per-harness edit tool mapping | `open`; bridge must name edit operations | `blocked` |
 | Edit denial without ticket | `wired`, opt-in with `HSP_REQUIRE_TICKET_FOR_EDITS=1` | `open`; no `apply_patch`/edit denial path | `open`; only possible on gate-capable pre-tool hooks | `open`; bridge must support deny response | `blocked` |
 | Build gate | `wired` for detected Bash commands plus `hsp run` | `manual` through `hsp run`; no automatic shell hook | `open`; needs shell/tool command mapping | `open`; bridge or wrapper required | `manual` through `hsp run` only |
@@ -109,7 +109,7 @@ gate policy: build=project checker=file/project journal=workgroup
 | `WG-016` | high | open | Build a Babel-to-HSP adapter layer for Babel-supported non-Claude harnesses, starting with normalized lifecycle events and then per-harness edit/build gates. |
 | `WG-017` | medium | open | Define bridge callback contracts for OpenCode, Amp, and Kiro that can return deny/allow decisions, not just observation events. |
 | `WG-018` | low | blocked | Track unsupported harnesses until they expose stable identity plus lifecycle hooks; do not add cwd/time heuristics as orchestration substitutes. |
-| `WG-019` | high | open | Add file-scoped context injection for read/edit hooks: query `bus.recent(files=...)`, render compact agent-annotated rows and open asks before the file action, and suppress repeats per `agent_id + file + last_event_id`. |
+| `WG-019` | high | partial | Add file-scoped context injection for read/edit hooks: Claude now queries `bus.recent(files=...)` and renders compact agent-annotated tickets, open asks, and recent rows before/after scoped read/edit hook stops. Remaining work: persistent repeat suppression per `agent_id + file + last_event_id` and non-Claude hook carriers. |
 
 ## Trial Profiles
 

@@ -31,6 +31,8 @@ _server_module: ModuleType | None = None
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"", "0", "false", "no", "off"}
+READ_CONTEXT_TOOLS = {"Read", "NotebookRead"}
+EDIT_CONTEXT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
 BROKER_DISABLED = {"0", "false", "no", "off", "disable", "disabled", "local"}
 BROKER_REQUIRED = {"1", "true", "yes", "on", "require", "required"}
 BROKER_SOCKET_NAME = "hsp-broker.sock"
@@ -401,13 +403,15 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         kind = "session.stop"
         message = ".end"
     command = _hook_command(payload)
+    files = _join_scope(str(ns.files), _hook_files(payload))
+    symbols = _join_scope(str(ns.symbols), _hook_symbols(payload))
     if _is_edit_before_hook(kind) and _require_ticket_for_edits():
         gate = asyncio.run(
             _server().lsp_log(
                 action="edit_gate",
                 message=message,
-                files=_join_scope(str(ns.files), _hook_files(payload)),
-                symbols=_join_scope(str(ns.symbols), _hook_symbols(payload)),
+                files=files,
+                symbols=symbols,
                 status=os.environ.get("HSP_EDIT_GATE_SCOPE", "workgroup"),
             )
         )
@@ -438,8 +442,9 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             _write_hook_denial(_build_batch_denial_reason(batch))
             return 0
         return 0
-    files = _join_scope(str(ns.files), _hook_files(payload))
-    symbols = _join_scope(str(ns.symbols), _hook_symbols(payload))
+    context_notice = _hook_context_notice(kind, payload, files=files, symbols=symbols)
+    if context_notice:
+        print(context_notice)
     aliases = _join_scope(str(ns.aliases), [])
     status = str(ns.status) or _hook_status(payload)
     targets = str(ns.targets)
@@ -464,6 +469,46 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         )
     )
     return 0
+
+
+def _hook_context_notice(
+    kind: str,
+    payload: dict[str, object],
+    *,
+    files: str,
+    symbols: str,
+) -> str:
+    if not _hook_context_enabled() or not _is_context_hook(kind, payload) or not (files or symbols):
+        return ""
+    try:
+        recent = asyncio.run(
+            _server().lsp_log(
+                action="recent",
+                files=files,
+                symbols=symbols,
+            )
+        ).strip()
+    except Exception as e:
+        return f"hsp context unavailable: {type(e).__name__}: {e}"
+    if not recent or recent == "recent: (none)":
+        return ""
+    target = ", ".join(_dedupe([*_scope_items(files), *_scope_items(symbols)]))
+    return f"hsp context for {target}:\n{recent}"
+
+
+def _hook_context_enabled() -> bool:
+    return os.environ.get("HSP_HOOK_CONTEXT", "1").strip().lower() not in FALSE_VALUES
+
+
+def _is_context_hook(kind: str, payload: dict[str, object]) -> bool:
+    tool = _hook_tool_name(payload)
+    if kind in {"read.before", "read.after"}:
+        return True
+    if kind in {"edit.before", "edit.after"}:
+        return not tool or tool in EDIT_CONTEXT_TOOLS
+    if kind in {"tool.before", "tool.after"}:
+        return tool in READ_CONTEXT_TOOLS
+    return False
 
 
 def _hook_kind_from_args(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
@@ -1121,10 +1166,17 @@ def _event_label(event: dict[str, object] | None) -> str:
     head = " ".join(part for part in (event_id, timestamp, event_type) if part).strip()
     if message:
         head += f" {message}"
+    agent = _event_agent_label(event)
+    if agent:
+        head += f" @{agent}"
     scope = _render_bus_scope(event)
     if scope:
         head += f" [{scope}]"
     return _compact_line(head, 220)
+
+
+def _event_agent_label(event: dict[str, object]) -> str:
+    return str(event.get("agent_id") or event.get("client_id") or event.get("session_id") or "").strip()
 
 
 def _event_timestamp_label(event: dict[str, object]) -> str:
