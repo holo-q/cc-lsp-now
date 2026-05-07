@@ -258,7 +258,7 @@ hard dependency.
 
 Wave 2 layers ambient harness hooks over the same broker. There is no separate
 `hsp-log`, `hsp-hook`, or `hsp-run` binary; `hsp log <action>` is the explicit
-shell mirror of `lsp_log`, bundled plugin hooks call `hsp hook --kind <kind>`
+shell mirror of `lsp_log`, bundled plugin hooks call `hsp hook stdin <kind>`
 with harness payloads on stdin, `hsp mcp` runs the stdio MCP server, and
 `hsp run -- <command>` gates
 build/verifier commands before recording their result. The hook adapter is on

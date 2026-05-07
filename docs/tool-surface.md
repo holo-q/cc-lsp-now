@@ -59,7 +59,7 @@ Planned coordination surface:
 weather reports for parallel work, not file locks. The first implementation
 should be warn-only and should print nothing when there is no useful signal.
 The same actions are reachable from the shell as `hsp log <action>`, bundled
-plugin hooks use the env-gated `hsp hook --kind <kind>` adapter, and build
+plugin hooks use the `hsp hook stdin <kind>` adapter, and build
 wrappers can use `hsp run -- <command>` to wait on the workgroup build gate
 before recording a `test.ran` row. When `HSP_REQUIRE_TICKET_FOR_EDITS=1`,
 edit-before hooks also call the quiet `edit_gate` action and return a

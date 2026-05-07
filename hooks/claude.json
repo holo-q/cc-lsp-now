@@ -1,0 +1,210 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin session.start"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin prompt"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin session.stop"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin notification"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin subagent.stop"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin subagent.start"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin compact.before"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin compact.after"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin session.end"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin stop.failure"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin permission.request"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "LSP",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp-redirect-hook"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin edit.before"
+          }
+        ]
+      },
+      {
+        "matcher": "MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin edit.before"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin edit.before"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin tool.before"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin tool.after"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin edit.after"
+          }
+        ]
+      },
+      {
+        "matcher": "MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin edit.after"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uvx --refresh --from git+https://github.com/holo-q/hsp hsp hook stdin edit.after"
+          }
+        ]
+      }
+    ]
+  }
+}

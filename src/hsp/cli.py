@@ -212,7 +212,14 @@ def build_parser() -> argparse.ArgumentParser:
         "hook",
         help="record a bundled plugin hook event unless HSP_HOOKS disables it",
     )
-    hook.add_argument("--kind", required=True)
+    hook.add_argument(
+        "hook_mode",
+        nargs="?",
+        default="",
+        help="use `stdin <kind>` for plugin hook handlers",
+    )
+    hook.add_argument("hook_kind", nargs="?", default="")
+    hook.add_argument("--kind", default="")
     hook.add_argument("--message", default="")
     hook.add_argument("--files", default="")
     hook.add_argument("--symbols", default="")
@@ -384,9 +391,9 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         _drain_stdin()
         return 0
 
-    kind = str(ns.kind).strip()
+    kind = _hook_kind_from_args(ns, parser)
     if not kind:
-        parser.error("hsp hook requires --kind")
+        parser.error("hsp hook requires --kind or `stdin <kind>`")
 
     payload = _read_hook_payload()
     message = str(ns.message) or _hook_message(payload)
@@ -457,6 +464,25 @@ def _run_hook(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         )
     )
     return 0
+
+
+def _hook_kind_from_args(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
+    explicit = str(ns.kind).strip()
+    mode = str(getattr(ns, "hook_mode", "")).strip()
+    positional = str(getattr(ns, "hook_kind", "")).strip()
+    if explicit and (mode or positional):
+        parser.error("hsp hook accepts either --kind or positional kind, not both")
+    if explicit:
+        return explicit
+    if mode == "stdin":
+        if not positional:
+            parser.error("hsp hook stdin requires a kind")
+        return positional
+    if mode and not positional:
+        return mode
+    if mode or positional:
+        parser.error("hsp hook positional form is `stdin <kind>`")
+    return ""
 
 
 def _run_command(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:

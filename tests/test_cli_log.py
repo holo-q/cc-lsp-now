@@ -711,6 +711,20 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(event["message"], "PostToolUse Edit")
         self.assertEqual(scope["files"], ["src/hsp/server.py"])
 
+    def test_bundled_hook_stdin_form_records_harness_payload(self) -> None:
+        payload = json.dumps({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/hsp/server.py"},
+        })
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            out = self._run_hook(["hook", "stdin", "edit.after"], root=root, stdin=payload, enabled=None)
+            event = self._read_last_event(root)
+
+        self.assertEqual(out, "")
+        self.assertEqual(event["kind"], "edit.after")
+        self.assertEqual(event["message"], "PostToolUse Edit")
+
     def test_build_before_hook_waits_at_gate_without_writing_board_event(self) -> None:
         payload = json.dumps({
             "hookEventName": "PreToolUse",
@@ -1038,28 +1052,39 @@ class CliLogTests(unittest.TestCase):
 
     def test_claude_plugin_bundles_default_on_bus_hooks(self) -> None:
         data = json.loads(Path(".claude-plugin/plugin.json").read_text(encoding="utf-8"))
-        hooks = data["hooks"]
+        self.assertEqual(data["hooks"], "./hooks/claude.json")
+        hooks = json.loads(Path("hooks/claude.json").read_text(encoding="utf-8"))["hooks"]
         self.assertIn("SessionStart", hooks)
         self.assertIn("UserPromptSubmit", hooks)
         self.assertIn("Stop", hooks)
         self.assertIn("Notification", hooks)
         self.assertIn("SubagentStop", hooks)
+        self.assertIn("SubagentStart", hooks)
         self.assertIn("PreCompact", hooks)
+        self.assertIn("PostCompact", hooks)
+        self.assertIn("SessionEnd", hooks)
+        self.assertIn("StopFailure", hooks)
+        self.assertIn("PermissionRequest", hooks)
         self.assertIn("PreToolUse", hooks)
         self.assertIn("PostToolUse", hooks)
         commands = "\n".join(_plugin_hook_commands(hooks))
-        self.assertIn("hsp hook --kind session.start", commands)
-        self.assertIn("hsp hook --kind prompt", commands)
-        self.assertIn("hsp hook --kind session.stop", commands)
-        self.assertIn("hsp hook --kind notification", commands)
-        self.assertIn("hsp hook --kind subagent.stop", commands)
-        self.assertIn("hsp hook --kind compact.before", commands)
-        self.assertIn("hsp hook --kind tool.before", commands)
-        self.assertIn("hsp hook --kind tool.after", commands)
-        self.assertIn("hsp hook --kind edit.before", commands)
-        self.assertIn("hsp hook --kind edit.after", commands)
-        self.assertIn("${HSP_HOOKS:-1}", commands)
-        self.assertIn("cat >/dev/null", commands)
+        self.assertIn("hsp hook stdin session.start", commands)
+        self.assertIn("hsp hook stdin session.end", commands)
+        self.assertIn("hsp hook stdin prompt", commands)
+        self.assertIn("hsp hook stdin session.stop", commands)
+        self.assertIn("hsp hook stdin notification", commands)
+        self.assertIn("hsp hook stdin subagent.stop", commands)
+        self.assertIn("hsp hook stdin subagent.start", commands)
+        self.assertIn("hsp hook stdin compact.before", commands)
+        self.assertIn("hsp hook stdin compact.after", commands)
+        self.assertIn("hsp hook stdin stop.failure", commands)
+        self.assertIn("hsp hook stdin permission.request", commands)
+        self.assertIn("hsp hook stdin tool.before", commands)
+        self.assertIn("hsp hook stdin tool.after", commands)
+        self.assertIn("hsp hook stdin edit.before", commands)
+        self.assertIn("hsp hook stdin edit.after", commands)
+        self.assertNotIn("sh -c", commands)
+        self.assertNotIn("cat >/dev/null", commands)
         self.assertNotIn("hsp-hook", commands)
 
     def _run(self, argv: list[str], *, root: str) -> str:

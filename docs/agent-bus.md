@@ -359,7 +359,7 @@ hsp log ask --message "Anyone touching server.py?" --files src/server.py --timeo
 hsp log reply --id Q3 --message "done"
 hsp log hook --kind edit.after --files src/server.py
 hsp log hook --kind commit.after --commit d796fc8
-hsp hook --kind edit.after < "$CLAUDE_HOOK_PAYLOAD"
+hsp hook stdin edit.after < "$CLAUDE_HOOK_PAYLOAD"
 hsp run -- cargo test
 hsp
 hsp workgroup . ../other-repo --limit 5
@@ -409,38 +409,44 @@ agents should not need to remember or invoke it manually.
 ### Hook Recipes
 
 These are the ambient stops the Claude plugin ships. Users should not copy
-hook blocks by hand; the plugin owns the hook declarations and each hook calls
-`hsp hook --kind <kind>` with the JSON payload on stdin. The hook adapter is
+hook blocks by hand; the plugin owns `hooks/claude.json` and each hook calls
+`hsp hook stdin <kind>` with the JSON payload on stdin. The hook adapter is
 enabled by default because an installed workgroup plugin should immediately
 show traffic in `hsp watch`. Set `HSP_HOOKS=0`/`false`/`off` when a session needs
-to drain hook payloads without launching `uvx`.
+to drain hook payloads without recording events.
 
 The shipped Claude hook slice records every available lifecycle hook that the
-plugin can receive: session start/stop, user prompt, notification, subagent
-stop, pre-compact, generic tool before/after, and edit before/after. Test,
-commit, push, and `lsp_confirm` stops remain in the taxonomy below because
-they require shell/tool wrappers or HSP-internal hook points rather than native
-Claude hook events.
+plugin can receive: session start/end/stop, stop failure, user prompt,
+notification, subagent start/stop, pre/post compact, permission requests,
+generic tool before/after, and edit before/after. Test, commit, push, and
+`lsp_confirm` stops remain in the taxonomy below because they require
+shell/tool wrappers or HSP-internal hook points rather than native Claude hook
+events.
 
 | Stop | Hook kind | Example invocation |
 |------|-----------|--------------------|
-| session start | `session.start` | `hsp hook --kind session.start` |
-| session stop / `.end` | `session.stop` | `hsp hook --kind session.stop` |
-| user prompt | `prompt` | `hsp hook --kind prompt` |
-| tool start | `tool.before` | `hsp hook --kind tool.before` |
-| tool finish | `tool.after` | `hsp hook --kind tool.after` |
-| notification | `notification` | `hsp hook --kind notification` |
-| subagent stop | `subagent.stop` | `hsp hook --kind subagent.stop` |
-| pre-compact | `compact.before` | `hsp hook --kind compact.before` |
-| before edit | `edit.before` | `hsp hook --kind edit.before` |
-| after edit | `edit.after` | `hsp hook --kind edit.after` |
-| before `lsp_confirm` | `confirm.before` | `hsp hook --kind confirm.before` |
-| after `lsp_confirm` | `confirm.after` | `hsp hook --kind confirm.after` |
-| after tests | `test` | `hsp hook --kind test` |
-| before git commit | `commit.before` | `hsp hook --kind commit.before` |
-| after git commit | `commit.after` | `hsp hook --kind commit.after` |
-| before push/pull | `push.before` | `hsp hook --kind push.before` |
-| after push/pull | `push.after` | `hsp hook --kind push.after` |
+| session start | `session.start` | `hsp hook stdin session.start` |
+| session end | `session.end` | `hsp hook stdin session.end` |
+| session stop / `.end` | `session.stop` | `hsp hook stdin session.stop` |
+| stop failure | `stop.failure` | `hsp hook stdin stop.failure` |
+| user prompt | `prompt` | `hsp hook stdin prompt` |
+| tool start | `tool.before` | `hsp hook stdin tool.before` |
+| tool finish | `tool.after` | `hsp hook stdin tool.after` |
+| notification | `notification` | `hsp hook stdin notification` |
+| subagent start | `subagent.start` | `hsp hook stdin subagent.start` |
+| subagent stop | `subagent.stop` | `hsp hook stdin subagent.stop` |
+| pre-compact | `compact.before` | `hsp hook stdin compact.before` |
+| post-compact | `compact.after` | `hsp hook stdin compact.after` |
+| permission request | `permission.request` | `hsp hook stdin permission.request` |
+| before edit | `edit.before` | `hsp hook stdin edit.before` |
+| after edit | `edit.after` | `hsp hook stdin edit.after` |
+| before `lsp_confirm` | `confirm.before` | `hsp hook stdin confirm.before` |
+| after `lsp_confirm` | `confirm.after` | `hsp hook stdin confirm.after` |
+| after tests | `test` | `hsp hook stdin test` |
+| before git commit | `commit.before` | `hsp hook stdin commit.before` |
+| after git commit | `commit.after` | `hsp hook stdin commit.after` |
+| before push/pull | `push.before` | `hsp hook stdin push.before` |
+| after push/pull | `push.after` | `hsp hook stdin push.after` |
 
 Session start and prompt stops emit weather; edit/confirm/test/commit/push
 stops record a touched-files event and then emit any digest the broker has
