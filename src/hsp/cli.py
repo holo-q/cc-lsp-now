@@ -252,7 +252,14 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--interval", type=float, default=0.5)
     watch.add_argument("--once", action="store_true", help="print one snapshot and exit")
     watch.add_argument("--exact", action="store_true", help="watch only the active workgroup root")
-    watch.add_argument("--start-broker", action="store_true")
+    watch.add_argument("--start-broker", dest="start_broker", action="store_true", help=argparse.SUPPRESS)
+    watch.add_argument(
+        "--no-start-broker",
+        dest="start_broker",
+        action="store_false",
+        help="fail instead of starting the broker when the socket is missing",
+    )
+    watch.set_defaults(start_broker=True)
 
     workgroup = subcommands.add_parser(
         "workgroup",
