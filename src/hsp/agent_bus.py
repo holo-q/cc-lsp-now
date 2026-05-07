@@ -494,6 +494,28 @@ class AgentBus:
                 "last_event_id": self._events[-1].event_id if self._events else "",
             }
 
+    def recent_tree(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return rows for one or more workgroup roots and their descendants."""
+        self.settle(params)
+        roots = _workspace_roots(params)
+        after_id = _int(params.get("after_id"), 0)
+        limit = max(1, min(_int(params.get("limit"), DEFAULT_RECENT_LIMIT), 200))
+
+        with self._lock:
+            events = [
+                event
+                for event in self._events
+                if event.seq > after_id
+                and any(_same_or_descendant(event.workspace_root, root) for root in roots)
+            ]
+            selected = events[-limit:]
+            return {
+                "events": [_event_wire(event) for event in selected],
+                "truncated": len(events) > len(selected),
+                "last_event_id": self._events[-1].event_id if self._events else "",
+                "workspace_roots": roots,
+            }
+
     def precommit(self, params: dict[str, Any]) -> dict[str, Any]:
         recent = self.recent({**params, "limit": params.get("limit", 10)})
         return {"recent": recent["events"], "suggested": _suggest_checks(recent["events"])}
@@ -696,6 +718,22 @@ class AgentBus:
 def _workspace_root(params: dict[str, Any]) -> str:
     raw = _string(params.get("workspace_root")) or _string(params.get("root"))
     return os.path.abspath(raw or os.getcwd())
+
+
+def _workspace_roots(params: dict[str, Any]) -> list[str]:
+    roots = _strings(params.get("workspace_roots"))
+    if not roots:
+        roots = [_workspace_root(params)]
+    return [os.path.abspath(root) for root in roots]
+
+
+def _same_or_descendant(child: str, parent: str) -> bool:
+    child = os.path.abspath(child)
+    parent = os.path.abspath(parent)
+    try:
+        return os.path.commonpath([child, parent]) == parent
+    except ValueError:
+        return False
 
 
 def _workspace_id(root: str) -> str:

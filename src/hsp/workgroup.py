@@ -34,6 +34,8 @@ class WorkgroupDefinition:
     marker: str
     name: str
     level: str
+    observation_mode: str = "subtree"
+    observation_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,22 @@ class ScopeContext:
         if len(self.workgroups) < 2:
             return ""
         return self.workgroups[-2].root
+
+    @property
+    def active_workgroup(self) -> WorkgroupDefinition | None:
+        return self.workgroups[-1] if self.workgroups else None
+
+    @property
+    def observation_mode(self) -> str:
+        active = self.active_workgroup
+        return active.observation_mode if active is not None else "exact"
+
+    @property
+    def observation_roots(self) -> tuple[str, ...]:
+        active = self.active_workgroup
+        if active is None:
+            return (self.active_workgroup_root,)
+        return tuple(dict.fromkeys((active.root, *active.observation_roots)))
 
 
 def scope_context_for(location: str | Path | None = None) -> ScopeContext:
@@ -156,13 +174,18 @@ def _workgroup_marker(parent: Path) -> Path | None:
 def _read_definition(root: Path, marker: Path) -> WorkgroupDefinition:
     data = _read_toml(marker)
     table = data.get("workgroup", data)
+    observe = data.get("observe", {})
+    observe_table = observe if isinstance(observe, dict) else {}
     name = _string(table.get("name")) or root.name or str(root)
     level = _string(table.get("level")) or _default_level(root)
+    observation_mode = _observation_mode(table, observe_table)
     return WorkgroupDefinition(
         root=str(root),
         marker=str(marker),
         name=name,
         level=level,
+        observation_mode=observation_mode,
+        observation_roots=tuple(_observation_roots(root, table, observe_table)),
     )
 
 
@@ -189,6 +212,43 @@ def _workgroup_boundary() -> Path | None:
 
 def _string(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _observation_mode(table: dict[str, Any], observe: dict[str, Any]) -> str:
+    raw = (
+        _string(observe.get("mode"))
+        or _string(table.get("observe"))
+        or _string(table.get("observation"))
+        or "subtree"
+    ).lower()
+    if raw in {"exact", "self"}:
+        return "exact"
+    if raw in {"network", "roots", "explicit"}:
+        return "network"
+    return "subtree"
+
+
+def _observation_roots(root: Path, table: dict[str, Any], observe: dict[str, Any]) -> list[str]:
+    raw = (
+        observe.get("roots")
+        or table.get("observe_roots")
+        or table.get("observation_roots")
+        or []
+    )
+    roots: list[str] = []
+    for item in _string_list(raw):
+        path = Path(item).expanduser()
+        absolute = path if path.is_absolute() else root / path
+        roots.append(str(absolute.resolve(strict=False)))
+    return roots
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    return []
 
 
 def _default_level(root: Path) -> str:

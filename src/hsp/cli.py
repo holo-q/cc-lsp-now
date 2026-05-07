@@ -251,6 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--limit", type=int, default=25)
     watch.add_argument("--interval", type=float, default=0.5)
     watch.add_argument("--once", action="store_true", help="print one snapshot and exit")
+    watch.add_argument("--exact", action="store_true", help="watch only the active workgroup root")
     watch.add_argument("--start-broker", action="store_true")
 
     workgroup = subcommands.add_parser(
@@ -516,18 +517,17 @@ def _run_watch(ns: argparse.Namespace) -> int:
     limit = max(1, int(ns.limit))
     interval = max(0.1, float(ns.interval))
     locations = cast(list[str], ns.locations) or ["."]
-    roots = (
-        []
-        if bool(ns.global_events)
-        else [_workgroup_root_for_location(location) for location in locations]
-    )
+    watch_scope = _watch_scope_for_locations(locations, exact=bool(ns.exact))
+    roots = [] if bool(ns.global_events) else watch_scope.roots
+    exact = bool(ns.exact) or watch_scope.exact
     try:
         with _open_cli_broker(start_broker=bool(ns.start_broker)) as client:
             started = bool(getattr(client, "hsp_started", False))
             scope = "global" if bool(ns.global_events) else ",".join(roots)
+            scope_mode = "" if bool(ns.global_events) else f" {watch_scope.mode}"
             print(
                 f"watch: broker={_broker_socket_path()}"
-                f"{' started' if started else ''} scope={scope} interval={interval:g}s"
+                f"{' started' if started else ''} scope={scope}{scope_mode} interval={interval:g}s"
             )
             after_id = 0
             while True:
@@ -535,13 +535,20 @@ def _run_watch(ns: argparse.Namespace) -> int:
                     client,
                     roots=roots,
                     global_events=bool(ns.global_events),
+                    exact=exact,
                     limit=limit,
                     after_id=after_id,
                 )
                 if rows:
                     after_id = max(after_id, *(_event_seq(event) for event in rows))
                     for event in rows:
-                        print(_watch_event_label(event, include_workspace=bool(ns.global_events)), flush=True)
+                        print(
+                            _watch_event_label(
+                                event,
+                                include_workspace=bool(ns.global_events) or not exact,
+                            ),
+                            flush=True,
+                        )
                 elif bool(ns.once):
                     print("watch: no events")
                 if bool(ns.once):
@@ -557,16 +564,49 @@ def _run_watch(ns: argparse.Namespace) -> int:
         return 1
 
 
+@dataclass(frozen=True)
+class WatchScope:
+    roots: list[str]
+    exact: bool
+    mode: str
+
+
+def _watch_scope_for_locations(locations: list[str], *, exact: bool) -> WatchScope:
+    scopes = [scope_context_for(location) for location in locations]
+    if exact:
+        return WatchScope(
+            roots=list(dict.fromkeys(scope.active_workgroup_root for scope in scopes)),
+            exact=True,
+            mode="exact",
+        )
+    roots: list[str] = []
+    modes: list[str] = []
+    for scope in scopes:
+        roots.extend(scope.observation_roots)
+        modes.append(scope.observation_mode)
+    deduped = list(dict.fromkeys(roots))
+    is_exact = all(mode == "exact" for mode in modes)
+    mode = "exact" if is_exact else ("subtree" if all(mode == "subtree" for mode in modes) else "network")
+    return WatchScope(roots=deduped, exact=is_exact, mode=mode)
+
+
 def _watch_events(
     client: Any,
     *,
     roots: list[str],
     global_events: bool,
+    exact: bool,
     limit: int,
     after_id: int,
 ) -> list[dict[str, object]]:
     if global_events:
         result = client.request("bus.recent_all", {"after_id": after_id, "limit": limit})
+        return _watch_result_events(result)
+    if not exact:
+        result = client.request(
+            "bus.recent_tree",
+            {"workspace_roots": list(dict.fromkeys(roots)), "after_id": after_id, "limit": limit},
+        )
         return _watch_result_events(result)
     events: list[dict[str, object]] = []
     for root in dict.fromkeys(roots):

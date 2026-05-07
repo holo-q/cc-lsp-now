@@ -67,3 +67,33 @@ class WorkgroupDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(context.active_workgroup_root, str(domain.resolve()))
         self.assertEqual(context.project_root, str(domain.resolve()))
+
+    def test_workgroup_observation_policy_supports_network_roots(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            umbrella = Path(root)
+            domain = umbrella / "domain"
+            sibling = umbrella / "sibling"
+            domain.mkdir()
+            sibling.mkdir()
+            (domain / "workgroup.toml").write_text(
+                "[workgroup]\nname = 'domain'\nlevel = 'domain'\n"
+                "[observe]\nmode = 'network'\nroots = ['../sibling']\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict("os.environ", {"HSP_WORKGROUP_BOUNDARY": str(umbrella)}, clear=False):
+                context = scope_context_for(domain)
+
+        self.assertEqual(context.observation_mode, "network")
+        self.assertEqual(
+            context.observation_roots,
+            (str(domain.resolve()), str(sibling.resolve())),
+        )
+
+    def test_fallback_workgroup_observation_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            with patch.dict("os.environ", {"HSP_WORKGROUP_BOUNDARY": root}, clear=False):
+                context = scope_context_for(root)
+
+        self.assertEqual(context.observation_mode, "exact")
+        self.assertEqual(context.observation_roots, (str(Path(root).resolve()),))

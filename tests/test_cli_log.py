@@ -199,7 +199,7 @@ class CliLogTests(unittest.TestCase):
         self.assertIn("agents: 1", out)
         self.assertIn("E2 note.posted done", out)
 
-    def test_watch_once_renders_workgroup_events(self) -> None:
+    def test_watch_once_renders_workgroup_subtree_events(self) -> None:
         class FakeBroker:
             hsp_started = False
 
@@ -217,7 +217,7 @@ class CliLogTests(unittest.TestCase):
                         {
                             "event_id": "E7",
                             "event_type": "tool.before",
-                            "workspace_root": "/workspace/domain",
+                            "workspace_root": "/workspace/domain/app",
                             "agent_id": "agent-a",
                             "message": "Bash cargo check",
                             "files": ["src/lib.py"],
@@ -228,9 +228,47 @@ class CliLogTests(unittest.TestCase):
 
         broker = FakeBroker()
         with tempfile.TemporaryDirectory(dir="tmp") as root:
+            Path(root, "workgroup.toml").write_text(
+                "[workgroup]\nname = 'workspace'\nlevel = 'umbrella'\n",
+                encoding="utf-8",
+            )
             with patch("hsp.cli._open_cli_broker", return_value=broker):
                 out = self._run_with_env(
                     ["watch", "--once", root],
+                    {
+                        "HSP_BROKER": "auto",
+                        "LSP_ROOT": root,
+                        "HSP_WORKGROUP_BOUNDARY": root,
+                    },
+                )
+
+        self.assertEqual(broker.method, "bus.recent_tree")
+        self.assertIn("watch: broker=", out)
+        self.assertIn("scope=", out)
+        self.assertIn("subtree", out)
+        self.assertIn("/workspace/domain/app E7 tool.before Bash cargo check", out)
+        self.assertIn("[files=src/lib.py]", out)
+
+    def test_watch_exact_uses_workspace_scoped_recent(self) -> None:
+        class FakeBroker:
+            hsp_started = False
+
+            def __enter__(self) -> FakeBroker:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+                self.method = method
+                self.params = params
+                return {"events": [], "last_event_id": ""}
+
+        broker = FakeBroker()
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            with patch("hsp.cli._open_cli_broker", return_value=broker):
+                out = self._run_with_env(
+                    ["watch", "--exact", "--once", root],
                     {
                         "HSP_BROKER": "auto",
                         "LSP_ROOT": root,
@@ -239,9 +277,8 @@ class CliLogTests(unittest.TestCase):
                 )
 
         self.assertEqual(broker.method, "bus.recent")
-        self.assertIn("watch: broker=", out)
-        self.assertIn("E7 tool.before Bash cargo check", out)
-        self.assertIn("[files=src/lib.py]", out)
+        self.assertIn("exact", out)
+        self.assertIn("watch: no events", out)
 
     def test_watch_global_once_uses_broker_wide_recent(self) -> None:
         class FakeBroker:
@@ -275,6 +312,50 @@ class CliLogTests(unittest.TestCase):
         self.assertEqual(broker.method, "bus.recent_all")
         self.assertIn("scope=global", out)
         self.assertIn("/workspace/domain E8 hook.received PostToolUse Edit", out)
+
+    def test_watch_uses_workgroup_observation_roots(self) -> None:
+        class FakeBroker:
+            hsp_started = False
+
+            def __enter__(self) -> FakeBroker:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+                self.method = method
+                self.params = params
+                return {"events": [], "last_event_id": ""}
+
+        broker = FakeBroker()
+        with tempfile.TemporaryDirectory(dir="tmp") as root:
+            umbrella = Path(root)
+            domain = umbrella / "domain"
+            sibling = umbrella / "sibling"
+            domain.mkdir()
+            sibling.mkdir()
+            (domain / "workgroup.toml").write_text(
+                "[workgroup]\nname = 'domain'\nlevel = 'domain'\n"
+                "[observe]\nmode = 'network'\nroots = ['../sibling']\n",
+                encoding="utf-8",
+            )
+            with patch("hsp.cli._open_cli_broker", return_value=broker):
+                out = self._run_with_env(
+                    ["watch", "--once", str(domain)],
+                    {
+                        "HSP_BROKER": "auto",
+                        "LSP_ROOT": root,
+                        "HSP_WORKGROUP_BOUNDARY": root,
+                    },
+                )
+
+        self.assertEqual(broker.method, "bus.recent_tree")
+        self.assertEqual(
+            broker.params["workspace_roots"],
+            [str(domain.resolve()), str(sibling.resolve())],
+        )
+        self.assertIn("network", out)
 
     def test_global_command_reports_lsp_sources(self) -> None:
         class FakeBroker:

@@ -104,6 +104,17 @@ class AgentBusPureTests(unittest.TestCase):
             ["/workspace/b"],
         )
 
+    def test_recent_tree_includes_descendant_workgroups(self) -> None:
+        bus = AgentBus()
+        bus.note({"workspace_root": "/workspace", "message": "umbrella"})
+        bus.note({"workspace_root": "/workspace/domain", "message": "domain"})
+        bus.note({"workspace_root": "/workspace-other", "message": "unrelated"})
+
+        recent = bus.recent_tree({"workspace_root": "/workspace"})
+
+        events = cast(list[dict[str, object]], recent["events"])
+        self.assertEqual([event["message"] for event in events], ["umbrella", "domain"])
+
     def test_heartbeat_registers_presence_without_recent_event_noise(self) -> None:
         bus = AgentBus()
 

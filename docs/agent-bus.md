@@ -373,10 +373,29 @@ related motion is nearby. Silence is part of the interface; harness hooks
 should pass output straight through without prefixing or summarizing it.
 
 `hsp watch` is the live operator lens for hook/tool traffic. Without flags it
-tails the current workgroup's broker bus; with `--global` it asks the broker for
-all event rows it has received across workgroups and prefixes each row with the
-workspace root. `--once` prints one snapshot and exits for scripts, debugging
-prompts, and regression tests.
+tails the current workgroup's observation set. Marker-backed workgroups default
+to `subtree`, so an umbrella workgroup sees domain workgroups underneath it;
+fallback workgroups default to `exact`. `--exact` forces the old exact-root
+view, while `--global` asks the broker for all event rows it has received across
+workgroups and prefixes each row with the workspace root. `--once` prints one
+snapshot and exits for scripts, debugging prompts, and regression tests.
+
+Observation can be declared in `workgroup.toml`:
+
+```toml
+[workgroup]
+name = "holoq"
+level = "umbrella"
+observe = "subtree" # exact | subtree | network
+
+[observe]
+mode = "network"
+roots = ["repo-os", "repo-agent"]
+```
+
+`network` keeps the active workgroup root and adds the listed roots. Relative
+roots resolve from the marker directory. Watch uses descendant matching for each
+observed root so a domain root can still see project-local workgroups below it.
 
 The CLI stays warn-first at this layer too. `hsp log` never blocks the
 caller, never claims a file, and never returns a non-zero exit code to gate an
