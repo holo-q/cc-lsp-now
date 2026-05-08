@@ -53,6 +53,32 @@ class CliLogTests(unittest.TestCase):
                 self.assertEqual(server_cfg["command"], "uvx")
                 self.assertEqual(server_cfg["args"][-2:], ["hsp", "mcp"])
 
+    def test_codex_plugin_bundles_workgroup_skills(self) -> None:
+        expected = {
+            "csharp-lsp",
+            "python-lsp",
+            "rust-lsp",
+            "work-session",
+            "work-ticket",
+            "workgroup-coordination",
+        }
+        manifests = [
+            (Path(".codex-plugin/plugin.json"), Path("plugins/hsp/skills")),
+            (Path("plugins/hsp/.codex-plugin/plugin.json"), Path("plugins/hsp/skills")),
+        ]
+        project_version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        for manifest_path, skill_root in manifests:
+            with self.subTest(manifest=str(manifest_path)):
+                data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(data["version"], project_version)
+                self.assertIn("skills", data)
+                for skill in expected:
+                    skill_file = skill_root / skill / "SKILL.md"
+                    self.assertTrue(skill_file.exists(), f"missing {skill_file}")
+                    text = skill_file.read_text(encoding="utf-8")
+                    self.assertIn(f"name: {skill}", text)
+                    self.assertIn("description:", text)
+
     def test_bare_entrypoint_defaults_to_workgroup_status(self) -> None:
         with tempfile.TemporaryDirectory(dir="tmp") as root:
             with contextlib.chdir(root):

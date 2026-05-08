@@ -1,6 +1,6 @@
 {
   "name": "hsp",
-  "version": "0.15.0",
+  "version": "0.15.3",
   "description": "Harness Server Protocol: one MCP plugin that selects the right LSP for the workspace",
   "author": {
     "name": "holo-q"
@@ -8,6 +8,7 @@
   "repository": "https://github.com/holo-q/hsp.git",
   "license": "MIT",
   "keywords": ["hsp", "lsp", "language-server", "python", "csharp", "rust", "mcp"],
+  "skills": "./plugins/hsp/skills",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "HSP",

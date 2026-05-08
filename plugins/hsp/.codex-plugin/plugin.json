@@ -1,6 +1,6 @@
 {
   "name": "hsp",
-  "version": "0.15.0",
+  "version": "0.15.3",
   "description": "Harness Server Protocol: agent-friendly LSP tools with automatic language routing",
   "author": {
     "name": "holo-q",

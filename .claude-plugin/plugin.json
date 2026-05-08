@@ -1,6 +1,6 @@
 {
   "name": "hsp",
-  "version": "0.15.2",
+  "version": "0.15.3",
   "description": "Harness Server Protocol: one MCP plugin that selects the right LSP for the workspace",
   "author": {
     "name": "holo-q"
